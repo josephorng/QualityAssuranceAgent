@@ -599,7 +599,23 @@ def merge_unstarted_recording_steps(
     id_aligned = all(isinstance(event_index, int) for event_index in prefix_ids)
 
     if id_aligned:
-        consumed = {event_index for event_index in prefix_ids if isinstance(event_index, int)}
+        # A jump past a replaced/deleted unstarted step can claim that step as
+        # "completed" even though its event id is gone from disk. Truncate the
+        # completed prefix at the first missing id so the replacement is not
+        # re-appended in the unstarted tail (which would re-run the repair).
+        fresh_id_set = {
+            event_index
+            for event_index in fresh[4]
+            if isinstance(event_index, int)
+        }
+        kept_prefix_ids: list[int] = []
+        for event_index in prefix_ids:
+            if not isinstance(event_index, int) or event_index not in fresh_id_set:
+                break
+            kept_prefix_ids.append(event_index)
+        prefix_len = len(kept_prefix_ids)
+        prefix_ids = list(kept_prefix_ids)
+        consumed = set(kept_prefix_ids)
         tail_indexes = [
             index
             for index, event_index in enumerate(fresh[4])
@@ -730,6 +746,35 @@ def executable_source_line_numbers(raw: str) -> list[int]:
             continue
         numbers.append(index)
     return numbers
+
+
+def step_1based_from_source_line(
+    source_line: int,
+    executable_lines: list[int],
+) -> int | None:
+    """Map a 1-based editor line to a 1-based executable step index.
+
+    Exact executable lines win. Clicks on blank/comment lines use the nearest
+    preceding executable line; clicks above the first step return step 1.
+    """
+    if not executable_lines:
+        return None
+    try:
+        line = int(source_line)
+    except (TypeError, ValueError):
+        return None
+    if line < 1:
+        return 1
+    for index, numbered in enumerate(executable_lines):
+        if numbered == line:
+            return index + 1
+    previous: int | None = None
+    for index, numbered in enumerate(executable_lines):
+        if numbered <= line:
+            previous = index + 1
+            continue
+        break
+    return previous if previous is not None else 1
 
 
 def parse_script_lines(script_path: Path) -> list[str]:

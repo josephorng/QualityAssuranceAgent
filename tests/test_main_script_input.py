@@ -20,6 +20,21 @@ def test_executable_source_line_numbers_skips_blank_and_comments() -> None:
     assert script_helper.executable_source_line_numbers(raw) == [3, 6]
 
 
+def test_step_1based_from_source_line_maps_exact_and_nearest() -> None:
+    lines = [3, 6]
+    assert script_helper.step_1based_from_source_line(3, lines) == 1
+    assert script_helper.step_1based_from_source_line(6, lines) == 2
+    # Blank/comment before first executable → step 1
+    assert script_helper.step_1based_from_source_line(1, lines) == 1
+    assert script_helper.step_1based_from_source_line(2, lines) == 1
+    # Between steps / after last → nearest preceding
+    assert script_helper.step_1based_from_source_line(4, lines) == 1
+    assert script_helper.step_1based_from_source_line(5, lines) == 1
+    assert script_helper.step_1based_from_source_line(7, lines) == 2
+    assert script_helper.step_1based_from_source_line(99, lines) == 2
+    assert script_helper.step_1based_from_source_line(1, []) is None
+
+
 def test_parse_script_lines_skips_blank_and_comments(tmp_path: Path) -> None:
     script = tmp_path / "sample.txt"
     script.write_text(

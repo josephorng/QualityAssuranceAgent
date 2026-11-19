@@ -569,15 +569,29 @@ class BrainModule:
         )
 
     def jump_to_script_step(self, index: int) -> None:
-        """Run ``index`` next. The step already in progress is left to finish."""
+        """Run ``index`` next. The step already in progress is left to finish.
+
+        ``index == len(script_lines)`` means past the last step (next process
+        completes the run). Used after mid-replay repair when there is no
+        following step.
+        """
         if not self.script_lines:
             return
-        target = max(0, min(int(index), len(self.script_lines) - 1))
+        # Allow len(script_lines) = "done"; still clamp above that.
+        target = max(0, min(int(index), len(self.script_lines)))
+        # Drop deferred verify so a prior miss cannot skip a re-recorded step.
+        self._clear_deferred_window_verify()
         if target == self._script_step_index:
             return
-        self.manager.log_info(
-            f"Replay jump: step {self._script_step_index + 1} -> {target + 1}"
-        )
+        if target >= len(self.script_lines):
+            self.manager.log_info(
+                f"Replay jump: step {self._script_step_index + 1} -> past end "
+                f"({len(self.script_lines)} steps)"
+            )
+        else:
+            self.manager.log_info(
+                f"Replay jump: step {self._script_step_index + 1} -> {target + 1}"
+            )
         self._script_step_index = target
 
     def _script_seed_steps(self) -> list[str]:

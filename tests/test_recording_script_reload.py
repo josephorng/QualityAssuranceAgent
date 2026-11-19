@@ -125,6 +125,25 @@ def test_merge_runs_an_inserted_unstarted_step_next() -> None:
     assert event_indices == [0, 1, 2]
 
 
+def test_merge_jump_past_replaced_unstarted_does_not_rerun_repair() -> None:
+    """Pause-before N, re-record N, jump to N+1 must run the following step.
+
+    The replaced event id is gone from disk. Claiming N as completed would keep
+    the stale slot and append the replacement in the tail, so index N+1 would
+    incorrectly re-execute the repair.
+    """
+    lines, _outcomes, event_indices = _merge(
+        step_index=2,
+        lines=["open", "old click", "close"],
+        event_indices=[1, 2, 3],
+        fresh_lines=["open", "new click", "close"],
+        fresh_event_indices=[1, 4, 3],
+    )
+    assert lines == ["open", "new click", "close"]
+    assert event_indices == [1, 4, 3]
+    assert lines[2] == "close"
+
+
 def test_reload_pending_recording_steps_reads_disk(tmp_path: Path, monkeypatch) -> None:
     run_dir = tmp_path / "rec"
     _write_recording(run_dir, ("open", "click save"))

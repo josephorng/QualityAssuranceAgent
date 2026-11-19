@@ -227,3 +227,174 @@ def test_wait_while_paused_blocking_unblocks_on_resume() -> None:
     run_control.resume_run()
     assert done.wait(timeout=2.0)
     t.join(timeout=1.0)
+
+
+def test_run_control_pause_at_step_consume_and_reset() -> None:
+    run_control.reset_run_control()
+    seen: list[int] = []
+    run_control.set_pause_at_step_callback(seen.append)
+    run_control.set_pause_at_step(2)
+    assert run_control.peek_pause_at_step() == 2
+    assert run_control.consume_pause_at_step(1) is False
+    assert run_control.peek_pause_at_step() == 2
+    assert run_control.consume_pause_at_step(2) is True
+    assert run_control.peek_pause_at_step() is None
+    assert run_control.consume_pause_at_step(2) is False
+    run_control.set_pause_at_step(0)
+    run_control.notify_paused_at_step(0)
+    assert seen == [0]
+    run_control.reset_run_control()
+    assert run_control.peek_pause_at_step() is None
+    run_control.notify_paused_at_step(1)
+    assert seen == [0]
+
+
+def test_runtime_coordinator_pauses_before_pause_at_step() -> None:
+    run_control.reset_run_control()
+    paused_at: list[int] = []
+    run_control.set_pause_at_step_callback(paused_at.append)
+    run_control.set_pause_at_step(1)
+
+    class _IndexedBrain:
+        def __init__(self) -> None:
+            self._script_step_index = 0
+            self.process_step_calls = 0
+            self.jumps: list[int] = []
+
+        def jump_to_script_step(self, index: int) -> None:
+            self.jumps.append(index)
+            self._script_step_index = index
+
+        async def process_step(self) -> BrainStepResult:
+            self.process_step_calls += 1
+            current = self._script_step_index
+            self._script_step_index = current + 1
+            if self.process_step_calls == 1:
+                return BrainStepResult(
+                    reason="step 1 ok",
+                    step_finished=True,
+                    run_complete=False,
+                    step_index=current,
+                )
+            return BrainStepResult(
+                reason="All script steps complete",
+                step_finished=True,
+                run_complete=True,
+                step_index=current,
+            )
+
+    coordinator = RuntimeCoordinator.__new__(RuntimeCoordinator)
+    coordinator.brain = _IndexedBrain()
+    coordinator.manager = _FakeManager()
+
+    async def _run_with_breakpoint() -> None:
+        run_task = asyncio.create_task(coordinator.run())
+        # First step should run; then pause before step index 1.
+        for _ in range(40):
+            if paused_at:
+                break
+            await asyncio.sleep(0.05)
+        assert paused_at == [1]
+        assert coordinator.brain.process_step_calls == 1
+        assert run_control.is_paused()
+        assert any(
+            "paused before step 2" in message for message in coordinator.manager.logs
+        )
+        run_control.resume_run()
+        await asyncio.wait_for(run_task, timeout=2.0)
+
+    asyncio.run(_run_with_breakpoint())
+    assert coordinator.brain.process_step_calls == 2
+    assert run_control.peek_pause_at_step() is None
+    run_control.reset_run_control()
+
+
+def test_runtime_coordinator_jump_then_pause_skips_earlier_steps() -> None:
+    """Start-at + pause-at the same index must not execute earlier steps."""
+    run_control.reset_run_control()
+    paused_at: list[int] = []
+    run_control.set_pause_at_step_callback(paused_at.append)
+    run_control.request_step_jump(2)
+    run_control.set_pause_at_step(2)
+
+    class _JumpBrain:
+        def __init__(self) -> None:
+            self._script_step_index = 0
+            self.process_step_calls = 0
+            self.processed: list[int] = []
+
+        def jump_to_script_step(self, index: int) -> None:
+            self._script_step_index = index
+
+        async def process_step(self) -> BrainStepResult:
+            self.process_step_calls += 1
+            current = self._script_step_index
+            self.processed.append(current)
+            self._script_step_index = current + 1
+            return BrainStepResult(
+                reason="done",
+                step_finished=True,
+                run_complete=True,
+                step_index=current,
+            )
+
+    coordinator = RuntimeCoordinator.__new__(RuntimeCoordinator)
+    coordinator.brain = _JumpBrain()
+    coordinator.manager = _FakeManager()
+
+    async def _run() -> None:
+        run_task = asyncio.create_task(coordinator.run())
+        for _ in range(40):
+            if paused_at:
+                break
+            await asyncio.sleep(0.05)
+        assert paused_at == [2]
+        assert coordinator.brain.process_step_calls == 0
+        assert coordinator.brain._script_step_index == 2
+        run_control.resume_run()
+        await asyncio.wait_for(run_task, timeout=2.0)
+
+    asyncio.run(_run())
+    assert coordinator.brain.processed == [2]
+    assert run_control.peek_pause_at_step() is None
+    run_control.reset_run_control()
+
+
+def test_runtime_coordinator_pause_at_step_zero_before_first_process() -> None:
+    run_control.reset_run_control()
+    paused_at: list[int] = []
+    run_control.set_pause_at_step_callback(paused_at.append)
+    run_control.set_pause_at_step(0)
+
+    class _FirstStepBrain:
+        def __init__(self) -> None:
+            self._script_step_index = 0
+            self.process_step_calls = 0
+
+        async def process_step(self) -> BrainStepResult:
+            self.process_step_calls += 1
+            return BrainStepResult(
+                reason="done",
+                step_finished=True,
+                run_complete=True,
+                step_index=0,
+            )
+
+    coordinator = RuntimeCoordinator.__new__(RuntimeCoordinator)
+    coordinator.brain = _FirstStepBrain()
+    coordinator.manager = _FakeManager()
+
+    async def _run() -> None:
+        run_task = asyncio.create_task(coordinator.run())
+        for _ in range(40):
+            if paused_at:
+                break
+            await asyncio.sleep(0.05)
+        assert paused_at == [0]
+        assert coordinator.brain.process_step_calls == 0
+        run_control.resume_run()
+        await asyncio.wait_for(run_task, timeout=2.0)
+
+    asyncio.run(_run())
+    assert coordinator.brain.process_step_calls == 1
+    run_control.reset_run_control()

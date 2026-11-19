@@ -6,7 +6,10 @@ from pathlib import Path
 from src.brain.module import BrainModule
 from src.common.io_utils import append_text, pop_last_nonempty_line
 from src.common.run_control import (
+    consume_pause_at_step,
+    notify_paused_at_step,
     notify_step_status,
+    pause_run,
     set_step_busy,
     take_pause_log,
     take_pending_step_jump,
@@ -55,16 +58,41 @@ class RuntimeCoordinator:
         finally:
             set_runtime_step_undo_handler(None)
 
+    def _apply_pending_step_jump(self) -> None:
+        """Apply a queued overlay/hub jump before the next process_step."""
+        if is_runtime_command_mode():
+            return
+        jump_target = take_pending_step_jump()
+        jump_to_step = getattr(self.brain, "jump_to_script_step", None)
+        if jump_target is not None and callable(jump_to_step):
+            jump_to_step(jump_target)
+
+    async def _maybe_pause_at_upcoming_step(self) -> None:
+        """One-shot pause before tools when pause-at-step matches the next index."""
+        if is_runtime_command_mode():
+            return
+        next_index = getattr(self.brain, "_script_step_index", None)
+        if not isinstance(next_index, int):
+            return
+        if not consume_pause_at_step(next_index):
+            return
+        pause_run()
+        notify_paused_at_step(next_index)
+        if take_pause_log():
+            self.manager.log_info(
+                f"Coordinator paused before step {next_index + 1}"
+            )
+        await wait_while_paused()
+        # Re-record / overlay nav may have queued a jump while paused.
+        self._apply_pending_step_jump()
+
     async def _run_loop(self) -> None:
         while True:
             if take_pause_log():
                 self.manager.log_info("Coordinator paused")
             await wait_while_paused()
-            if not is_runtime_command_mode():
-                jump_target = take_pending_step_jump()
-                jump_to_step = getattr(self.brain, "jump_to_script_step", None)
-                if jump_target is not None and callable(jump_to_step):
-                    jump_to_step(jump_target)
+            self._apply_pending_step_jump()
+            await self._maybe_pause_at_upcoming_step()
             if is_runtime_command_mode():
                 cmd = prompt_runtime_command_popup()
                 if cmd is None:

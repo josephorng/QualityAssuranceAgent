@@ -39,6 +39,8 @@ from src.common.run_control import (
     pause_run,
     peek_pending_step_jump,
     request_step_jump,
+    set_pause_at_step,
+    set_pause_at_step_callback,
     step_is_busy,
     take_pending_step_jump,
     reset_run_control,
@@ -85,6 +87,7 @@ from src.common.script_helper import (
     recording_run_dir,
     resolve_runnable_script_path,
     script_display_name,
+    step_1based_from_source_line,
 )
 from src.common.smart_mode import normalize_smart_goal, resolve_hub_run_mode
 from src.common.settings import (
@@ -97,6 +100,8 @@ from src.common.settings import (
 from src.recorder.capture import RecordingSession
 from src.recorder.hotkey import RECORDING_HOTKEY_DISPLAY, RecordingHotkeyManager
 from src.recorder.rerecord_step import (
+    EmptyRerecordError,
+    RerecordMode,
     StepRerecordSession,
     event_kind_is_rerecordable,
 )
@@ -243,6 +248,10 @@ class _WorkerArgs:
     # Original UI indices aligned with queue_paths (for mid-queue starts / status icons).
     queue_path_indices: list[int] | None = None
     smart_goal: str = ""
+    # 0-based script step to jump to before the first process_step.
+    start_step_index: int = 0
+    # 0-based script step to pause before (one-shot); None = no breakpoint.
+    pause_at_step_index: int | None = None
 
     @property
     def step_mode(self) -> bool:
@@ -542,7 +551,84 @@ class MainHub(ctk.CTk):
         self._mark_script_clean()
         self._apply_script_editor_lock()
         self._refresh_record_button_idle_label()
+        self._reset_script_step_entry()
         self._persist_hub_ui_state()
+
+    def _refresh_open_recording_script_preview(
+        self,
+        *,
+        prefer_step_1based: int | None = None,
+    ) -> None:
+        """Reload the 單一腳本 preview from disk after a recording repair.
+
+        Keeps the open path and step picker; skips when the open script is not
+        the recording being repaired.
+        """
+        try:
+            textbox = object.__getattribute__(self, "_script_text")
+            script_path = object.__getattribute__(self, "_script_path")
+        except AttributeError:
+            return
+        if textbox is None or script_path is None:
+            return
+        if not self._is_recording_script_open():
+            return
+        rec = recording_run_dir(script_path)
+        if rec is None:
+            return
+        try:
+            active = object.__getattribute__(self, "_active_recording_dir")
+        except AttributeError:
+            active = None
+        if active is not None:
+            try:
+                if _resolved_path_key(Path(active)) != _resolved_path_key(rec):
+                    return
+            except Exception:
+                return
+        try:
+            text = load_runnable_script_text(rec)
+        except OSError:
+            return
+
+        kept_step = prefer_step_1based
+        if kept_step is None:
+            try:
+                entry = object.__getattribute__(self, "_script_step_entry")
+            except AttributeError:
+                entry = None
+            if entry is not None:
+                try:
+                    raw = entry.get().strip()
+                    if raw:
+                        kept_step = int(raw)
+                except ValueError:
+                    kept_step = None
+            try:
+                nav = object.__getattribute__(self, "_replay_nav_index")
+            except AttributeError:
+                nav = None
+            if kept_step is None and isinstance(nav, int):
+                kept_step = int(nav) + 1
+
+        self._suppress_script_cache_sync = True
+        try:
+            textbox.configure(state="normal")
+            textbox.delete("0.0", "end")
+            textbox.insert("0.0", text)
+            self._reset_textbox_undo(textbox)
+        finally:
+            self._suppress_script_cache_sync = False
+        self._apply_script_editor_lock()
+        self._clear_script_step_statuses()
+        if getattr(self, "_track_script_step_status", False):
+            self._script_step_status_baseline = self._script_editor_normalized_text()
+        self._refresh_script_line_numbers()
+        self._mark_script_clean()
+        if kept_step is not None and kept_step >= 1:
+            self._set_script_step_entry_value(kept_step)
+        else:
+            self._highlight_script_step(1)
 
     def _validate_recording_folder_for_script(self, folder: Path) -> Path | None:
         """Return the recording folder if it is a valid recording, else None."""
@@ -1131,6 +1217,11 @@ class MainHub(ctk.CTk):
             add="+",
         )
         textbox.bind(
+            "<Button-1>",
+            self._on_script_text_click_select_step,
+            add="+",
+        )
+        textbox.bind(
             "<Configure>",
             lambda _e: self.after_idle(self._on_script_text_configured),
             add="+",
@@ -1142,10 +1233,11 @@ class MainHub(ctk.CTk):
         gutter.bind("<Button-4>", self._forward_script_scroll_from_gutter)
         gutter.bind("<Button-5>", self._forward_script_scroll_from_gutter)
         gutter.bind("<Key>", lambda _e: "break")
-        gutter.bind("<Button-1>", lambda _e: "break")
+        gutter.bind("<Button-1>", self._on_script_gutter_click_select_step)
 
         self._install_script_yscroll_hook()
         self._refresh_script_line_numbers()
+        self._ensure_script_step_select_tag()
 
     def _forward_script_scroll_from_gutter(self, event: Any) -> str:
         textbox = self._script_text._textbox
@@ -1804,11 +1896,49 @@ class MainHub(ctk.CTk):
         self._skip_verification_checkbox.pack(side="left", padx=(16, 0))
         if self._skip_verification:
             self._skip_verification_checkbox.select()
+        self._step_picker_frame = ctk.CTkFrame(
+            self._run_options_row, fg_color="transparent"
+        )
+        self._step_picker_frame.pack(side="left", padx=(16, 0))
+        ctk.CTkLabel(
+            self._step_picker_frame,
+            text="步驟：",
+            font=ctk.CTkFont(size=13),
+        ).pack(side="left")
+        self._step_minus_btn = ctk.CTkButton(
+            self._step_picker_frame,
+            text="−",
+            width=28,
+            height=28,
+            command=lambda: self._nudge_script_step_entry(-1),
+        )
+        self._step_minus_btn.pack(side="left", padx=(4, 2))
+        self._script_step_entry = ctk.CTkEntry(
+            self._step_picker_frame,
+            width=48,
+            height=28,
+            justify="center",
+        )
+        self._script_step_entry.insert(0, "1")
+        self._script_step_entry.pack(side="left")
+        self._script_step_entry.bind(
+            "<KeyRelease>",
+            lambda _e: self.after_idle(self._sync_script_step_highlight_from_entry),
+            add="+",
+        )
+        self._step_plus_btn = ctk.CTkButton(
+            self._step_picker_frame,
+            text="+",
+            width=28,
+            height=28,
+            command=lambda: self._nudge_script_step_entry(1),
+        )
+        self._step_plus_btn.pack(side="left", padx=(2, 0))
         self._actions_btn_row = ctk.CTkFrame(row, fg_color="transparent")
         btn_row = self._actions_btn_row
         btn_row.pack()
         btn_row.grid_columnconfigure(0, weight=1)
-        btn_row.grid_columnconfigure(6, weight=1)
+        btn_row.grid_columnconfigure(7, weight=1)
         self._pause_btn = ctk.CTkButton(
             btn_row,
             text="暫停",
@@ -1826,6 +1956,15 @@ class MainHub(ctk.CTk):
             command=self._on_start_run,
         )
         self._run_btn.grid(row=0, column=2)
+        self._run_and_pause_btn = ctk.CTkButton(
+            btn_row,
+            text="執行並暫停於步驟",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            height=44,
+            width=160,
+            command=self._on_start_run_and_pause_at_step,
+        )
+        self._run_and_pause_btn.grid(row=0, column=3, padx=(12, 0))
         self._record_btn = ctk.CTkButton(
             btn_row,
             text="開始錄製",
@@ -1834,7 +1973,7 @@ class MainHub(ctk.CTk):
             width=120,
             command=self._on_record_button,
         )
-        self._record_btn.grid(row=0, column=3, padx=(12, 0))
+        self._record_btn.grid(row=0, column=4, padx=(12, 0))
         self._open_report_btn = ctk.CTkButton(
             btn_row,
             text="開啟報告",
@@ -1851,7 +1990,7 @@ class MainHub(ctk.CTk):
             width=120,
             command=self._open_reports_index,
         )
-        self._open_reports_index_btn.grid(row=0, column=5, padx=(12, 0), sticky="w")
+        self._open_reports_index_btn.grid(row=0, column=6, padx=(12, 0), sticky="w")
         self._analysis_progress_frame = ctk.CTkFrame(row, fg_color="transparent")
         self._analysis_progress = ctk.CTkProgressBar(
             self._analysis_progress_frame,
@@ -1889,6 +2028,20 @@ class MainHub(ctk.CTk):
         ):
             if checkbox is not None:
                 checkbox.configure(state=state)
+        self._set_step_picker_state(state)
+
+    def _set_step_picker_state(self, state: str) -> None:
+        for widget in (
+            getattr(self, "_script_step_entry", None),
+            getattr(self, "_step_minus_btn", None),
+            getattr(self, "_step_plus_btn", None),
+            getattr(self, "_run_and_pause_btn", None),
+        ):
+            if widget is not None:
+                try:
+                    widget.configure(state=state)
+                except Exception:
+                    pass
 
     def _on_use_tool_cache_changed(self) -> None:
         self._use_tool_cache = self._use_tool_cache_checkbox.get() == 1
@@ -1905,12 +2058,198 @@ class MainHub(ctk.CTk):
             return
         if selected == _MODE_TAB_SMART:
             options.pack_forget()
+            self._sync_step_run_controls_for_mode(selected)
             return
         btn_row = getattr(self, "_actions_btn_row", None)
         if btn_row is not None:
             options.pack(pady=(0, 10), before=btn_row)
         else:
             options.pack(pady=(0, 10))
+        self._sync_step_run_controls_for_mode(selected)
+
+    def _sync_step_run_controls_for_mode(self, selected: str | None = None) -> None:
+        """Show step picker / pause-at button only in 單一腳本 mode."""
+        if selected is None:
+            try:
+                selected = self._mode_tabs.get()
+            except Exception:
+                selected = _MODE_TAB_SINGLE
+        show = selected == _MODE_TAB_SINGLE
+        picker = getattr(self, "_step_picker_frame", None)
+        pause_btn = getattr(self, "_run_and_pause_btn", None)
+        if picker is not None:
+            try:
+                if show:
+                    if not picker.winfo_ismapped():
+                        picker.pack(side="left", padx=(16, 0))
+                else:
+                    picker.pack_forget()
+            except Exception:
+                pass
+        if pause_btn is not None:
+            try:
+                if show:
+                    pause_btn.grid(row=0, column=3, padx=(12, 0))
+                else:
+                    pause_btn.grid_remove()
+            except Exception:
+                pass
+
+    def _nudge_script_step_entry(self, delta: int) -> None:
+        entry = getattr(self, "_script_step_entry", None)
+        if entry is None:
+            return
+        try:
+            raw = entry.get().strip()
+            value = int(raw) if raw else 1
+        except ValueError:
+            value = 1
+        value = max(1, value + int(delta))
+        self._set_script_step_entry_value(value)
+
+    def _reset_script_step_entry(self) -> None:
+        self._set_script_step_entry_value(1)
+
+    def _set_script_step_entry_value(self, step_1based: int) -> None:
+        """Write the step entry and highlight the matching script line."""
+        entry = getattr(self, "_script_step_entry", None)
+        if entry is None:
+            return
+        value = max(1, int(step_1based))
+        try:
+            was = str(entry.cget("state"))
+        except Exception:
+            was = "normal"
+        try:
+            if was == "disabled":
+                entry.configure(state="normal")
+            entry.delete(0, "end")
+            entry.insert(0, str(value))
+            if was == "disabled":
+                entry.configure(state="disabled")
+        except Exception:
+            return
+        self._highlight_script_step(value)
+
+    def _sync_script_step_highlight_from_entry(self) -> None:
+        """Keep the script highlight aligned when the step field is typed."""
+        entry = getattr(self, "_script_step_entry", None)
+        if entry is None:
+            return
+        try:
+            raw = entry.get().strip()
+            if not raw:
+                return
+            value = int(raw)
+        except ValueError:
+            return
+        if value < 1:
+            return
+        self._highlight_script_step(value)
+
+    def _ensure_script_step_select_tag(self) -> None:
+        textbox = getattr(self, "_script_text", None)
+        if textbox is None:
+            return
+        tb = textbox._textbox
+        appearance = ctk.get_appearance_mode()
+        background = "#3a4a5c" if appearance == "Dark" else "#dbeafe"
+        try:
+            tb.tag_configure("step_select", background=background)
+            # Keep selection highlight under the caret/selection visuals.
+            tb.tag_lower("step_select")
+        except Exception:
+            pass
+
+    def _highlight_script_step(self, step_1based: int) -> None:
+        textbox = getattr(self, "_script_text", None)
+        if textbox is None:
+            return
+        self._ensure_script_step_select_tag()
+        tb = textbox._textbox
+        try:
+            tb.tag_remove("step_select", "1.0", "end")
+        except Exception:
+            return
+        try:
+            raw = textbox.get("0.0", "end")
+        except Exception:
+            return
+        numbers = executable_source_line_numbers(raw)
+        if step_1based < 1 or step_1based > len(numbers):
+            return
+        line = numbers[step_1based - 1]
+        try:
+            tb.tag_add("step_select", f"{line}.0", f"{line}.0 lineend + 1 chars")
+        except Exception:
+            pass
+
+    def _select_script_step_from_source_line(self, source_line: int) -> None:
+        try:
+            raw = self._script_text.get("0.0", "end")
+        except Exception:
+            return
+        step = step_1based_from_source_line(
+            source_line,
+            executable_source_line_numbers(raw),
+        )
+        if step is None:
+            return
+        self._set_script_step_entry_value(step)
+
+    def _on_script_text_click_select_step(self, event: Any) -> None:
+        """Clicking a script line fills the 步驟 entry (works while read-only)."""
+        try:
+            index = self._script_text._textbox.index(f"@{event.x},{event.y}")
+            source_line = int(str(index).split(".", 1)[0])
+        except Exception:
+            return
+        self._select_script_step_from_source_line(source_line)
+
+    def _on_script_gutter_click_select_step(self, event: Any) -> str:
+        """Line-number gutter click selects the aligned script step."""
+        try:
+            # Same viewport y as the script text (scrolls stay locked together).
+            index = self._script_text._textbox.index(f"@2,{event.y}")
+            source_line = int(str(index).split(".", 1)[0])
+        except Exception:
+            return "break"
+        self._select_script_step_from_source_line(source_line)
+        return "break"
+
+    def _parse_script_step_entry_1based(self, *, step_count: int) -> int | None:
+        """Return a valid 1-based step number, or None after showing a warning."""
+        entry = getattr(self, "_script_step_entry", None)
+        raw = entry.get().strip() if entry is not None else "1"
+        if not raw:
+            raw = "1"
+        try:
+            value = int(raw)
+        except ValueError:
+            show_ctk_message(
+                self,
+                "執行",
+                "步驟必須是正整數。",
+                kind="warning",
+            )
+            return None
+        if step_count <= 0:
+            show_ctk_message(
+                self,
+                "執行",
+                "目前沒有可執行的步驟。",
+                kind="warning",
+            )
+            return None
+        if value < 1 or value > step_count:
+            show_ctk_message(
+                self,
+                "執行",
+                f"步驟必須介於 1 到 {step_count}。",
+                kind="warning",
+            )
+            return None
+        return value
 
     def _tool_cache_enabled_for_run(self) -> bool:
         try:
@@ -1924,7 +2263,7 @@ class MainHub(ctk.CTk):
         if not html_path.is_file():
             return
         self._last_report_html = html_path
-        self._open_report_btn.grid(row=0, column=4, padx=(12, 0), sticky="w")
+        self._open_report_btn.grid(row=0, column=5, padx=(12, 0), sticky="w")
 
     def _hide_report_button(self) -> None:
         self._last_report_html = None
@@ -1983,10 +2322,23 @@ class MainHub(ctk.CTk):
 
     def _set_run_button_idle(self) -> None:
         self._run_btn.configure(text="開始執行", command=self._on_start_run, state="normal")
+        pause_at = getattr(self, "_run_and_pause_btn", None)
+        if pause_at is not None:
+            try:
+                pause_at.configure(state="normal")
+            except Exception:
+                pass
         self._pause_btn.grid_remove()
+        self._sync_step_run_controls_for_mode()
 
     def _set_run_button_running(self) -> None:
         self._run_btn.configure(text="停止執行", command=self._on_stop_run, state="normal")
+        pause_at = getattr(self, "_run_and_pause_btn", None)
+        if pause_at is not None:
+            try:
+                pause_at.configure(state="disabled")
+            except Exception:
+                pass
         self._pause_btn.configure(text="暫停", command=self._on_pause_run, state="normal")
         self._pause_btn.grid(row=0, column=1, padx=(0, 12))
 
@@ -2283,6 +2635,7 @@ class MainHub(ctk.CTk):
         self._mark_script_clean()
         self._apply_script_editor_lock()
         self._refresh_record_button_idle_label()
+        self._reset_script_step_entry()
         self._status.configure(text="", text_color=("gray20", "gray65"))
         self._persist_hub_ui_state()
 
@@ -2477,8 +2830,28 @@ class MainHub(ctk.CTk):
             self,
             on_stop=self._on_record_button,
         )
-        self._recording_uia_status_overlay = RecordingUiaStatusOverlay(self)
-        self._recording_uia_status_overlay.set_state("red")
+        self._show_recording_uia_status_overlay()
+
+    def _show_recording_uia_status_overlay(self) -> None:
+        """Show the settle-UIA LED + EFP strip (recording or mid-replay re-record)."""
+        self._destroy_recording_uia_status_overlay()
+        overlay = RecordingUiaStatusOverlay(self)
+        self._recording_uia_status_overlay = overlay
+        overlay.set_state("red")
+        try:
+            self.after(0, overlay.ensure_visible)
+            self.after(100, overlay.ensure_visible)
+        except Exception:
+            pass
+
+    def _destroy_recording_uia_status_overlay(self) -> None:
+        status = self._recording_uia_status_overlay
+        self._recording_uia_status_overlay = None
+        if status is not None:
+            try:
+                status.destroy()
+            except Exception:
+                pass
 
     def _on_recording_uia_status(self, payload: dict) -> None:
         """Settle-UIA LED + idle EFP label (capture threads → Tk)."""
@@ -2552,6 +2925,7 @@ class MainHub(ctk.CTk):
             return
         self._replay_nav_held = True
         self._replay_nav_index = target
+        self._replay_run_index = target
         request_step_jump(target)
         self._on_pause_run()
         self._show_replay_step(target)
@@ -2639,7 +3013,9 @@ class MainHub(ctk.CTk):
             on_edit=self._on_edit_replay_step,
             on_delete=self._on_delete_replay_step,
             on_rerecord=self._on_rerecord_replay_step,
+            on_insert_rerecord=self._on_insert_rerecord_replay_step,
             on_cancel_rerecord=self._cancel_replay_rerecord,
+            on_finish_rerecord=self._on_finish_replay_rerecord,
             on_save_edit=self._on_save_replay_step_edit,
             on_open_report=self._on_open_replay_step_report,
             on_previous=lambda: self._on_replay_step_delta(-1),
@@ -2679,11 +3055,12 @@ class MainHub(ctk.CTk):
 
     def _cancel_replay_rerecord(self) -> None:
         """Disarm mid-replay re-record without writing."""
-        if self._step_rerecord.is_armed():
+        if self._step_rerecord.is_active():
             self._step_rerecord.cancel()
         overlay = self._replay_overlay
         if overlay is not None and overlay.is_rerecording():
             overlay.end_rerecord()
+        self._destroy_recording_uia_status_overlay()
 
     def _current_replay_event_kind(self) -> str | None:
         recording_dir = self._active_recording_dir
@@ -2700,23 +3077,32 @@ class MainHub(ctk.CTk):
         return kind if isinstance(kind, str) else None
 
     def _on_rerecord_replay_step(self) -> None:
-        """Pause and arm a one-shot capture that overwrites the current event."""
+        """Pause and arm multi-action capture that replaces the current event."""
+        self._begin_replay_gesture_capture(mode="replace")
+
+    def _on_insert_rerecord_replay_step(self) -> None:
+        """Pause and arm multi-action capture that inserts after the current event."""
+        self._begin_replay_gesture_capture(mode="insert_after")
+
+    def _begin_replay_gesture_capture(self, *, mode: RerecordMode) -> None:
+        """Shared arm path for 重新錄製 (replace) and 插入錄製 (insert after)."""
+        title = "插入錄製" if mode == "insert_after" else "重新錄製"
         overlay = self._replay_overlay
         if overlay is None or overlay.is_editing() or overlay.is_rerecording():
             return
-        if self._recording_session.is_active() or self._step_rerecord.is_armed():
+        if self._recording_session.is_active() or self._step_rerecord.is_active():
             show_ctk_message(
                 self,
-                "重新錄製",
-                "目前已有錄製進行中，無法同時重新錄製步驟。",
+                title,
+                f"目前已有錄製進行中，無法同時{title}。",
                 kind="warning",
             )
             return
         if step_is_busy():
             show_ctk_message(
                 self,
-                "重新錄製",
-                "這個步驟仍在執行中，請等到暫停後再重新錄製。",
+                title,
+                f"這個步驟仍在執行中，請等到暫停後再{title}。",
                 kind="warning",
             )
             return
@@ -2730,89 +3116,251 @@ class MainHub(ctk.CTk):
         if event_index is None:
             show_ctk_message(
                 self,
-                "重新錄製",
+                title,
                 "找不到這個步驟的錄製內容。",
                 kind="warning",
             )
             return
-        if not event_kind_is_rerecordable(kind):
+        if mode == "replace" and not event_kind_is_rerecordable(kind):
             show_ctk_message(
                 self,
-                "重新錄製",
-                "目前只支援重新錄製單擊、雙擊或右鍵點擊步驟。",
+                title,
+                "這個步驟類型目前不支援重新錄製。",
                 kind="warning",
             )
             return
         display_index = self._replay_display_index()
+        # LED/EFP strip before capture.start so the initial red emit is visible.
+        self._show_recording_uia_status_overlay()
         try:
             self._step_rerecord.arm(
                 run_dir=Path(recording_dir),
                 event_index=event_index,
+                mode=mode,
                 ignore_rect_provider=self._replay_rerecord_ignore_rect_provider,
+                on_uia_status=self._on_recording_uia_status,
                 on_done=lambda result, step=display_index: self.after(
                     0,
                     lambda: self._on_replay_rerecord_done(result, step),
                 ),
-                on_error=lambda exc: self.after(
-                    0, lambda: self._on_replay_rerecord_error(exc)
+                on_error=lambda exc, capture_mode=mode: self.after(
+                    0, lambda: self._on_replay_rerecord_error(exc, mode=capture_mode)
                 ),
-                on_cancelled=lambda: self.after(0, self._on_replay_rerecord_cancelled),
+                on_cancelled=lambda capture_mode=mode: self.after(
+                    0, lambda: self._on_replay_rerecord_cancelled(mode=capture_mode)
+                ),
             )
         except Exception as exc:
+            self._destroy_recording_uia_status_overlay()
             show_ctk_message(
                 self,
-                "重新錄製",
-                f"無法開始重新錄製：\n{exc}",
+                title,
+                f"無法開始{title}：\n{exc}",
                 kind="error",
             )
             return
-        overlay.begin_rerecord("請執行正確的點擊動作（Esc 取消）")
-        self._status.configure(text="已暫停（重新錄製中：請執行正確動作）")
+        if mode == "insert_after":
+            prompt = "請執行要插入的動作，完成後按「完成錄製」（Esc 取消）"
+            status = "已暫停（插入錄製中：請執行動作後按完成錄製）"
+        else:
+            prompt = "請執行正確動作，完成後按「完成錄製」（Esc 取消）"
+            status = "已暫停（重新錄製中：請執行動作後按完成錄製）"
+        overlay.begin_rerecord(prompt)
+        try:
+            self._pause_btn.configure(state="disabled")
+        except Exception:
+            pass
+        self._status.configure(text=status)
 
-    def _on_replay_rerecord_cancelled(self) -> None:
+    def _restore_pause_button_after_rerecord(self) -> None:
+        """Re-enable hub 繼續 after re-record ends (still paused)."""
+        if not is_paused():
+            return
+        try:
+            self._set_pause_button_paused()
+        except Exception:
+            pass
+
+    def _on_finish_replay_rerecord(self) -> None:
+        """Stop multi-action capture and splice the new gestures into the recording."""
+        if not self._step_rerecord.is_armed():
+            return
+        mode = self._step_rerecord.capture_mode()
+        label = "插入錄製" if mode == "insert_after" else "重新錄製"
+        self._destroy_recording_uia_status_overlay()
+        overlay = self._replay_overlay
+        if overlay is not None:
+            overlay.set_rerecord_message(f"正在處理{label}…")
+        self._status.configure(text=f"已暫停（正在處理{label}…）")
+        self._step_rerecord.finish()
+
+    def _on_replay_rerecord_cancelled(self, *, mode: RerecordMode = "replace") -> None:
+        self._destroy_recording_uia_status_overlay()
         overlay = self._replay_overlay
         if overlay is not None and overlay.is_rerecording():
             overlay.end_rerecord()
+        self._restore_pause_button_after_rerecord()
         if is_paused():
-            self._status.configure(text="已暫停（已取消重新錄製）")
+            label = "插入錄製" if mode == "insert_after" else "重新錄製"
+            self._status.configure(text=f"已暫停（已取消{label}）")
 
-    def _on_replay_rerecord_error(self, exc: BaseException) -> None:
+    def _on_replay_rerecord_error(
+        self,
+        exc: BaseException,
+        *,
+        mode: RerecordMode = "replace",
+    ) -> None:
+        title = "插入錄製" if mode == "insert_after" else "重新錄製"
+        self._destroy_recording_uia_status_overlay()
         overlay = self._replay_overlay
         if overlay is not None:
             overlay.end_rerecord()
             overlay.set_rerecord_message("")
+        self._restore_pause_button_after_rerecord()
+        if isinstance(exc, EmptyRerecordError):
+            empty_msg = (
+                str(exc)
+                or (
+                    "沒有錄到任何動作，未插入步驟。"
+                    if mode == "insert_after"
+                    else "沒有錄到任何動作，原步驟未變更。"
+                )
+            )
+            show_ctk_message(self, title, empty_msg, kind="warning")
+            if is_paused():
+                self._status.configure(text=f"已暫停（{title}未變更步驟）")
+            return
         show_ctk_message(
             self,
-            "重新錄製",
-            f"重新錄製失敗：\n{exc}",
+            title,
+            f"{title}失敗：\n{exc}",
             kind="error",
         )
         if is_paused():
-            self._status.configure(text="已暫停（重新錄製失敗）")
+            self._status.configure(text=f"已暫停（{title}失敗）")
 
     def _on_replay_rerecord_done(
         self,
         result: dict[str, Any],
         display_index: int | None,
     ) -> None:
-        """Apply the overwritten step, jump back to it, and resume replay."""
+        """Apply spliced steps, jump past the repair block, and stay paused."""
+        self._destroy_recording_uia_status_overlay()
         overlay = self._replay_overlay
         if overlay is not None:
             overlay.end_rerecord()
-        instruction = result.get("instruction")
-        cleaned = instruction.strip() if isinstance(instruction, str) else ""
+        self._restore_pause_button_after_rerecord()
+        mode_raw = result.get("mode")
+        mode: RerecordMode = (
+            "insert_after" if mode_raw == "insert_after" else "replace"
+        )
         step = display_index if isinstance(display_index, int) else self._replay_display_index()
-        if step is not None and cleaned:
-            while len(self._replay_step_instructions) <= step:
-                self._replay_step_instructions.append("")
-            self._replay_step_instructions[step] = cleaned
-            self._show_replay_step(step)
-        if step is not None:
-            self._replay_nav_index = step
+        instructions_raw = result.get("instructions")
+        event_indices_raw = result.get("event_indices")
+        placeholder = "(插入錄製步驟)" if mode == "insert_after" else "(重新錄製步驟)"
+        instructions: list[str] = []
+        if isinstance(instructions_raw, list):
+            for item in instructions_raw:
+                if isinstance(item, str) and item.strip():
+                    instructions.append(item.strip())
+                else:
+                    instructions.append(str(item or "").strip() or placeholder)
+        # Legacy single-instruction payload.
+        if not instructions:
+            single = result.get("instruction")
+            if isinstance(single, str) and single.strip():
+                instructions = [single.strip()]
+        new_event_indices: list[int | None] = []
+        if isinstance(event_indices_raw, list):
+            for item in event_indices_raw:
+                new_event_indices.append(item if isinstance(item, int) else None)
+        while len(new_event_indices) < len(instructions):
+            new_event_indices.append(None)
+        new_event_indices = new_event_indices[: len(instructions)]
+
+        resume_at: int | None = None
+        if step is not None and instructions:
+            if mode == "insert_after":
+                block_start = step + 1
+                count = len(instructions)
+                shifted: dict[int, str] = {}
+                for index, text in self._replay_step_errors.items():
+                    if index >= block_start:
+                        shifted[index + count] = text
+                    else:
+                        shifted[index] = text
+                self._replay_step_errors = shifted
+                while len(self._replay_step_instructions) < block_start:
+                    self._replay_step_instructions.append("")
+                while len(self._replay_event_indices) < len(self._replay_step_instructions):
+                    self._replay_event_indices.append(None)
+                self._replay_step_instructions[block_start:block_start] = instructions
+                self._replay_event_indices[block_start:block_start] = new_event_indices
+            else:
+                block_start = step
+                self._replay_step_errors.pop(step, None)
+                # Shift errors for steps after the replaced index when inserting extras.
+                extra = max(0, len(instructions) - 1)
+                if extra:
+                    shifted = {}
+                    for index, text in self._replay_step_errors.items():
+                        if index > step:
+                            shifted[index + extra] = text
+                        else:
+                            shifted[index] = text
+                    self._replay_step_errors = shifted
+                while len(self._replay_step_instructions) <= step:
+                    self._replay_step_instructions.append("")
+                while len(self._replay_event_indices) < len(self._replay_step_instructions):
+                    self._replay_event_indices.append(None)
+                self._replay_step_instructions[step : step + 1] = instructions
+                self._replay_event_indices[step : step + 1] = new_event_indices
+
+            # Land after the whole repair block (not on the first new step).
+            resume_at = block_start + len(instructions)
+            total = len(self._replay_step_instructions)
             self._replay_nav_held = True
-            request_step_jump(step)
-        self._status.configure(text="步驟已重新錄製，繼續執行…")
-        self._on_resume_run()
+            if resume_at < total:
+                self._replay_nav_index = resume_at
+                self._replay_run_index = resume_at
+                request_step_jump(resume_at)
+                self._show_replay_step(resume_at)
+            else:
+                # No following step: brain past-end; overlay stays on last new step.
+                focus = total - 1 if total > 0 else None
+                self._replay_nav_index = focus
+                self._replay_run_index = total
+                request_step_jump(total)
+                self._show_replay_step(focus)
+
+        has_following = (
+            isinstance(resume_at, int)
+            and resume_at < len(self._replay_step_instructions)
+        )
+        if mode == "insert_after":
+            status = (
+                "已暫停（步驟已插入，請按「繼續」從下一個步驟執行）"
+                if has_following
+                else "已暫停（步驟已插入，已無後續步驟）"
+            )
+        else:
+            status = (
+                "已暫停（步驟已重新錄製，請按「繼續」從下一個步驟執行）"
+                if has_following
+                else "已暫停（步驟已重新錄製，已無後續步驟）"
+            )
+        self._status.configure(text=status)
+        if overlay is not None:
+            try:
+                overlay.set_rerecord_message("")
+            except Exception:
+                pass
+        prefer = (
+            (self._replay_nav_index + 1)
+            if isinstance(self._replay_nav_index, int)
+            else None
+        )
+        self._refresh_open_recording_script_preview(prefer_step_1based=prefer)
 
     def _current_replay_event_index(self) -> int | None:
         """Recording event id for the step the overlay is showing."""
@@ -2923,12 +3471,19 @@ class MainHub(ctk.CTk):
             return
         if keep_in_session:
             self._set_replay_delete_status("已從錄製刪除，這次執行仍保留此步驟的位置")
+            self._refresh_open_recording_script_preview()
             return
         self._drop_replay_step_from_overlay(display_index)
         if self._replay_step_instructions:
             self._set_replay_delete_status("已刪除步驟，繼續後會從下一個步驟執行")
         else:
             self._set_replay_delete_status("已刪除最後一個步驟")
+        prefer = (
+            (self._replay_nav_index + 1)
+            if isinstance(self._replay_nav_index, int)
+            else None
+        )
+        self._refresh_open_recording_script_preview(prefer_step_1based=prefer)
 
     def _drop_replay_step_from_overlay(self, display_index: int) -> None:
         """Remove one not-yet-started step from the overlay list."""
@@ -3062,6 +3617,8 @@ class MainHub(ctk.CTk):
             self._status.configure(text="已暫停（步驟內容已儲存）")
         else:
             self._status.configure(text="步驟內容已儲存")
+        prefer = (step + 1) if isinstance(step, int) else None
+        self._refresh_open_recording_script_preview(prefer_step_1based=prefer)
         return True
 
     def _persist_replay_step_edit(
@@ -3165,10 +3722,7 @@ class MainHub(ctk.CTk):
         self._recording_stop_overlay = None
         if overlay is not None:
             overlay.destroy()
-        status = self._recording_uia_status_overlay
-        self._recording_uia_status_overlay = None
-        if status is not None:
-            status.destroy()
+        self._destroy_recording_uia_status_overlay()
 
     def _schedule_toggle_recording(self) -> None:
         self.after(0, self._toggle_recording)
@@ -3294,8 +3848,11 @@ class MainHub(ctk.CTk):
         # Hub minimize must not hide the UIA LED (it is not transient); re-pin.
         status = self._recording_uia_status_overlay
         if status is not None:
-            self.after(0, status.ensure_visible)
-            self.after(100, status.ensure_visible)
+            try:
+                self.after(0, status.ensure_visible)
+                self.after(100, status.ensure_visible)
+            except Exception:
+                pass
 
     def _on_recording_event(self, event: RecordedEvent) -> None:
         self._vision_prefetch.enqueue(event)
@@ -3836,6 +4393,7 @@ class MainHub(ctk.CTk):
         reset_run_control()
         set_active_step_callback(self._on_active_step_from_worker)
         set_script_steps_callback(self._on_script_steps_from_worker)
+        set_pause_at_step_callback(self._on_paused_at_step_from_worker)
         self._track_script_step_status = args.run_mode in ("script", "runtime")
         set_step_status_callback(self._on_step_status_from_worker)
         self._set_run_button_running()
@@ -3859,11 +4417,62 @@ class MainHub(ctk.CTk):
                 else None
             )
             self._remember_replay_steps(args.script_raw, recording_dir)
+        # After remember (clears pending jump): queue start-at and pause-at.
+        start_idx = max(0, int(args.start_step_index or 0))
+        pause_idx: int | None = None
+        if args.pause_at_step_index is not None:
+            pause_idx = max(0, int(args.pause_at_step_index))
+        if args.run_mode == "script" and self._replay_step_instructions:
+            last = len(self._replay_step_instructions) - 1
+            start_idx = min(start_idx, last)
+            if pause_idx is not None:
+                pause_idx = min(pause_idx, last)
+            if start_idx > 0:
+                request_step_jump(start_idx)
+            show_idx = pause_idx if pause_idx is not None else start_idx
+            self._replay_nav_index = show_idx
+            self._replay_run_index = show_idx
+            self._replay_nav_held = start_idx > 0 or pause_idx is not None
+        if pause_idx is not None:
+            set_pause_at_step(pause_idx)
         self._show_replay_overlay()
+        if (
+            args.run_mode == "script"
+            and self._replay_overlay is not None
+            and self._replay_step_instructions
+            and (start_idx > 0 or pause_idx is not None)
+        ):
+            self._show_replay_step(
+                pause_idx if pause_idx is not None else start_idx
+            )
         self._worker_thread = threading.Thread(target=self._worker_main, args=(args,), daemon=True)
         self._worker_thread.start()
         self.after(80, self._poll_worker_finished)
         self.after_idle(self.iconify)
+
+    def _on_paused_at_step_from_worker(self, step_index: int) -> None:
+        """Coordinator paused before ``step_index``; sync overlay on the Tk thread."""
+
+        def apply() -> None:
+            self._replay_nav_held = False
+            self._replay_nav_index = step_index
+            self._replay_run_index = step_index
+            self._set_pause_button_paused()
+            overlay = self._replay_overlay
+            if overlay is not None:
+                try:
+                    overlay.set_paused(True)
+                except Exception:
+                    pass
+            self._show_replay_step(step_index)
+            self._status.configure(
+                text=f"已暫停於步驟 {step_index + 1}（可重新錄製／插入錄製或點繼續）"
+            )
+
+        try:
+            self.after(0, apply)
+        except Exception:
+            apply()
 
     def _runtime_command_transcript_path(self) -> Path:
         settings = load_settings()
@@ -3980,7 +4589,11 @@ class MainHub(ctk.CTk):
         )
         self._begin_worker_run(args)
 
-    def _on_start_run(self) -> None:
+    def _on_start_run_and_pause_at_step(self) -> None:
+        """Jump to the chosen step and pause before executing it (repair entry)."""
+        self._on_start_run(pause_at_chosen_step=True)
+
+    def _on_start_run(self, *, pause_at_chosen_step: bool = False) -> None:
         if self._recording_session.is_active():
             show_ctk_message(self, "執行", "請先停止錄製再開始執行。", kind="warning")
             return
@@ -4018,13 +4631,36 @@ class MainHub(ctk.CTk):
         )
 
         if run_mode == "queue":
+            if pause_at_chosen_step:
+                show_ctk_message(
+                    self,
+                    "執行",
+                    "「執行並暫停於步驟」僅適用於單一腳本模式。",
+                    kind="warning",
+                )
+                return
             self._start_queue_run(eye_indices)
             return
         if run_mode == "smart":
+            if pause_at_chosen_step:
+                show_ctk_message(
+                    self,
+                    "執行",
+                    "「執行並暫停於步驟」僅適用於單一腳本模式。",
+                    kind="warning",
+                )
+                return
             self._start_smart_run(eye_indices)
             return
 
         if run_mode == "script":
+            step_1based = self._parse_script_step_entry_1based(step_count=len(steps))
+            if step_1based is None:
+                return
+            # Both buttons start at the chosen step. Pause-at also stops before
+            # that step runs (skip earlier steps; ready for 重新錄製 / 插入錄製).
+            start_step_index = step_1based - 1
+            pause_at_step_index = (step_1based - 1) if pause_at_chosen_step else None
             # Opened script file, cache transcript, or typed commands → run as one script task.
             if self._script_path is not None:
                 script_disk_path = self._script_path
@@ -4041,8 +4677,18 @@ class MainHub(ctk.CTk):
                 script_disk_path=script_disk_path,
                 use_tool_cache=self._tool_cache_enabled_for_run(),
                 skip_verification=self._skip_verification_enabled(),
+                start_step_index=start_step_index,
+                pause_at_step_index=pause_at_step_index,
             )
         else:
+            if pause_at_chosen_step:
+                show_ctk_message(
+                    self,
+                    "執行",
+                    "「執行並暫停於步驟」需要腳本中有步驟。",
+                    kind="warning",
+                )
+                return
             # Empty script box → interactive step-by-step runtime commands.
             self._last_run_was_script_mode = False
             cache_path = self._runtime_command_transcript_path()

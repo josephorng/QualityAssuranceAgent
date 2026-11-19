@@ -27,6 +27,10 @@ _active_step_instruction: str | None = None
 _active_step_event_index: int | None = None
 _active_step_callback: _ActiveStepCallback | None = None
 _pending_step_jump: int | None = None
+# One-shot: pause before executing this 0-based script step.
+_pause_at_step: int | None = None
+_PauseAtStepCallback = Callable[[int], None]
+_pause_at_step_callback: _PauseAtStepCallback | None = None
 _script_step_lines: list[str] = []
 _script_step_event_indices: list[int | None] = []
 _ScriptStepsCallback = Callable[[list[str], list[int | None]], None]
@@ -130,12 +134,15 @@ def clear_active_step() -> None:
     global _active_step_index, _active_step_instruction, _active_step_event_index
     global _active_step_callback, _pending_step_jump, _script_steps_callback
     global _script_step_lines, _script_step_event_indices
+    global _pause_at_step, _pause_at_step_callback
     with _active_step_lock:
         _active_step_index = None
         _active_step_instruction = None
         _active_step_event_index = None
         _active_step_callback = None
         _pending_step_jump = None
+        _pause_at_step = None
+        _pause_at_step_callback = None
         _script_steps_callback = None
         _script_step_lines = []
         _script_step_event_indices = []
@@ -196,6 +203,53 @@ def peek_pending_step_jump() -> int | None:
     """Return a queued step jump without clearing it."""
     with _active_step_lock:
         return _pending_step_jump
+
+
+def set_pause_at_step(index: int | None) -> None:
+    """Pause once before the coordinator executes 0-based script step ``index``.
+
+    Pass ``None`` to clear. Cleared automatically by ``consume_pause_at_step``
+    or ``reset_run_control``.
+    """
+    global _pause_at_step
+    with _active_step_lock:
+        if index is None:
+            _pause_at_step = None
+            return
+        _pause_at_step = int(index)
+
+
+def peek_pause_at_step() -> int | None:
+    """Return the pending pause-at step without consuming it."""
+    with _active_step_lock:
+        return _pause_at_step
+
+
+def consume_pause_at_step(current_index: int) -> bool:
+    """If ``current_index`` matches the pause-at target, clear it and return True."""
+    global _pause_at_step
+    with _active_step_lock:
+        if _pause_at_step is None:
+            return False
+        if int(current_index) != int(_pause_at_step):
+            return False
+        _pause_at_step = None
+        return True
+
+
+def set_pause_at_step_callback(callback: _PauseAtStepCallback | None) -> None:
+    """Register or clear the hub callback invoked when pause-at-step fires."""
+    global _pause_at_step_callback
+    with _active_step_lock:
+        _pause_at_step_callback = callback
+
+
+def notify_paused_at_step(step_index: int) -> None:
+    """Tell the hub the run paused before ``step_index`` (0-based)."""
+    with _active_step_lock:
+        callback = _pause_at_step_callback
+    if callback is not None:
+        callback(int(step_index))
 
 
 def set_script_steps_callback(callback: _ScriptStepsCallback | None) -> None:

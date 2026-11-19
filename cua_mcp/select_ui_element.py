@@ -94,7 +94,7 @@ class UiDetection:
     class_name: str
     text: str | None = None
     icons: list[dict[str, Any]] | None = None
-    # Provenance for debug/metrics: "uia" | "ocr" | "yolo" (class-only boxes).
+    # Provenance: "uia" | "uia_efp" | "ocr" | "yolo" (class-only boxes).
     source: str | None = None
     # Labeled UIA control token (button, list_item, …). Empty on OCR/YOLO boxes.
     uia_control_type: str | None = None

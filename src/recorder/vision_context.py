@@ -689,20 +689,108 @@ def _detection_source(det: UiDetection) -> str:
     return str(getattr(det, "source", None) or "").strip().lower()
 
 
+# FindAll snapshot channel vs press/idle EFP injected as a FindAll-shaped peer.
+_UIA_FAMILY_SOURCES = frozenset({"uia", "uia_efp"})
+# Concrete FindAll leaves beat disagreeing data_item EFP (Excel「儲存」vs cell).
+_CONCRETE_FINDALL_CONTROL_TYPES = frozenset(
+    {
+        "button",
+        "tab_item",
+        "menu_item",
+        "check_box",
+        "radio_button",
+        "hyperlink",
+        "split_button",
+        "list_item",
+        "header",
+        "header_item",
+        "custom",
+    }
+)
+
+
+def _is_uia_family_source(source: str | None) -> bool:
+    """True for FindAll ``uia`` or injected EFP ``uia_efp`` provenance."""
+    return str(source or "").strip().lower() in _UIA_FAMILY_SOURCES
+
+
 def _source_rank_for_label(source: str | None) -> int:
     """Lower is better: prefer UIA labels over OCR over unlabeled YOLO boxes."""
     key = str(source or "").strip().lower()
-    if key == "uia":
+    if key in _UIA_FAMILY_SOURCES:
         return 0
     if key == "ocr":
         return 1
     return 2
 
 
+def _is_list_row_hub_label(text: str | None) -> bool:
+    """True for generic WinForms list/grid row Names like ``清單 row 3``."""
+    raw = _visible_text(text).casefold().replace(" ", "")
+    if not raw.startswith("清單row"):
+        return False
+    return raw[len("清單row") :].isdigit()
+
+
+def _is_generic_uia_row_hub(det: UiDetection) -> bool:
+    """True for FindAll tree/list row containers that should yield to cell EFP."""
+    if str(det.uia_control_type or "").strip() == "tree_item":
+        return True
+    return _is_list_row_hub_label(det.text)
+
+
+def _uia_click_primary_precedence(det: UiDetection) -> int:
+    """Typed FindAll vs EFP precedence for covering click primaries (lower wins).
+
+    0 concrete FindAll (button/tab/…) beats disagreeing cell EFP
+    1 usable ``data_item`` EFP beats generic ``清單 row`` / tree_item hubs
+    2 other labeled UIA / EFP leaves
+    3 generic row FindAll hubs
+    4 everything else
+    """
+    source = _detection_source(det)
+    control_type = str(det.uia_control_type or "").strip()
+    if source == "uia" and control_type in _CONCRETE_FINDALL_CONTROL_TYPES:
+        return 0
+    if source == "uia_efp" and control_type == "data_item":
+        return 1
+    if source == "uia" and _is_generic_uia_row_hub(det):
+        return 3
+    if _is_uia_family_source(source):
+        return 2
+    return 4
+
+
+def _candidate_uia_click_primary_precedence(candidate: dict[str, Any]) -> int:
+    """Dict-shaped twin of ``_uia_click_primary_precedence`` for candidate lists."""
+    source = str(candidate.get("source") or "").strip().lower()
+    control_type = str(candidate.get("uia_control_type") or "").strip()
+    if source == "uia" and control_type in _CONCRETE_FINDALL_CONTROL_TYPES:
+        return 0
+    if source == "uia_efp" and control_type == "data_item":
+        return 1
+    if source == "uia" and (
+        control_type == "tree_item" or _is_list_row_hub_label(candidate.get("text"))
+    ):
+        return 3
+    if _is_uia_family_source(source):
+        return 2
+    return 4
+
+
+def _is_efp_labeled_primary(det: UiDetection) -> bool:
+    """True when primary is an injected EFP labeled leaf (replay hard-gates Name/Value)."""
+    return (
+        _detection_source(det) == "uia_efp"
+        and det.class_id == YOLO_CLASS_TEXT
+        and _usable_uia_landmark_label(det.text)
+    )
+
+
 def _is_usable_uia_text_detection(det: UiDetection) -> bool:
     """True for UIA-sourced text with a usable landmark label."""
     return (
-        _detection_source(det) == "uia"
+        _is_uia_family_source(_detection_source(det))
         and det.class_id == YOLO_CLASS_TEXT
         and _usable_uia_landmark_label(det.text)
     )
@@ -710,7 +798,7 @@ def _is_usable_uia_text_detection(det: UiDetection) -> bool:
 
 def _is_uia_textless_control(det: UiDetection) -> bool:
     """True for a UIA input or scrollbar. These controls need no label."""
-    return _detection_source(det) == "uia" and det.class_id in (
+    return _is_uia_family_source(_detection_source(det)) and det.class_id in (
         YOLO_CLASS_INPUT,
         YOLO_CLASS_SCROLLBAR,
     )
@@ -794,15 +882,20 @@ def _nearest_detection_rank_key(
     det: UiDetection,
     local_x: int,
     local_y: int,
-) -> tuple[float, int, int, int]:
-    """Sort key for a detection at a click/drop point."""
-    return _nearest_candidate_rank_key(
+) -> tuple[int, float, int, int, int]:
+    """Sort key for a detection at a click/drop point.
+
+    Typed FindAll/EFP precedence comes first so concrete FindAll buttons beat
+    disagreeing cell EFP, and usable ``data_item`` EFP beats generic row hubs.
+    """
+    dist, content, source, area = _nearest_candidate_rank_key(
         det.bbox,
         local_x,
         local_y,
         content_priority=_hit_content_priority(det),
         source_rank=_source_rank_for_label(_detection_source(det)),
     )
+    return (_uia_click_primary_precedence(det), dist, content, source, area)
 
 
 def _is_multi_char_text_candidate(candidate: dict[str, Any], label: str) -> bool:
@@ -1104,7 +1197,7 @@ def _prefer_coextensive_named_input(
 
 def _uia_text_may_name_containing_input(candidate: dict[str, Any]) -> bool:
     """True when a UIA Text leaf may donate its Name onto a containing Input."""
-    if str(candidate.get("source") or "").strip().lower() != "uia":
+    if not _is_uia_family_source(str(candidate.get("source") or "").strip().lower()):
         return False
     if str(candidate.get("class_name") or "").strip() != "text":
         return False
@@ -1205,10 +1298,11 @@ def _candidate_containing_click(
     if named_input is not None:
         return named_input
 
-    def _hit_key(candidate: dict[str, Any]) -> tuple[int, int, int]:
+    def _hit_key(candidate: dict[str, Any]) -> tuple[int, int, int, int]:
         bbox = _as_bbox_xywh(candidate.get("bbox"))
         area = _bbox_area(bbox) if bbox is not None else 0
         return (
+            _candidate_uia_click_primary_precedence(candidate),
             _candidate_hit_content_priority(candidate),
             _source_rank_for_label(
                 str(candidate.get("source") or "").strip().lower() or None
@@ -3825,6 +3919,10 @@ def recording_uia_skip_reason(
         )
         if primary is None:
             return "點擊處沒有可用的 UIA 文字"
+    # EFP-injected labeled hubs hard-gate on Name/Value at replay; landmarks
+    # are insurance only (grid cells omitted from FindAll).
+    if _is_efp_labeled_primary(primary):
+        return None
     if _uia_landmarks_uniquely_select_primary(
         primary,
         detections,
@@ -4049,9 +4147,11 @@ def _detect_recording_mouse_targets(
     prefer-replace overlapping YOLO boxes. UIA labeled text is not mixed into
     OCR candidates.
 
-    Press-time ``element_from_point`` is merged as a FindAll-shaped peer
-    **before** ``recording_uia_skip_reason`` so Excel DataItem cells (omitted
-    from FindAll) still record ``vision_path=uia``. Post-settle
+    Press-time ``element_from_point`` is always merged as a FindAll-shaped
+    ``uia_efp`` peer **before** ``recording_uia_skip_reason`` (including when
+    FindAll covers the click with a different label). Typed primary precedence
+    then prefers concrete FindAll leaves over disagreeing cell EFP, and usable
+    ``data_item`` EFP over generic ``清單 row`` / tree_item hubs. Post-settle
     ``focused_element`` may repair the peer bbox when press EFP geometry misses
     the click.
     """
@@ -4469,9 +4569,13 @@ def _efp_peer_detection_from_payload(
     synthetic leaf for non-input peers.
 
     Returns ``None`` when bbox/label is missing or unusable, when a same-label
-    labeled leaf already covers the click / overlaps the leaf, when FindAll
-    already names a different usable leaf on the click (stale post-action EFP),
-    or when an overlapping FindAll input was named in place.
+    labeled leaf already covers the click / overlaps the leaf, or when an
+    overlapping FindAll input was named in place.
+
+    Disagreeing FindAll covering leaves no longer block injection: FindAll and
+    EFP stay combined in one pool, and typed primary precedence picks the hub
+    (concrete FindAll button over cell EFP; usable ``data_item`` EFP over
+    generic ``清單 row`` / tree_item hubs).
     """
     if not isinstance(element_from_point, dict):
         return None
@@ -4501,10 +4605,8 @@ def _efp_peer_detection_from_payload(
         if focused_type:
             control_type = focused_type
 
-    # FindAll text channel already names the click with a different usable
-    # leaf — do not inject a foreign EFP peer (e.g. post-close Excel
-    # data_item over Save). Named input hosts (ProperTreeHost) are ignored
-    # here so EFP can still repair tree/list leaves inside them.
+    # Note FindAll covering-label disagree for debug; still inject so both
+    # channels remain editable and typed precedence can choose the primary.
     covering_labels = [
         _visible_text(det.text)
         for det in existing
@@ -4518,8 +4620,7 @@ def _efp_peer_detection_from_payload(
         for text in covering_labels
     ):
         if isinstance(timing_out, dict):
-            timing_out["efp_peer_skipped_reason"] = "findall_covers_click_disagrees"
-        return None
+            timing_out["efp_findall_label_disagree"] = True
 
     resolved = _efp_peer_local_bbox(
         element_from_point,
@@ -4559,7 +4660,7 @@ def _efp_peer_detection_from_payload(
             local_bbox,
             YOLO_CLASS_INPUT,
             text=label,
-            source="uia",
+            source="uia_efp",
             uia_control_type=None,
         )
 
@@ -4574,7 +4675,7 @@ def _efp_peer_detection_from_payload(
             local_bbox,
             YOLO_CLASS_SCROLLBAR,
             text=None,
-            source="uia",
+            source="uia_efp",
         )
 
     label_n = _visible_text(label).casefold()
@@ -4594,7 +4695,7 @@ def _efp_peer_detection_from_payload(
         local_bbox,
         YOLO_CLASS_TEXT,
         text=label,
-        source="uia",
+        source="uia_efp",
         uia_control_type=peer_type,
     )
 

@@ -82,7 +82,7 @@ def test_event015_shape_focused_repairs_documents_over_propertreehost() -> None:
             "class_name": peer.class_name,
             "text": peer.text,
             "icons": None,
-            "source": "uia",
+            "source": "uia_efp",
             "uia_control_type": peer.uia_control_type,
         },
     ]
@@ -115,7 +115,7 @@ def test_efp_peer_beats_bare_input_as_primary() -> None:
     assert efp.class_name == "text"
     # Shell status tail `` (已釘選)`` is stripped for stable landmark text.
     assert efp.text == "下載"
-    assert efp.source == "uia"
+    assert efp.source == "uia_efp"
 
     # Promote path uses candidate dicts via select_click_primary_candidate.
     candidates = [
@@ -135,7 +135,7 @@ def test_efp_peer_beats_bare_input_as_primary() -> None:
             "class_name": efp.class_name,
             "text": efp.text,
             "icons": None,
-            "source": "uia",
+            "source": "uia_efp",
             "uia_control_type": "list_item",
         },
     ]
@@ -216,7 +216,7 @@ def test_efp_peer_repairs_with_focused_element_when_bbox_misses_click() -> None:
             "class_name": efp.class_name,
             "text": efp.text,
             "icons": None,
-            "source": "uia",
+            "source": "uia_efp",
             "uia_control_type": "tree_item",
         },
     ]
@@ -303,7 +303,7 @@ def test_efp_position_thumb_injects_scrollbar_peer() -> None:
     assert efp.class_id == YOLO_CLASS_SCROLLBAR
     assert efp.text is None
     assert efp.bbox == (2289, 162, 23, 251)
-    assert efp.source == "uia"
+    assert efp.source == "uia_efp"
 
 
 def test_efp_position_skipped_when_findall_scrollbar_covers_press() -> None:
@@ -761,8 +761,8 @@ def test_efp_data_item_before_gate_opens_uia_path_over_covering_scrollbar(
     assert primary.get("uia_control_type") == "data_item"
 
 
-def test_efp_peer_skips_when_findall_covers_click_disagrees() -> None:
-    """Post-close Excel cell must not override dialog Save under the click."""
+def test_efp_peer_injects_when_findall_covers_click_disagrees() -> None:
+    """Disagreeing FindAll still keeps EFP in the pool; Save wins primary."""
     save = _detection_from_bbox(
         (715, 614, 99, 28),
         YOLO_CLASS_TEXT,
@@ -784,8 +784,11 @@ def test_efp_peer_skips_when_findall_covers_click_disagrees() -> None:
         existing=[save],
         timing_out=timing,
     )
-    assert peer is None
-    assert timing.get("efp_peer_skipped_reason") == "findall_covers_click_disagrees"
+    assert peer is not None
+    assert peer.text == "K15"
+    assert peer.source == "uia_efp"
+    assert peer.uia_control_type == "data_item"
+    assert timing.get("efp_findall_label_disagree") is True
     primary = select_click_primary_candidate(
         [
             {
@@ -796,7 +799,16 @@ def test_efp_peer_skips_when_findall_covers_click_disagrees() -> None:
                 "text": "儲存(S)",
                 "source": "uia",
                 "uia_control_type": "button",
-            }
+            },
+            {
+                "bbox": list(peer.bbox),
+                "center": [peer.cx, peer.cy],
+                "class_id": peer.class_id,
+                "class_name": peer.class_name,
+                "text": peer.text,
+                "source": "uia_efp",
+                "uia_control_type": "data_item",
+            },
         ],
         798,
         632,
@@ -805,10 +817,10 @@ def test_efp_peer_skips_when_findall_covers_click_disagrees() -> None:
     assert primary.get("text") == "儲存(S)"
 
 
-def test_efp_event009_shape_findall_save_beats_stale_k15_data_item(
+def test_efp_event009_shape_findall_save_beats_k15_but_keeps_efp_peer(
     monkeypatch,
 ) -> None:
-    """event_009-shaped Save click: FindAll 儲存(S) wins over stale EFP K15."""
+    """event_009-shaped Save click: FindAll 儲存(S) wins; K15 stays in pool."""
     import numpy as np
 
     from src.recorder.vision_context import (
@@ -851,9 +863,11 @@ def test_efp_event009_shape_findall_save_beats_stale_k15_data_item(
         efp_monitor_offset=(0, 0),
     )
     assert timing.get("vision_path") == "uia"
-    assert timing.get("efp_peer_injected") is not True
-    assert timing.get("efp_peer_skipped_reason") == "findall_covers_click_disagrees"
-    assert not any(d.text == "K15" for d in detections)
+    assert timing.get("efp_peer_injected") is True
+    assert timing.get("efp_findall_label_disagree") is True
+    assert any(
+        d.text == "K15" and d.source == "uia_efp" for d in detections
+    )
     nearest = _nearest_candidates(detections, 798, 632)
     nearest = _promote_click_primary_detections(nearest, 798, 632)
     primary = select_click_primary_candidate(
@@ -863,3 +877,61 @@ def test_efp_event009_shape_findall_save_beats_stale_k15_data_item(
     )
     assert primary is not None
     assert primary.get("text") == "儲存(S)"
+
+
+def test_efp_data_item_beats_generic_list_row_hub(monkeypatch) -> None:
+    """Grid cell EFP outranks FindAll ``清單 row N`` / tree_item covering hub."""
+    import numpy as np
+
+    from src.recorder.vision_context import (
+        _detect_recording_mouse_targets,
+        select_click_primary_candidate,
+        _detection_to_dict,
+        recording_uia_skip_reason,
+    )
+
+    bgr = np.zeros((920, 1918, 3), dtype=np.uint8)
+    prefetched = (
+        [],
+        [],
+        [
+            ((406, 155, 1347, 24), "清單 row 3", "tree_item"),
+            ((406, 132, 1347, 24), "清單 row 2", "tree_item"),
+            ((406, 178, 1347, 24), "清單 row 4", "tree_item"),
+        ],
+    )
+
+    def fake_detect(*_a, **_k):
+        return []
+
+    monkeypatch.setattr(
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
+        fake_detect,
+    )
+    efp = {
+        "name": "電腦名稱",
+        "value": "lannie-Ubuntu26",
+        "control_type": "data_item",
+        "bbox": [446, 156, 130, 22],
+    }
+    detections, timing = _detect_recording_mouse_targets(
+        bgr,
+        local_x=512,
+        local_y=168,
+        uia_prefetched=prefetched,
+        element_from_point=efp,
+        efp_monitor_offset=(0, 0),
+    )
+    assert timing.get("vision_path") == "uia"
+    assert timing.get("efp_peer_injected") is True
+    assert timing.get("efp_findall_label_disagree") is True
+    assert recording_uia_skip_reason(detections, local_x=512, local_y=168) is None
+    primary = select_click_primary_candidate(
+        [_detection_to_dict(d) for d in detections],
+        512,
+        168,
+    )
+    assert primary is not None
+    assert primary.get("text") == "電腦名稱|lannie-Ubuntu26"
+    assert primary.get("source") == "uia_efp"
+    assert primary.get("uia_control_type") == "data_item"

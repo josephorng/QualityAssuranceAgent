@@ -3439,6 +3439,28 @@ def test_typed_text_candidates_respect_llm_resolved_ocr() -> None:
     assert active_source == "ocr"
 
 
+def test_typed_text_candidates_respect_zhuyin_resolved() -> None:
+    event = {"kind": "text_input", "text": "1234567rup wu0 "}
+    analysis = {
+        "text_resolution": {
+            "recorded_text": "1234567rup wu0 ",
+            "ocr_text": "1234567合天",
+            "ocr_options": ["1234567合天"],
+            "resolved_text": "1234567今天",
+            "source": "zhuyin",
+            "zhuyin_text": "1234567今天",
+        }
+    }
+    recorded, ocr_options, active, active_source = _typed_text_candidates(
+        event,
+        analysis,
+        "輸入「1234567今天」",
+    )
+    assert recorded == "1234567rup wu0"
+    assert active == "1234567今天"
+    assert active_source == "custom"
+
+
 def test_write_runs_index_lists_recordings_in_recordings_tab(tmp_path: Path) -> None:
     task = tmp_path / "task_20260721_100000_000001"
     task.mkdir()

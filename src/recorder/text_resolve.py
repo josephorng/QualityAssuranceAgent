@@ -643,7 +643,7 @@ async def resolve_text_input_text(
                 "reason": "vision unavailable: no cursor or anchor coordinates",
             }
         )
-        return {
+        out_no_anchor: dict[str, Any] = {
             "text": finalized.get("resolved_text") or "",
             "recorded_text": recorded_text,
             "uia_text": finalized.get("uia_text"),
@@ -656,6 +656,15 @@ async def resolve_text_input_text(
             or "vision unavailable: no cursor or anchor coordinates",
             "vision": None,
         }
+        for key in (
+            "zhuyin_text",
+            "zhuyin_decoded",
+            "zhuyin_ocr_compatible",
+            "zhuyin_syllables",
+        ):
+            if key in finalized:
+                out_no_anchor[key] = finalized[key]
+        return out_no_anchor
 
     # Prefer end_screenshot_path when set: shared next-before (same monitor) or
     # settle-derived typing-monitor JPEG (cross-monitor). Map anchors with the
@@ -750,7 +759,7 @@ async def resolve_text_input_text(
             f"ime={ime!r} ocr={ocr_text!r} ocr_options={len(ocr_options)} "
             f"resolved={resolved_text!r} source={source}"
         )
-    return {
+    out: dict[str, Any] = {
         "text": resolved_text,
         "recorded_text": recorded_text,
         "uia_text": finalized.get("uia_text"),
@@ -762,6 +771,15 @@ async def resolve_text_input_text(
         "reason": reason,
         "vision": vision_for_llm,
     }
+    for key in (
+        "zhuyin_text",
+        "zhuyin_decoded",
+        "zhuyin_ocr_compatible",
+        "zhuyin_syllables",
+    ):
+        if key in finalized:
+            out[key] = finalized[key]
+    return out
 
 
 def event_with_resolved_text(event: RecordedEvent, resolved: dict[str, Any]) -> RecordedEvent:

@@ -10,6 +10,7 @@ from cua_mcp.selection_engine import request_json_with_retry
 from src.common.prompting import get_prompt
 from src.recorder.coalesce import text_contains_cjk
 from src.recorder.text_resolve import _strip_ocr_caret
+from src.recorder.zhuyin_decode import apply_zhuyin_to_text_resolution, ime_is_zhuyin
 
 _MASK_CHARS = frozenset("*●•∗＊‧∙·⬤✖✕")
 
@@ -85,9 +86,10 @@ def collect_ocr_candidates(text_resolution: dict[str, Any]) -> list[str]:
 
 
 def build_choice_candidates(text_resolution: dict[str, Any]) -> list[str]:
-    """Candidate list for review/LLM: recorded, then UIA, then non-masked OCR."""
+    """Candidate list for review/LLM: recorded, UIA, Zhuyin, then non-masked OCR."""
     recorded = _strip_ocr_caret(str(text_resolution.get("recorded_text") or "")).strip()
     uia = normalize_uia_text(text_resolution.get("uia_text"))
+    zhuyin = _strip_ocr_caret(str(text_resolution.get("zhuyin_text") or "")).strip()
     candidates: list[str] = []
     seen: set[str] = set()
     if recorded:
@@ -96,6 +98,9 @@ def build_choice_candidates(text_resolution: dict[str, Any]) -> list[str]:
     if uia and uia not in seen:
         candidates.append(uia)
         seen.add(uia)
+    if zhuyin and zhuyin not in seen:
+        candidates.append(zhuyin)
+        seen.add(zhuyin)
     for ocr in collect_ocr_candidates(text_resolution):
         if is_masked_ocr_text(ocr):
             continue
@@ -194,7 +199,8 @@ def apply_text_choice_hard_rules(text_resolution: dict[str, Any]) -> dict[str, A
         updated["reason"] = "English IME; prefer recorded"
         return updated
 
-    # 4. Chinese IME → recorded when corroborated or literal; else CJK OCR for conversion.
+    # 4. Chinese IME → recorded when corroborated or literal; else Zhuyin /
+    #    CJK OCR for conversion.
     if ime_chinese is True:
         if recorded and any(texts_equivalent(recorded, text) for text in ocr_candidates):
             updated["resolved_text"] = recorded
@@ -206,6 +212,49 @@ def apply_text_choice_hard_rules(text_resolution: dict[str, Any]) -> dict[str, A
             updated["source"] = "recorded"
             updated["reason"] = "Chinese IME; literal recorded, prefer recorded"
             return updated
+
+        # zh-TW Microsoft Zhuyin: decode keystrokes and phonetically check OCR.
+        if ime_is_zhuyin(updated.get("ime")) and recorded_has_latin_letters(recorded):
+            ocr_hint = (
+                primary_ocr
+                if primary_ocr and text_contains_cjk(primary_ocr)
+                else (cjk_ocr or None)
+            )
+            zh = apply_zhuyin_to_text_resolution(updated, ocr_text=ocr_hint)
+            updated.update(
+                {
+                    k: zh[k]
+                    for k in (
+                        "zhuyin_text",
+                        "zhuyin_decoded",
+                        "zhuyin_ocr_compatible",
+                        "zhuyin_syllables",
+                    )
+                    if k in zh
+                }
+            )
+            zhuyin_text = _strip_ocr_caret(str(zh.get("zhuyin_text") or "")).strip()
+            if zhuyin_text:
+                if zh.get("zhuyin_ocr_compatible") and ocr_hint:
+                    chosen_ocr = (
+                        primary_ocr if text_contains_cjk(primary_ocr) else cjk_ocr
+                    ) or ocr_hint
+                    updated["resolved_text"] = chosen_ocr
+                    updated["source"] = "ocr"
+                    updated["reason"] = "Chinese IME; Zhuyin confirms OCR"
+                    return updated
+                # Wrong-sound OCR or missing OCR → reconciled / decoded Zhuyin.
+                if ocr_hint and not texts_equivalent(zhuyin_text, ocr_hint):
+                    updated["resolved_text"] = zhuyin_text
+                    updated["source"] = "zhuyin"
+                    updated["reason"] = "Chinese IME; Zhuyin decode (OCR sound mismatch)"
+                    return updated
+                updated["resolved_text"] = zhuyin_text
+                updated["source"] = "zhuyin"
+                updated["reason"] = "Chinese IME; Zhuyin decode"
+                return updated
+            # Decode failed — fall through to OCR / recorded.
+
         if cjk_ocr:
             chosen_ocr = primary_ocr if text_contains_cjk(primary_ocr) else cjk_ocr
             updated["resolved_text"] = chosen_ocr

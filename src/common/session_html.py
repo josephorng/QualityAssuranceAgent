@@ -6138,7 +6138,7 @@ def _typed_text_candidates(
                 active_source = "recorded"
             else:
                 active_source = "custom"
-        elif source in {"ocr", "llm"} and resolved:
+        elif source in {"ocr", "llm", "zhuyin"} and resolved:
             active = resolved
             if resolved == recorded:
                 active_source = "recorded"

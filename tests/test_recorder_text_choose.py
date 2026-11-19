@@ -311,6 +311,95 @@ def test_apply_hard_rules_chinese_ime_prefers_primary_cjk_ocr() -> None:
     assert "Chinese IME; prefer OCR" in updated["reason"]
 
 
+def test_apply_hard_rules_zhuyin_corrects_wrong_sound_ocr() -> None:
+    """Word event_004: OCR 合天 must not win over Zhuyin rup wu0 → 今天."""
+    updated = apply_text_choice_hard_rules(
+        {
+            "recorded_text": "1234567rup wu0 ",
+            "uia_text": None,
+            "ime": {"chinese": True, "lang_id": 1028},
+            "ocr_text": "1234567合天",
+            "ocr_options": ["1234567合天"],
+            "resolved_text": "1234567合天",
+            "source": "ocr",
+            "reason": "Chinese IME; prefer OCR",
+        }
+    )
+    assert updated["resolved_text"] == "1234567今天"
+    assert updated["source"] == "zhuyin"
+    assert "Zhuyin" in updated["reason"]
+    assert updated.get("zhuyin_text") == "1234567今天"
+    assert updated.get("zhuyin_ocr_compatible") is False
+
+
+def test_apply_hard_rules_zhuyin_keeps_matching_ocr_jintian() -> None:
+    updated = apply_text_choice_hard_rules(
+        {
+            "recorded_text": "1234567rup wu0 ",
+            "uia_text": None,
+            "ime": {"chinese": True, "lang_id": 0x0404},
+            "ocr_text": "1234567今天",
+            "ocr_options": ["1234567今天"],
+            "resolved_text": "1234567rup wu0 ",
+            "source": "recorded",
+            "reason": "prefer recorded",
+        }
+    )
+    assert updated["resolved_text"] == "1234567今天"
+    assert updated["source"] == "ocr"
+    assert "confirms OCR" in updated["reason"]
+
+
+def test_apply_hard_rules_zhuyin_keeps_homophone_ocr_jin() -> None:
+    updated = apply_text_choice_hard_rules(
+        {
+            "recorded_text": "rup wu0 ",
+            "uia_text": None,
+            "ime": {"chinese": True, "lang_id": 1028},
+            "ocr_text": "金天",
+            "ocr_options": ["金天"],
+            "resolved_text": "rup wu0 ",
+            "source": "recorded",
+            "reason": "prefer recorded",
+        }
+    )
+    assert updated["resolved_text"] == "金天"
+    assert updated["source"] == "ocr"
+    assert "confirms OCR" in updated["reason"]
+
+
+def test_apply_hard_rules_zhuyin_without_ocr_uses_decode() -> None:
+    updated = apply_text_choice_hard_rules(
+        {
+            "recorded_text": "rup wu0 ",
+            "uia_text": None,
+            "ime": {"chinese": True, "lang_id": 1028},
+            "ocr_text": None,
+            "ocr_options": [],
+            "resolved_text": "rup wu0 ",
+            "source": "recorded",
+            "reason": "prefer recorded",
+        }
+    )
+    assert updated["resolved_text"] == "今天"
+    assert updated["source"] == "zhuyin"
+
+
+def test_build_choice_candidates_includes_zhuyin_text() -> None:
+    cands = build_choice_candidates(
+        {
+            "recorded_text": "rup wu0 ",
+            "uia_text": None,
+            "zhuyin_text": "今天",
+            "ocr_text": "合天",
+            "ocr_options": ["合天"],
+        }
+    )
+    assert cands[0] == "rup wu0"
+    assert "今天" in cands
+    assert "合天" in cands
+
+
 def test_needs_llm_text_choice_skips_when_ime_present() -> None:
     assert not needs_llm_text_choice(
         {

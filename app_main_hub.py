@@ -109,6 +109,7 @@ from src.recorder.stop_overlay import (
     RecordingStopOverlay,
     RecordingUiaStatusOverlay,
     ReplayControlOverlay,
+    ReplayMonitorFrameOverlay,
 )
 from src.recorder.models import RecordedEvent
 from src.recorder.vision_prefetch import VisionPrefetchWorker
@@ -317,6 +318,7 @@ class MainHub(ctk.CTk):
         self._recording_stop_overlay: RecordingStopOverlay | None = None
         self._recording_uia_status_overlay: RecordingUiaStatusOverlay | None = None
         self._replay_overlay: ReplayControlOverlay | None = None
+        self._replay_monitor_frames: ReplayMonitorFrameOverlay | None = None
         self._step_rerecord = StepRerecordSession()
         self._active_recording_dir: Path | None = None
         self._replay_step_instructions: list[str] = []
@@ -3024,8 +3026,19 @@ class MainHub(ctk.CTk):
         )
         self._replay_overlay = overlay
         self._apply_active_step_to_overlay(overlay)
+        self._replay_monitor_frames = ReplayMonitorFrameOverlay(
+            self,
+            monitor_indices=self._selected_monitor_indices(),
+        )
+
+    def _destroy_replay_monitor_frames(self) -> None:
+        frames = self._replay_monitor_frames
+        self._replay_monitor_frames = None
+        if frames is not None:
+            frames.destroy()
 
     def _destroy_replay_overlay(self) -> None:
+        self._destroy_replay_monitor_frames()
         self._cancel_retry_countdown()
         self._cancel_replay_rerecord()
         overlay = self._replay_overlay

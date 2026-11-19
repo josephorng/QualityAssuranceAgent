@@ -64,6 +64,13 @@ _STEP_SNIPPET_LIMIT = 42
 _STEP_ERROR_LIMIT = 160
 _ERROR_SHOW_MS = 3000
 
+_REPLAY_FRAME_COLOR = "#e6a700"
+_REPLAY_FRAME_THICKNESS = 4
+_REPLAY_FRAME_BADGE_TEXT = "重播中"
+_REPLAY_FRAME_BADGE_MARGIN = 12
+_REPLAY_FRAME_BADGE_FG = "#1a1a1a"
+_REPLAY_FRAME_HARDEN_MS = 50
+
 _monitors_cache: list[dict[str, int]] = []
 _monitors_cache_at = 0.0
 
@@ -233,6 +240,71 @@ def _fallback_monitor(win: Any | None = None) -> dict[str, int]:
         except Exception:
             pass
     return {"left": 0, "top": 0, "width": 1280, "height": 720}
+
+
+def resolve_replay_frame_monitors(
+    monitor_indices: list[int] | None,
+    *,
+    monitors: list[dict[str, int]] | None = None,
+) -> list[dict[str, int]]:
+    """Map 1-based mss indices to physical monitor rects; empty indices → all."""
+    rows = list(monitors) if monitors is not None else list(_cached_monitors(force=True))
+    if not rows:
+        return []
+    if not monitor_indices:
+        return rows
+    out: list[dict[str, int]] = []
+    seen: set[tuple[int, int, int, int]] = set()
+    for raw in monitor_indices:
+        try:
+            idx = int(raw)
+        except (TypeError, ValueError):
+            continue
+        pos = idx - 1
+        if pos < 0 or pos >= len(rows):
+            continue
+        mon = rows[pos]
+        key = _monitor_key(mon)
+        if key is None or key in seen:
+            continue
+        seen.add(key)
+        out.append(mon)
+    return out if out else rows
+
+
+def replay_frame_strip_geometries(
+    mon: dict[str, int],
+    *,
+    thickness: int = _REPLAY_FRAME_THICKNESS,
+) -> list[tuple[int, int, int, int]]:
+    """Return ``(width, height, x, y)`` for top, bottom, left, right edge strips."""
+    left = int(mon["left"])
+    top = int(mon["top"])
+    width = max(0, int(mon["width"]))
+    height = max(0, int(mon["height"]))
+    t = max(1, int(thickness))
+    if width <= 0 or height <= 0:
+        return []
+    t = min(t, max(1, width // 2), max(1, height // 2))
+    side_h = max(0, height - 2 * t)
+    return [
+        (width, t, left, top),
+        (width, t, left, top + height - t),
+        (t, side_h, left, top + t),
+        (t, side_h, left + width - t, top + t),
+    ]
+
+
+def replay_frame_badge_origin(
+    mon: dict[str, int],
+    *,
+    margin: int = _REPLAY_FRAME_BADGE_MARGIN,
+) -> tuple[int, int]:
+    """Top-left screen origin for the replay badge on ``mon``."""
+    return (
+        int(mon["left"]) + max(0, int(margin)),
+        int(mon["top"]) + max(0, int(margin)),
+    )
 
 
 class _EdgeRevealOverlay:
@@ -890,6 +962,164 @@ class RecordingUiaStatusOverlay:
             win.destroy()
         except Exception:
             pass
+
+
+class ReplayMonitorFrameOverlay:
+    """Always-on-top amber frame + badge on selected monitors during replay."""
+
+    def __init__(
+        self,
+        master: Any,
+        *,
+        monitor_indices: list[int] | None = None,
+    ) -> None:
+        self._master = master
+        self._destroyed = False
+        self._windows: list[Any] = []
+        mons = resolve_replay_frame_monitors(monitor_indices)
+        if not mons:
+            mons = [_fallback_monitor(master)]
+        for mon in mons:
+            self._build_monitor(master, mon)
+        try:
+            master.after(_REPLAY_FRAME_HARDEN_MS, self._harden_all)
+        except Exception:
+            self._harden_all()
+
+    def _build_monitor(self, master: Any, mon: dict[str, int]) -> None:
+        for width, height, ox, oy in replay_frame_strip_geometries(mon):
+            if width <= 0 or height <= 0:
+                continue
+            self._spawn_colored_window(
+                master,
+                width=width,
+                height=height,
+                ox=ox,
+                oy=oy,
+                title="replay-frame",
+            )
+        self._spawn_badge(master, mon)
+
+    def _spawn_colored_window(
+        self,
+        master: Any,
+        *,
+        width: int,
+        height: int,
+        ox: int,
+        oy: int,
+        title: str,
+        content: Any | None = None,
+    ) -> Any | None:
+        if self._destroyed:
+            return None
+        try:
+            win = ctk.CTkToplevel(master)
+        except Exception:
+            return None
+        self._windows.append(win)
+        win.title(title)
+        try:
+            win.resizable(False, False)
+        except Exception:
+            pass
+        # Do NOT transient() to the hub: the hub is iconified during replay.
+        try:
+            win.overrideredirect(True)
+        except Exception:
+            pass
+        try:
+            win.attributes("-topmost", True)
+        except Exception:
+            pass
+        if content is None:
+            frame = ctk.CTkFrame(
+                win,
+                corner_radius=0,
+                fg_color=(_REPLAY_FRAME_COLOR, _REPLAY_FRAME_COLOR),
+                border_width=0,
+            )
+            frame.pack(fill="both", expand=True)
+        else:
+            content(win)
+        try:
+            win.geometry(f"{int(width)}x{int(height)}+{int(ox)}+{int(oy)}")
+            win.deiconify()
+            win.lift()
+        except Exception:
+            pass
+        return win
+
+    def _spawn_badge(self, master: Any, mon: dict[str, int]) -> None:
+        ox, oy = replay_frame_badge_origin(mon)
+
+        def _content(win: Any) -> None:
+            frame = ctk.CTkFrame(
+                win,
+                corner_radius=6,
+                fg_color=(_REPLAY_FRAME_COLOR, _REPLAY_FRAME_COLOR),
+                border_width=0,
+            )
+            frame.pack(fill="both", expand=True, padx=1, pady=1)
+            ctk.CTkLabel(
+                frame,
+                text=_REPLAY_FRAME_BADGE_TEXT,
+                font=ctk.CTkFont(size=12, weight="bold"),
+                text_color=(_REPLAY_FRAME_BADGE_FG, _REPLAY_FRAME_BADGE_FG),
+            ).pack(padx=10, pady=4)
+
+        win = self._spawn_colored_window(
+            master,
+            width=72,
+            height=28,
+            ox=ox,
+            oy=oy,
+            title="replay-badge",
+            content=_content,
+        )
+        if win is None:
+            return
+        try:
+            win.update_idletasks()
+            width = max(int(win.winfo_reqwidth()), 72)
+            height = max(int(win.winfo_reqheight()), 28)
+            win.geometry(f"{width}x{height}+{ox}+{oy}")
+        except Exception:
+            pass
+
+    def _harden_all(self) -> None:
+        if self._destroyed:
+            return
+        for win in list(self._windows):
+            try:
+                if not win.winfo_exists():
+                    continue
+            except Exception:
+                continue
+            try:
+                win.attributes("-topmost", True)
+                win.lift()
+            except Exception:
+                pass
+            _apply_exclude_from_capture(win)
+            _apply_click_through(win)
+            try:
+                win.attributes("-topmost", True)
+                win.lift()
+            except Exception:
+                pass
+
+    def destroy(self) -> None:
+        if self._destroyed:
+            return
+        self._destroyed = True
+        windows = list(self._windows)
+        self._windows = []
+        for win in windows:
+            try:
+                win.destroy()
+            except Exception:
+                pass
 
 
 class ReplayControlOverlay(_EdgeRevealOverlay):

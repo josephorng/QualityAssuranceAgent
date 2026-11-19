@@ -3,9 +3,14 @@ from __future__ import annotations
 from src.recorder.stop_overlay import (
     RecordingStopOverlay,
     ReplayControlOverlay,
+    ReplayMonitorFrameOverlay,
     _EDGE_TRIGGER_PX,
     _ERROR_SHOW_MS,
+    _REPLAY_FRAME_THICKNESS,
     clip_step_snippet,
+    replay_frame_badge_origin,
+    replay_frame_strip_geometries,
+    resolve_replay_frame_monitors,
 )
 
 
@@ -184,3 +189,50 @@ def test_cursor_at_top_edge_uses_monitor_top(monkeypatch) -> None:
     # Second monitor is shifted up; its own top edge should trigger.
     assert overlay._cursor_at_top_edge(2000, -200) is True
     assert overlay._cursor_at_top_edge(2000, -200 + _EDGE_TRIGGER_PX + 1) is False
+
+
+def test_resolve_replay_frame_monitors_selected_and_fallback() -> None:
+    monitors = [
+        {"left": 0, "top": 0, "width": 800, "height": 600},
+        {"left": 800, "top": 0, "width": 1024, "height": 768},
+    ]
+    assert resolve_replay_frame_monitors(None, monitors=monitors) == monitors
+    assert resolve_replay_frame_monitors([], monitors=monitors) == monitors
+    assert resolve_replay_frame_monitors([2], monitors=monitors) == [monitors[1]]
+    assert resolve_replay_frame_monitors([1, 2, 2, 99], monitors=monitors) == monitors
+    # Invalid-only selection falls back to all physical monitors.
+    assert resolve_replay_frame_monitors([99], monitors=monitors) == monitors
+    assert resolve_replay_frame_monitors([1], monitors=[]) == []
+
+
+def test_replay_frame_strip_geometries_four_edges() -> None:
+    mon = {"left": 100, "top": 50, "width": 200, "height": 100}
+    strips = replay_frame_strip_geometries(mon, thickness=_REPLAY_FRAME_THICKNESS)
+    assert strips == [
+        (200, 4, 100, 50),
+        (200, 4, 100, 146),
+        (4, 92, 100, 54),
+        (4, 92, 296, 54),
+    ]
+    assert replay_frame_badge_origin(mon) == (112, 62)
+
+
+def test_replay_monitor_frame_overlay_destroy_is_idempotent() -> None:
+    class _FakeWin:
+        def __init__(self) -> None:
+            self.destroyed = False
+
+        def destroy(self) -> None:
+            self.destroyed = True
+
+    overlay = ReplayMonitorFrameOverlay.__new__(ReplayMonitorFrameOverlay)
+    wins = [_FakeWin(), _FakeWin()]
+    overlay._destroyed = False
+    overlay._windows = wins
+
+    overlay.destroy()
+    overlay.destroy()
+
+    assert overlay._destroyed is True
+    assert overlay._windows == []
+    assert all(win.destroyed for win in wins)

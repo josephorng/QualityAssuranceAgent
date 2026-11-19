@@ -236,3 +236,37 @@ def test_replay_monitor_frame_overlay_destroy_is_idempotent() -> None:
     assert overlay._destroyed is True
     assert overlay._windows == []
     assert all(win.destroyed for win in wins)
+
+
+def test_fill_verify_checks_does_not_stack_scroll_shells() -> None:
+    """Rebuilding the checklist must destroy CTkScrollableFrame's packed parent."""
+    import customtkinter as ctk
+
+    root = ctk.CTk()
+    root.withdraw()
+    try:
+        overlay = ReplayControlOverlay.__new__(ReplayControlOverlay)
+        overlay._destroyed = False
+        overlay._window = root
+        overlay._edit_frame = ctk.CTkFrame(root, fg_color="transparent")
+        overlay._edit_frame.pack()
+        overlay._checks_empty = ctk.CTkLabel(overlay._edit_frame, text="")
+        overlay._edit_message = ctk.CTkLabel(overlay._edit_frame, text="")
+        overlay._edit_message.pack(anchor="w")
+        overlay._checks_scroll = None
+        overlay._check_vars = []
+
+        checks = [("title", None, "視窗標題", "Demo", True)]
+        overlay._fill_verify_checks(checks)
+        overlay._fill_verify_checks(checks)
+
+        parents = [
+            child
+            for child in overlay._edit_frame.winfo_children()
+            if isinstance(child, ctk.CTkFrame)
+        ]
+        assert len(parents) == 1
+        assert overlay._checks_scroll is not None
+        assert overlay._checks_scroll._parent_frame is parents[0]
+    finally:
+        root.destroy()

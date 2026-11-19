@@ -1800,18 +1800,35 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
         except Exception:
             pass
 
+    def _destroy_checks_scroll(self) -> None:
+        """Drop the checklist scroll area, including CTkScrollableFrame's parent.
+
+        ``CTkScrollableFrame.pack()`` packs ``_parent_frame``, and ``destroy()``
+        only removes the inner frame, so a plain ``destroy()`` leaves an empty
+        checklist shell behind. Re-opening edit then stacks another section.
+        """
+        old = self._checks_scroll
+        self._checks_scroll = None
+        if old is None:
+            return
+        parent = getattr(old, "_parent_frame", None)
+        try:
+            if parent is not None:
+                parent.destroy()
+            else:
+                old.destroy()
+        except Exception:
+            try:
+                old.destroy()
+            except Exception:
+                pass
+
     def _fill_verify_checks(
         self,
         checks: list[tuple[str, int | None, str, str, bool]],
     ) -> None:
         """Rebuild the checklist. Unchecked rows are skipped on replay."""
-        old = self._checks_scroll
-        if old is not None:
-            try:
-                old.destroy()
-            except Exception:
-                pass
-            self._checks_scroll = None
+        self._destroy_checks_scroll()
         self._check_vars = []
         empty = self._checks_empty
         message = self._edit_message

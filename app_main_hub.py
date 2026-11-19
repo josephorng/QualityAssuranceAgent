@@ -471,8 +471,16 @@ class MainHub(ctk.CTk):
     def _is_recording_script_open(self) -> bool:
         return self._script_path is not None and is_recording_script_path(self._script_path)
 
+    def _can_continue_recording(self) -> bool:
+        """Append into the open recording only while on 單一腳本."""
+        try:
+            selected = self._mode_tabs.get()
+        except Exception:
+            selected = _MODE_TAB_SINGLE
+        return selected == _MODE_TAB_SINGLE and self._is_recording_script_open()
+
     def _record_button_idle_label(self) -> str:
-        return "繼續錄製" if self._is_recording_script_open() else "開始錄製"
+        return "繼續錄製" if self._can_continue_recording() else "開始錄製"
 
     def _refresh_record_button_idle_label(self) -> None:
         if self._record_btn is None:
@@ -802,6 +810,7 @@ class MainHub(ctk.CTk):
             return
         self._persist_hub_ui_state()
         self._sync_tool_cache_checkbox_for_mode()
+        self._refresh_record_button_idle_label()
         if selected != _MODE_TAB_QUEUE:
             return
         if self._confirm_proceed_with_unsaved_script():
@@ -810,6 +819,7 @@ class MainHub(ctk.CTk):
             self._mode_tabs.set(_MODE_TAB_SINGLE)
         except Exception:
             pass
+        self._refresh_record_button_idle_label()
 
     def _refresh_smart_path_label(self) -> None:
         if self._smart_goal_path is not None:
@@ -3825,7 +3835,7 @@ class MainHub(ctk.CTk):
         if self._recording_session.is_active():
             return
         existing_run_dir: Path | None = None
-        if self._is_recording_script_open() and self._script_path is not None:
+        if self._can_continue_recording() and self._script_path is not None:
             existing_run_dir = Path(self._script_path)
         try:
             self._recording_session.set_suppress_hotkey_keys(True)

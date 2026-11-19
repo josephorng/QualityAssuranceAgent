@@ -98,6 +98,28 @@ def test_resolve_hub_run_mode(tab: str, has_steps: bool, expected: str) -> None:
     assert resolve_hub_run_mode(selected_tab=tab, script_has_steps=has_steps) == expected
 
 
+def test_record_button_idle_label_only_continues_in_single_mode(tmp_path: Path) -> None:
+    from app_main_hub import MainHub, _MODE_TAB_QUEUE, _MODE_TAB_SINGLE, _MODE_TAB_SMART
+
+    run_dir = tmp_path / "rec"
+    run_dir.mkdir()
+    (run_dir / "session.json").write_text("{}", encoding="utf-8")
+
+    hub = MainHub.__new__(MainHub)
+    hub._script_path = run_dir
+    hub._mode_tabs = SimpleNamespace(get=lambda: _MODE_TAB_SINGLE)
+    assert hub._can_continue_recording() is True
+    assert hub._record_button_idle_label() == "繼續錄製"
+
+    hub._mode_tabs = SimpleNamespace(get=lambda: _MODE_TAB_QUEUE)
+    assert hub._can_continue_recording() is False
+    assert hub._record_button_idle_label() == "開始錄製"
+
+    hub._mode_tabs = SimpleNamespace(get=lambda: _MODE_TAB_SMART)
+    assert hub._can_continue_recording() is False
+    assert hub._record_button_idle_label() == "開始錄製"
+
+
 def test_is_smart_mode_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(SMART_MODE_ENV, raising=False)
     assert is_smart_mode() is False

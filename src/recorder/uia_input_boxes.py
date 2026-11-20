@@ -1,6 +1,7 @@
 """Live UIA Edit/Document/ComboBox/Pane/ScrollBar + labeled-control enumeration.
 
-One FindAll under a window hwnd. Recording and replay use the snapshot as its
+Budgeted ControlView walk under a window hwnd (legacy FindAllBuildCache via
+``CUA_UIA_FINDALL_LEGACY=1``). Recording and replay use the snapshot as its
 own candidate list, or YOLO+OCR when that list is not enough. The two lists
 are not merged.
 
@@ -15,13 +16,15 @@ scrollbar rectangle.
 from __future__ import annotations
 
 import ctypes
+import heapq
 import os
 import re
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from ctypes import wintypes
-from typing import Any, Callable, Iterator
+from dataclasses import dataclass
+from typing import Any, Callable, Iterator, TypeVar
 
 from cua_mcp.geometry import (
     intersection_area_xywh,
@@ -86,8 +89,10 @@ _UIA_GET_CACHED_BOUNDING_RECTANGLE = 75
 _UIA_CACHE_REQUEST_ADD_PROPERTY = 3
 _UIA_CACHE_REQUEST_PUT_TREE_SCOPE = 7
 
-# IUIAutomationTreeWalker
+# IUIAutomationTreeWalker (IUnknown 0..2)
 _UIA_TREE_WALKER_GET_PARENT_ELEMENT = 3
+_UIA_TREE_WALKER_GET_FIRST_CHILD_ELEMENT = 4
+_UIA_TREE_WALKER_GET_NEXT_SIBLING_ELEMENT = 6
 
 # IUIAutomationElementArray
 _UIA_ARRAY_GET_LENGTH = 3
@@ -136,6 +141,38 @@ _VT_I4 = 3
 # the top-level window area (or Window/Document / hwnd root).
 _HOVER_SUBTREE_AREA_FRAC = 0.15
 _HOVER_SUBTREE_MAX_CLIMB = 12
+
+# Budgeted ControlView walk (replaces unbounded FindAllBuildCache).
+_DEFAULT_WALK_MAX_HITS = 500
+_DEFAULT_WALK_MAX_NODES = 4000
+_DEFAULT_WALK_MAX_SECONDS = 2.0
+_DEFAULT_WALK_MAX_CHILDREN_PER_PARENT = 80
+_WALK_OFFSCREEN_SCORE_BASE = 1_000_000_000.0
+_WALK_MISSING_BBOX_SCORE = 1_000_000_000_000.0
+
+
+@dataclass(frozen=True)
+class WalkBudgets:
+    """Concurrent stop limits for the budgeted ControlView walk (first trip wins)."""
+
+    max_hits: int = _DEFAULT_WALK_MAX_HITS
+    max_nodes: int = _DEFAULT_WALK_MAX_NODES
+    max_seconds: float = _DEFAULT_WALK_MAX_SECONDS
+    max_children_per_parent: int = _DEFAULT_WALK_MAX_CHILDREN_PER_PARENT
+
+
+@dataclass(frozen=True)
+class WalkResult:
+    """Outcome counters for a budgeted walk (hits may be partial when truncated)."""
+
+    hits: int
+    nodes: int
+    elapsed_s: float
+    truncated: bool
+    stop_reason: str
+
+
+_TNode = TypeVar("_TNode")
 
 _SCROLLBAR_THUMB_AUTOMATION_ID = "ScrollbarThumb"
 _SCROLLBAR_LINE_BUTTON_AUTOMATION_IDS = frozenset({"UpButton", "DownButton"})
@@ -1004,16 +1041,16 @@ def _element_label(element: ctypes.c_void_p, *, cached_name: bool = False) -> st
     return _element_label_parts(element, cached_name=cached_name)[0]
 
 
-_findall_timing_samples: ContextVar[list[dict[str, float | int]] | None] = ContextVar(
+_findall_timing_samples: ContextVar[list[dict[str, Any]] | None] = ContextVar(
     "findall_timing_samples",
     default=None,
 )
 
 
 @contextmanager
-def bind_findall_timing() -> Iterator[list[dict[str, float | int]]]:
-    """Accumulate ``findall_s`` / ``findall_count`` for each FindAllBuildCache."""
-    samples: list[dict[str, float | int]] = []
+def bind_findall_timing() -> Iterator[list[dict[str, Any]]]:
+    """Accumulate ``findall_s`` / ``findall_count`` for each UIA enumerate walk."""
+    samples: list[dict[str, Any]] = []
     token = _findall_timing_samples.set(samples)
     try:
         yield samples
@@ -1021,19 +1058,28 @@ def bind_findall_timing() -> Iterator[list[dict[str, float | int]]]:
         _findall_timing_samples.reset(token)
 
 
-def _note_findall_timing(*, elapsed_s: float, count: int) -> None:
+def _note_findall_timing(
+    *,
+    elapsed_s: float,
+    count: int,
+    truncated: bool = False,
+    stop_reason: str = "",
+) -> None:
     samples = _findall_timing_samples.get()
     if samples is not None:
-        samples.append(
-            {
-                "findall_s": round(float(elapsed_s), 3),
-                "findall_count": int(count),
-            }
-        )
+        row: dict[str, Any] = {
+            "findall_s": round(float(elapsed_s), 3),
+            "findall_count": int(count),
+            "walk_truncated": bool(truncated),
+        }
+        reason = str(stop_reason or "").strip()
+        if reason:
+            row["walk_stop_reason"] = reason
+        samples.append(row)
 
 
 def summarize_findall_timing(
-    samples: list[dict[str, float | int]] | None,
+    samples: list[dict[str, Any]] | None,
 ) -> tuple[float, int, int]:
     """Return ``(total_seconds, call_count, total_hits)`` for FindAll samples."""
     if not samples:
@@ -1101,17 +1147,7 @@ def uia_text_element_at_point(
         _note_element_from_point_elapsed(time.perf_counter() - started)
 
 
-def element_from_point_name_value(x: int, y: int) -> dict[str, Any]:
-    """Feasibility probe: raw UIA Name/Value (+ leaf bbox) under a screen point.
-
-    Always returns ``{"element_from_point_s": float}`` for the wall time of
-    the probe. When Name and/or Value are non-empty, also includes
-    ``"name"`` / ``"value"``. When the live leaf has a box, also includes
-    screen ``"bbox"`` xywh and ``"control_type"`` (UIA suffix token). Used to
-    stash ElementFromPoint results on recorded pointer steps without requiring
-    FindAll to expose the same leaf; analysis may inject the leaf as a
-    FindAll-shaped peer for instruction naming.
-    """
+def _element_from_point_name_value_impl(x: int, y: int) -> dict[str, Any]:
     started = time.perf_counter()
     probed = uia_text_element_at_point(int(x), int(y))
     elapsed_s = round(time.perf_counter() - started, 3)
@@ -1135,6 +1171,33 @@ def element_from_point_name_value(x: int, y: int) -> dict[str, Any]:
     if control_type:
         out["control_type"] = control_type
     return out
+
+
+def element_from_point_name_value(x: int, y: int) -> dict[str, Any]:
+    """Feasibility probe: raw UIA Name/Value (+ leaf bbox) under a screen point.
+
+    Always returns ``{"element_from_point_s": float}`` for the wall time of
+    the probe. When Name and/or Value are non-empty, also includes
+    ``"name"`` / ``"value"``. When the live leaf has a box, also includes
+    screen ``"bbox"`` xywh and ``"control_type"`` (UIA suffix token). Used to
+    stash ElementFromPoint results on recorded pointer steps without requiring
+    FindAll to expose the same leaf; analysis may inject the leaf as a
+    FindAll-shaped peer for instruction naming. Marshals onto the UIA worker.
+    """
+    from src.recorder.uia_thread import uia_call
+
+    try:
+        result = uia_call(
+            _element_from_point_name_value_impl,
+            int(x),
+            int(y),
+            timeout_s=2.5,
+        )
+    except Exception:
+        return {"element_from_point_s": 0.0}
+    if isinstance(result, dict):
+        return result
+    return {"element_from_point_s": 0.0}
 
 
 def _uia_text_element_at_point_impl(
@@ -1634,34 +1697,469 @@ def compose_scrollbar_screen_rects(
     return list(scrollbar_controls) + composed, used
 
 
-def enumerate_edit_document_scrollbar_screen(
-    hwnd: int,
+def _use_legacy_findall() -> bool:
+    return str(os.environ.get("CUA_UIA_FINDALL_LEGACY", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def default_walk_budgets() -> WalkBudgets:
+    return WalkBudgets()
+
+
+def chebyshev_distance_point_to_xyxy(
+    x: int,
+    y: int,
+    box: ScreenXyxy,
+) -> int:
+    """Chebyshev distance from a point to the nearest edge of ``box`` (0 if inside)."""
+    left, top, right, bottom = (int(v) for v in box)
+    dx = 0
+    if int(x) < left:
+        dx = left - int(x)
+    elif int(x) > right:
+        dx = int(x) - right
+    dy = 0
+    if int(y) < top:
+        dy = top - int(y)
+    elif int(y) > bottom:
+        dy = int(y) - bottom
+    return max(dx, dy)
+
+
+def walk_visit_score(
+    box: ScreenXyxy | None,
     *,
-    root_element: ctypes.c_void_p | None = None,
-    automation: ctypes.c_void_p | None = None,
-) -> tuple[list[ScreenXyxy], list[ScreenXyxy], list[LabeledScreenXyxy], list[str]]:
-    """One FindAllBuildCache Edit|Document|ComboBox|Pane|ScrollBar|Thumb + labeled texts.
+    clip: ScreenXyxy,
+    cursor_xy: tuple[int, int] | None,
+) -> float:
+    """Lower scores are visited first (near cursor / on-screen preferred)."""
+    if box is None:
+        return float(_WALK_MISSING_BBOX_SCORE)
+    if _xyxy_intersection_area(box, clip) <= 0:
+        cx = (int(clip[0]) + int(clip[2])) // 2
+        cy = (int(clip[1]) + int(clip[3])) // 2
+        if cursor_xy is not None:
+            cx, cy = int(cursor_xy[0]), int(cursor_xy[1])
+        return float(_WALK_OFFSCREEN_SCORE_BASE) + float(
+            chebyshev_distance_point_to_xyxy(cx, cy, box)
+        )
+    if cursor_xy is not None:
+        return float(
+            chebyshev_distance_point_to_xyxy(
+                int(cursor_xy[0]), int(cursor_xy[1]), box
+            )
+        )
+    cx = (int(clip[0]) + int(clip[2])) // 2
+    cy = (int(clip[1]) + int(clip[3])) // 2
+    return float(chebyshev_distance_point_to_xyxy(cx, cy, box))
 
-    Returns ``(inputs, scrollbars, labeled_texts, input_labels)``. ``input_labels``
-    is aligned with ``inputs`` (Name/AutomationId landmark text, possibly empty).
 
-    When ``automation`` / ``root_element`` are provided the caller owns them (not
-    released here). Otherwise a top-level ``ElementFromHandle(hwnd)`` root is used.
+def run_budgeted_priority_walk(
+    seed_nodes: list[_TNode],
+    *,
+    node_bbox: Callable[[_TNode], ScreenXyxy | None],
+    node_matches: Callable[[_TNode], bool],
+    on_match: Callable[[_TNode], None],
+    node_children: Callable[[_TNode], list[_TNode]],
+    release_node: Callable[[_TNode], None],
+    clip: ScreenXyxy,
+    cursor_xy: tuple[int, int] | None,
+    budgets: WalkBudgets | None = None,
+    clock: Callable[[], float] = time.perf_counter,
+) -> WalkResult:
+    """Priority walk with concurrent hit/node/time budgets (first trip wins).
+
+    ``seed_nodes`` are typically the ControlView children of the walk root
+    (TreeScope Descendants excludes the root itself). Caller owns releasing
+    any nodes not passed to ``release_node`` only through this helper: every
+    seeded/enqueued node is either released after visit or released when
+    discarded by the sibling cap.
     """
+    limits = budgets or default_walk_budgets()
+    max_hits = max(0, int(limits.max_hits))
+    max_nodes = max(0, int(limits.max_nodes))
+    max_seconds = max(0.0, float(limits.max_seconds))
+    max_children = max(0, int(limits.max_children_per_parent))
+    started = float(clock())
+    hits = 0
+    nodes = 0
+    stop_reason = "complete"
+    truncated = False
+    seq = 0
+    heap: list[tuple[float, int, _TNode]] = []
+
+    def _push(node: _TNode) -> None:
+        nonlocal seq
+        score = walk_visit_score(
+            node_bbox(node), clip=clip, cursor_xy=cursor_xy
+        )
+        heapq.heappush(heap, (float(score), int(seq), node))
+        seq += 1
+
+    for seed in seed_nodes:
+        _push(seed)
+
+    try:
+        while heap:
+            elapsed = float(clock()) - started
+            if max_seconds > 0.0 and elapsed >= max_seconds:
+                stop_reason = "max_seconds"
+                truncated = True
+                break
+            if max_nodes > 0 and nodes >= max_nodes:
+                stop_reason = "max_nodes"
+                truncated = True
+                break
+            if max_hits > 0 and hits >= max_hits:
+                stop_reason = "max_hits"
+                truncated = True
+                break
+
+            _score, _seq, node = heapq.heappop(heap)
+            nodes += 1
+            try:
+                if node_matches(node):
+                    on_match(node)
+                    hits += 1
+                    if max_hits > 0 and hits >= max_hits:
+                        stop_reason = "max_hits"
+                        truncated = True
+                        break
+                children = list(node_children(node) or [])
+                if not children:
+                    continue
+                ranked: list[tuple[float, int, _TNode]] = []
+                for index, child in enumerate(children):
+                    child_score = walk_visit_score(
+                        node_bbox(child), clip=clip, cursor_xy=cursor_xy
+                    )
+                    ranked.append((float(child_score), int(index), child))
+                ranked.sort(key=lambda item: (item[0], item[1]))
+                keep = ranked if max_children <= 0 else ranked[:max_children]
+                drop = ranked[len(keep) :]
+                for _cs, _ci, child in drop:
+                    release_node(child)
+                for _cs, _ci, child in keep:
+                    _push(child)
+            finally:
+                release_node(node)
+    finally:
+        while heap:
+            _score, _seq, node = heapq.heappop(heap)
+            release_node(node)
+
+    elapsed_s = float(clock()) - started
+    return WalkResult(
+        hits=int(hits),
+        nodes=int(nodes),
+        elapsed_s=float(elapsed_s),
+        truncated=bool(truncated),
+        stop_reason=str(stop_reason),
+    )
+
+
+def _enumerate_match_type_ids() -> frozenset[int]:
+    return frozenset(
+        (
+            *_UIA_INPUT_CONTROL_TYPE_IDS,
+            _UIA_SCROLLBAR_CONTROL_TYPE_ID,
+            _UIA_THUMB_CONTROL_TYPE_ID,
+            *_LABELED_TEXT_CONTROL_TYPES,
+        )
+    )
+
+
+def _get_control_view_walker(
+    automation: ctypes.c_void_p,
+) -> ctypes.c_void_p | None:
+    get_walker = ctypes.WINFUNCTYPE(
+        ctypes.HRESULT,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    )(
+        _com_vtable(automation, _UIA_GET_CONTROL_VIEW_WALKER + 1)[
+            _UIA_GET_CONTROL_VIEW_WALKER
+        ]
+    )
+    walker_ptr = ctypes.c_void_p()
+    hr = get_walker(automation, ctypes.byref(walker_ptr))
+    if hr != _S_OK or not walker_ptr:
+        return None
+    return walker_ptr
+
+
+def _walker_first_child(
+    walker: ctypes.c_void_p, element: ctypes.c_void_p
+) -> ctypes.c_void_p | None:
+    getter = ctypes.WINFUNCTYPE(
+        ctypes.HRESULT,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    )(
+        _com_vtable(walker, _UIA_TREE_WALKER_GET_FIRST_CHILD_ELEMENT + 1)[
+            _UIA_TREE_WALKER_GET_FIRST_CHILD_ELEMENT
+        ]
+    )
+    child = ctypes.c_void_p()
+    hr = getter(walker, element, ctypes.byref(child))
+    if hr != _S_OK or not child:
+        return None
+    return child
+
+
+def _walker_next_sibling(
+    walker: ctypes.c_void_p, element: ctypes.c_void_p
+) -> ctypes.c_void_p | None:
+    getter = ctypes.WINFUNCTYPE(
+        ctypes.HRESULT,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    )(
+        _com_vtable(walker, _UIA_TREE_WALKER_GET_NEXT_SIBLING_ELEMENT + 1)[
+            _UIA_TREE_WALKER_GET_NEXT_SIBLING_ELEMENT
+        ]
+    )
+    sibling = ctypes.c_void_p()
+    hr = getter(walker, element, ctypes.byref(sibling))
+    if hr != _S_OK or not sibling:
+        return None
+    return sibling
+
+
+def _walker_children(
+    walker: ctypes.c_void_p, element: ctypes.c_void_p
+) -> list[ctypes.c_void_p]:
+    kids: list[ctypes.c_void_p] = []
+    child = _walker_first_child(walker, element)
+    while child is not None:
+        kids.append(child)
+        child = _walker_next_sibling(walker, child)
+    return kids
+
+
+def _clip_xyxy_for_root(
+    root: ctypes.c_void_p,
+    hwnd: int,
+) -> ScreenXyxy:
+    box = _element_bounding_xyxy(root, cached=False)
+    if box is not None:
+        return box
+    window = _window_screen_xywh(int(hwnd))
+    if window is not None:
+        left, top, width, height = window
+        return (int(left), int(top), int(left + width), int(top + height))
+    return (0, 0, 1, 1)
+
+
+def _classify_enumerated_element(
+    element: ctypes.c_void_p,
+    box: ScreenXyxy,
+    control_type: int | None,
+    *,
+    cached: bool,
+    inputs: list[ScreenXyxy],
+    input_labels: list[str],
+    scrollbars: list[ScreenXyxy],
+    scrollbar_thumbs: list[ScreenXyxy],
+    scrollbar_line_buttons: list[tuple[ScreenXyxy, str]],
+    labeled: list[LabeledScreenXyxy],
+) -> bool:
+    """Append element into enumerate buckets. Returns True when it counted as a hit."""
+    if control_type is None or box is None:
+        return False
+    automation_id = ""
+    part_name = ""
+    if control_type in (
+        _UIA_THUMB_CONTROL_TYPE_ID,
+        _UIA_BUTTON_CONTROL_TYPE_ID,
+    ):
+        automation_id = _element_automation_id(element, cached=cached)
+        if not automation_id:
+            automation_id = _element_automation_id(element, cached=False)
+        part_name = _element_current_name(element, cached=cached)
+        if not part_name:
+            part_name = _element_current_name(element, cached=False)
+    if control_type == _UIA_SCROLLBAR_CONTROL_TYPE_ID:
+        scrollbars.append(box)
+        return True
+    if control_type == _UIA_THUMB_CONTROL_TYPE_ID and (
+        is_uia_scrollbar_thumb_part(
+            automation_id=automation_id,
+            name=part_name,
+        )
+    ):
+        scrollbar_thumbs.append(box)
+        return True
+    if control_type == _UIA_BUTTON_CONTROL_TYPE_ID and (
+        is_uia_scrollbar_line_button_part(
+            automation_id=automation_id,
+            name=part_name,
+        )
+    ):
+        scrollbar_line_buttons.append(
+            (
+                box,
+                part_name or _element_label(element, cached_name=cached),
+            )
+        )
+        return True
+    if control_type in _UIA_INPUT_CONTROL_TYPE_IDS:
+        name = _element_current_name(element, cached=cached)
+        if not name:
+            name = _element_current_name(element, cached=False)
+        auto_id = _element_automation_id(element, cached=cached)
+        if not auto_id:
+            auto_id = _element_automation_id(element, cached=False)
+        inputs.append(box)
+        input_labels.append(compose_uia_input_landmark_label(name, auto_id))
+        return True
+    if control_type in _LABELED_TEXT_CONTROL_TYPES:
+        label = _element_label(element, cached_name=cached)
+        if label:
+            labeled.append(
+                (box, label, control_type_token_from_id(control_type))
+            )
+            return True
+        return False
+    return False
+
+
+def _finalize_enumerate_lists(
+    inputs: list[ScreenXyxy],
+    input_labels: list[str],
+    scrollbars: list[ScreenXyxy],
+    scrollbar_thumbs: list[ScreenXyxy],
+    scrollbar_line_buttons: list[tuple[ScreenXyxy, str]],
+    labeled: list[LabeledScreenXyxy],
+) -> tuple[list[ScreenXyxy], list[ScreenXyxy], list[LabeledScreenXyxy], list[str]]:
+    composed, used_line_buttons = compose_scrollbar_screen_rects(
+        scrollbars,
+        scrollbar_thumbs,
+        [box for box, _label in scrollbar_line_buttons],
+    )
+    for index, (box, label) in enumerate(scrollbar_line_buttons):
+        if index in used_line_buttons or not label:
+            continue
+        labeled.append((box, label, "button"))
+    return inputs, composed, labeled, input_labels
+
+
+def _enumerate_via_budgeted_walk(
+    *,
+    hwnd: int,
+    root: ctypes.c_void_p,
+    automation: ctypes.c_void_p,
+    cursor_xy: tuple[int, int] | None,
+    budgets: WalkBudgets | None,
+) -> tuple[list[ScreenXyxy], list[ScreenXyxy], list[LabeledScreenXyxy], list[str]]:
     empty: tuple[
         list[ScreenXyxy], list[ScreenXyxy], list[LabeledScreenXyxy], list[str]
     ] = ([], [], [], [])
-    if os.name != "nt" or not int(hwnd or 0):
+    match_types = _enumerate_match_type_ids()
+    walker = _get_control_view_walker(automation)
+    if walker is None:
         return empty
+    inputs: list[ScreenXyxy] = []
+    input_labels: list[str] = []
+    scrollbars: list[ScreenXyxy] = []
+    scrollbar_thumbs: list[ScreenXyxy] = []
+    scrollbar_line_buttons: list[tuple[ScreenXyxy, str]] = []
+    labeled: list[LabeledScreenXyxy] = []
+    clip = _clip_xyxy_for_root(root, int(hwnd))
+    try:
+        seeds = _walker_children(walker, root)
 
-    ole32, initialized_here = _coinitialize_uia()
-    if ole32 is None:
-        return empty
+        def _bbox(node: ctypes.c_void_p) -> ScreenXyxy | None:
+            return _element_bounding_xyxy(node, cached=False)
 
-    own_automation = automation is None
-    own_root = root_element is None
-    automation_ptr: ctypes.c_void_p | None = automation
-    root: ctypes.c_void_p | None = root_element
+        def _matches(node: ctypes.c_void_p) -> bool:
+            control_type = _element_control_type(node, cached=False)
+            if control_type is None or int(control_type) not in match_types:
+                return False
+            box = _element_bounding_xyxy(node, cached=False)
+            if box is None:
+                return False
+            # Thumb/line-button filters may reject; probe classify without append.
+            if control_type == _UIA_THUMB_CONTROL_TYPE_ID:
+                auto = _element_automation_id(node, cached=False)
+                name = _element_current_name(node, cached=False)
+                return is_uia_scrollbar_thumb_part(automation_id=auto, name=name)
+            if control_type == _UIA_BUTTON_CONTROL_TYPE_ID:
+                auto = _element_automation_id(node, cached=False)
+                name = _element_current_name(node, cached=False)
+                if is_uia_scrollbar_line_button_part(
+                    automation_id=auto, name=name
+                ):
+                    return True
+                # Ordinary buttons are labeled-text matches.
+                return bool(_element_label(node, cached_name=False))
+            if control_type in _LABELED_TEXT_CONTROL_TYPES:
+                return bool(_element_label(node, cached_name=False))
+            return True
+
+        def _on_match(node: ctypes.c_void_p) -> None:
+            box = _element_bounding_xyxy(node, cached=False)
+            control_type = _element_control_type(node, cached=False)
+            if box is None or control_type is None:
+                return
+            _classify_enumerated_element(
+                node,
+                box,
+                control_type,
+                cached=False,
+                inputs=inputs,
+                input_labels=input_labels,
+                scrollbars=scrollbars,
+                scrollbar_thumbs=scrollbar_thumbs,
+                scrollbar_line_buttons=scrollbar_line_buttons,
+                labeled=labeled,
+            )
+
+        result = run_budgeted_priority_walk(
+            seeds,
+            node_bbox=_bbox,
+            node_matches=_matches,
+            on_match=_on_match,
+            node_children=lambda node: _walker_children(walker, node),
+            release_node=_com_release,
+            clip=clip,
+            cursor_xy=cursor_xy,
+            budgets=budgets,
+        )
+        _note_findall_timing(
+            elapsed_s=result.elapsed_s,
+            count=result.hits,
+            truncated=result.truncated,
+            stop_reason=result.stop_reason,
+        )
+        if result.hits <= 0 and not inputs and not scrollbars and not labeled:
+            return empty
+        return _finalize_enumerate_lists(
+            inputs,
+            input_labels,
+            scrollbars,
+            scrollbar_thumbs,
+            scrollbar_line_buttons,
+            labeled,
+        )
+    finally:
+        _com_release(walker)
+
+
+def _enumerate_via_legacy_findall(
+    *,
+    root: ctypes.c_void_p,
+    automation: ctypes.c_void_p,
+) -> tuple[list[ScreenXyxy], list[ScreenXyxy], list[LabeledScreenXyxy], list[str]]:
+    empty: tuple[
+        list[ScreenXyxy], list[ScreenXyxy], list[LabeledScreenXyxy], list[str]
+    ] = ([], [], [], [])
     cache_request: ctypes.c_void_p | None = None
     leaf_conds: list[ctypes.c_void_p] = []
     or_nodes: list[ctypes.c_void_p] = []
@@ -1673,35 +2171,18 @@ def enumerate_edit_document_scrollbar_screen(
     scrollbar_line_buttons: list[tuple[ScreenXyxy, str]] = []
     labeled: list[LabeledScreenXyxy] = []
     try:
-        if automation_ptr is None:
-            automation_ptr = _create_uia_automation()
-            if automation_ptr is None:
-                return empty
-        if root is None:
-            root = _element_from_handle(automation_ptr, int(hwnd))
-            if root is None:
-                return empty
-
-        type_ids = (
-            *_UIA_INPUT_CONTROL_TYPE_IDS,
-            _UIA_SCROLLBAR_CONTROL_TYPE_ID,
-            _UIA_THUMB_CONTROL_TYPE_ID,
-            *_LABELED_TEXT_CONTROL_TYPES,
-        )
+        type_ids = tuple(_enumerate_match_type_ids())
         for type_id in type_ids:
-            cond = _create_control_type_condition(automation_ptr, type_id)
+            cond = _create_control_type_condition(automation, type_id)
             if cond is None:
                 return empty
             leaf_conds.append(cond)
-
-        or_cond, or_nodes = _fold_or_conditions(automation_ptr, leaf_conds)
+        or_cond, or_nodes = _fold_or_conditions(automation, leaf_conds)
         if or_cond is None:
             return empty
-
-        cache_request = _create_findall_cache_request(automation_ptr)
+        cache_request = _create_findall_cache_request(automation)
         if cache_request is None:
             return empty
-
         find_all = ctypes.WINFUNCTYPE(
             ctypes.HRESULT,
             ctypes.c_void_p,
@@ -1728,7 +2209,6 @@ def enumerate_edit_document_scrollbar_screen(
             _note_findall_timing(elapsed_s=findall_s, count=0)
             return empty
         found = found_ptr
-
         get_length = ctypes.WINFUNCTYPE(
             ctypes.HRESULT,
             ctypes.c_void_p,
@@ -1746,7 +2226,6 @@ def enumerate_edit_document_scrollbar_screen(
         _note_findall_timing(elapsed_s=findall_s, count=hit_count)
         if hit_count <= 0:
             return empty
-
         for index in range(hit_count):
             elem_ptr = ctypes.c_void_p()
             hr = get_element(found, index, ctypes.byref(elem_ptr))
@@ -1762,71 +2241,28 @@ def enumerate_edit_document_scrollbar_screen(
                 control_type = _element_control_type(element, cached=True)
                 if control_type is None:
                     control_type = _element_control_type(element, cached=False)
-                automation_id = ""
-                part_name = ""
-                if control_type in (
-                    _UIA_THUMB_CONTROL_TYPE_ID,
-                    _UIA_BUTTON_CONTROL_TYPE_ID,
-                ):
-                    automation_id = _element_automation_id(element, cached=True)
-                    if not automation_id:
-                        automation_id = _element_automation_id(
-                            element, cached=False
-                        )
-                    part_name = _element_current_name(element, cached=True)
-                    if not part_name:
-                        part_name = _element_current_name(element, cached=False)
-                if control_type == _UIA_SCROLLBAR_CONTROL_TYPE_ID:
-                    scrollbars.append(box)
-                elif control_type == _UIA_THUMB_CONTROL_TYPE_ID and (
-                    is_uia_scrollbar_thumb_part(
-                        automation_id=automation_id,
-                        name=part_name,
-                    )
-                ):
-                    scrollbar_thumbs.append(box)
-                elif control_type == _UIA_BUTTON_CONTROL_TYPE_ID and (
-                    is_uia_scrollbar_line_button_part(
-                        automation_id=automation_id,
-                        name=part_name,
-                    )
-                ):
-                    scrollbar_line_buttons.append(
-                        (
-                            box,
-                            part_name
-                            or _element_label(element, cached_name=True),
-                        )
-                    )
-                elif control_type in _UIA_INPUT_CONTROL_TYPE_IDS:
-                    name = _element_current_name(element, cached=True)
-                    if not name:
-                        name = _element_current_name(element, cached=False)
-                    auto_id = _element_automation_id(element, cached=True)
-                    if not auto_id:
-                        auto_id = _element_automation_id(element, cached=False)
-                    inputs.append(box)
-                    input_labels.append(
-                        compose_uia_input_landmark_label(name, auto_id)
-                    )
-                elif control_type in _LABELED_TEXT_CONTROL_TYPES:
-                    label = _element_label(element, cached_name=True)
-                    if label:
-                        labeled.append(
-                            (box, label, control_type_token_from_id(control_type))
-                        )
+                _classify_enumerated_element(
+                    element,
+                    box,
+                    control_type,
+                    cached=True,
+                    inputs=inputs,
+                    input_labels=input_labels,
+                    scrollbars=scrollbars,
+                    scrollbar_thumbs=scrollbar_thumbs,
+                    scrollbar_line_buttons=scrollbar_line_buttons,
+                    labeled=labeled,
+                )
             finally:
                 _com_release(element)
-        scrollbars, used_line_buttons = compose_scrollbar_screen_rects(
+        return _finalize_enumerate_lists(
+            inputs,
+            input_labels,
             scrollbars,
             scrollbar_thumbs,
-            [box for box, _label in scrollbar_line_buttons],
+            scrollbar_line_buttons,
+            labeled,
         )
-        for index, (box, label) in enumerate(scrollbar_line_buttons):
-            if index in used_line_buttons or not label:
-                continue
-            labeled.append((box, label, "button"))
-        return inputs, scrollbars, labeled, input_labels
     except Exception:
         return empty
     finally:
@@ -1836,6 +2272,62 @@ def enumerate_edit_document_scrollbar_screen(
             _com_release(node)
         for cond in leaf_conds:
             _com_release(cond)
+
+
+def enumerate_edit_document_scrollbar_screen(
+    hwnd: int,
+    *,
+    root_element: ctypes.c_void_p | None = None,
+    automation: ctypes.c_void_p | None = None,
+    cursor_xy: tuple[int, int] | None = None,
+    budgets: WalkBudgets | None = None,
+) -> tuple[list[ScreenXyxy], list[ScreenXyxy], list[LabeledScreenXyxy], list[str]]:
+    """Budgeted ControlView walk (or legacy FindAll) for inputs/scrollbars/texts.
+
+    Returns ``(inputs, scrollbars, labeled_texts, input_labels)``. ``input_labels``
+    is aligned with ``inputs`` (Name/AutomationId landmark text, possibly empty).
+
+    When ``automation`` / ``root_element`` are provided the caller owns them (not
+    released here). Otherwise a top-level ``ElementFromHandle(hwnd)`` root is used.
+    ``cursor_xy`` biases visit order toward the pointer when set.
+    """
+    empty: tuple[
+        list[ScreenXyxy], list[ScreenXyxy], list[LabeledScreenXyxy], list[str]
+    ] = ([], [], [], [])
+    if os.name != "nt" or not int(hwnd or 0):
+        return empty
+
+    ole32, initialized_here = _coinitialize_uia()
+    if ole32 is None:
+        return empty
+
+    own_automation = automation is None
+    own_root = root_element is None
+    automation_ptr: ctypes.c_void_p | None = automation
+    root: ctypes.c_void_p | None = root_element
+    try:
+        if automation_ptr is None:
+            automation_ptr = _create_uia_automation()
+            if automation_ptr is None:
+                return empty
+        if root is None:
+            root = _element_from_handle(automation_ptr, int(hwnd))
+            if root is None:
+                return empty
+        if _use_legacy_findall():
+            return _enumerate_via_legacy_findall(
+                root=root, automation=automation_ptr
+            )
+        return _enumerate_via_budgeted_walk(
+            hwnd=int(hwnd),
+            root=root,
+            automation=automation_ptr,
+            cursor_xy=cursor_xy,
+            budgets=budgets,
+        )
+    except Exception:
+        return empty
+    finally:
         if own_root:
             _com_release(root)
         if own_automation:
@@ -2344,37 +2836,13 @@ def _snapshot_dict_from_lists(
     return out
 
 
-def snapshot_uia_screen(hwnd: int) -> dict[str, object] | None:
-    """FindAll under ``hwnd`` and return screen-space boxes for later analysis.
-
-    Called after settle on the window-step thread (and once at recording seed).
-    Returns ``None`` when the hwnd cannot be queried. An empty tree is still a
-    snapshot (analysis must not FindAll again).
-    """
-    if os.name != "nt" or not int(hwnd or 0):
-        return None
-    try:
-        inputs, scrollbars, labeled, input_labels = (
-            enumerate_edit_document_scrollbar_screen(int(hwnd))
-        )
-    except Exception:
-        return None
-    return _snapshot_dict_from_lists(
-        int(hwnd), inputs, scrollbars, labeled, input_labels
-    )
-
-
-def snapshot_uia_hover_subtree(
+def _snapshot_uia_screen_impl(
     hwnd: int,
-    x: int,
-    y: int,
+    *,
+    cursor_xy: tuple[int, int] | None = None,
+    budgets: WalkBudgets | None = None,
 ) -> dict[str, object] | None:
-    """Hover warm-up: one automation, ElementFromPoint climb, then FindAllBuildCache.
-
-    Snapshot ``window`` / boxes stay in screen space under the top-level
-    ``hwnd``. Returns ``None`` only when UIA cannot be created; an empty tree is
-    still a snapshot dict.
-    """
+    """Climb from cursor when given, then budgeted walk under the local root."""
     if os.name != "nt" or not int(hwnd or 0):
         return None
     ole32, initialized_here = _coinitialize_uia()
@@ -2387,27 +2855,35 @@ def snapshot_uia_hover_subtree(
         automation = _create_uia_automation()
         if automation is None:
             return None
-        point_el = _element_from_point(automation, int(x), int(y))
-        window = _window_screen_xywh(int(hwnd))
-        window_area = 0
-        if window is not None:
-            window_area = max(0, int(window[2]) * int(window[3]))
-        if point_el is not None and window_area > 0:
-            climb_root = _climb_hover_findall_root(
-                automation,
-                point_el,
-                top_hwnd=int(hwnd),
-                window_area=window_area,
-            )
-        if climb_root is None:
-            climb_root = _element_from_handle(automation, int(hwnd))
-        if climb_root is None:
+        root: ctypes.c_void_p | None = None
+        point: tuple[int, int] | None = None
+        if cursor_xy is not None:
+            point = (int(cursor_xy[0]), int(cursor_xy[1]))
+            point_el = _element_from_point(automation, point[0], point[1])
+            window = _window_screen_xywh(int(hwnd))
+            window_area = 0
+            if window is not None:
+                window_area = max(0, int(window[2]) * int(window[3]))
+            if point_el is not None and window_area > 0:
+                climb_root = _climb_hover_findall_root(
+                    automation,
+                    point_el,
+                    top_hwnd=int(hwnd),
+                    window_area=window_area,
+                )
+            root = climb_root
+        if root is None:
+            root = _element_from_handle(automation, int(hwnd))
+            climb_root = root
+        if root is None:
             return None
         inputs, scrollbars, labeled, input_labels = (
             enumerate_edit_document_scrollbar_screen(
                 int(hwnd),
-                root_element=climb_root,
+                root_element=root,
                 automation=automation,
+                cursor_xy=point,
+                budgets=budgets,
             )
         )
         return _snapshot_dict_from_lists(
@@ -2424,6 +2900,62 @@ def snapshot_uia_hover_subtree(
                 ole32.CoUninitialize()
             except Exception:
                 pass
+
+
+def snapshot_uia_screen(
+    hwnd: int,
+    *,
+    cursor_xy: tuple[int, int] | None = None,
+    budgets: WalkBudgets | None = None,
+) -> dict[str, object] | None:
+    """Budgeted UIA walk under ``hwnd`` (optional cursor climb) for analysis.
+
+    Called after settle on the window-step thread (and once at recording seed).
+    Returns ``None`` when the hwnd cannot be queried. An empty tree is still a
+    snapshot (analysis must not FindAll again). Marshals onto the UIA worker
+    thread when not already running there.
+    """
+    if os.name != "nt" or not int(hwnd or 0):
+        return None
+    from src.recorder.uia_thread import uia_call
+
+    def _run() -> dict[str, object] | None:
+        if cursor_xy is not None:
+            return _snapshot_uia_screen_impl(
+                int(hwnd), cursor_xy=cursor_xy, budgets=budgets
+            )
+        try:
+            inputs, scrollbars, labeled, input_labels = (
+                enumerate_edit_document_scrollbar_screen(
+                    int(hwnd),
+                    cursor_xy=None,
+                    budgets=budgets,
+                )
+            )
+        except Exception:
+            return None
+        return _snapshot_dict_from_lists(
+            int(hwnd), inputs, scrollbars, labeled, input_labels
+        )
+
+    try:
+        return uia_call(_run, timeout_s=2.5)
+    except Exception:
+        return None
+
+
+def snapshot_uia_hover_subtree(
+    hwnd: int,
+    x: int,
+    y: int,
+) -> dict[str, object] | None:
+    """Hover warm-up: ElementFromPoint climb, then budgeted ControlView walk.
+
+    Snapshot ``window`` / boxes stay in screen space under the top-level
+    ``hwnd``. Returns ``None`` only when UIA cannot be created; an empty tree is
+    still a snapshot dict.
+    """
+    return snapshot_uia_screen(int(hwnd), cursor_xy=(int(x), int(y)))
 
 
 def _snapshot_xyxy_list(raw: object) -> list[ScreenXyxy]:

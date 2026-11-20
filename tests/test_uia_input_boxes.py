@@ -688,3 +688,192 @@ def test_sample_uia_ocr_clip_rect_skips_wide_focus() -> None:
         select_fn=_select,
     ) == (10, 20, 30, 40)
     assert calls == [(50, 50)]
+
+
+def test_walk_visit_score_prefers_near_cursor_and_penalizes_offscreen() -> None:
+    from src.recorder.uia_input_boxes import (
+        chebyshev_distance_point_to_xyxy,
+        walk_visit_score,
+    )
+
+    clip = (0, 0, 1000, 1000)
+    near = (90, 90, 110, 110)
+    far = (800, 800, 820, 820)
+    off = (2000, 2000, 2010, 2010)
+    cursor = (100, 100)
+    assert chebyshev_distance_point_to_xyxy(100, 100, near) == 0
+    assert walk_visit_score(near, clip=clip, cursor_xy=cursor) < walk_visit_score(
+        far, clip=clip, cursor_xy=cursor
+    )
+    assert walk_visit_score(off, clip=clip, cursor_xy=cursor) > walk_visit_score(
+        far, clip=clip, cursor_xy=cursor
+    )
+    assert walk_visit_score(None, clip=clip, cursor_xy=cursor) > walk_visit_score(
+        off, clip=clip, cursor_xy=cursor
+    )
+
+
+def test_budgeted_priority_walk_stops_on_max_hits_near_cursor_first() -> None:
+    from src.recorder.uia_input_boxes import WalkBudgets, run_budgeted_priority_walk
+
+    # Flat siblings under an implicit root: ids 0..4 with bboxes left-to-right.
+    boxes = {
+        0: (0, 0, 10, 10),
+        1: (100, 0, 110, 10),
+        2: (200, 0, 210, 10),
+        3: (300, 0, 310, 10),
+        4: (400, 0, 410, 10),
+    }
+    children = {n: [] for n in boxes}
+    matched: list[int] = []
+    released: list[int] = []
+
+    result = run_budgeted_priority_walk(
+        list(boxes.keys()),
+        node_bbox=lambda n: boxes[n],
+        node_matches=lambda _n: True,
+        on_match=lambda n: matched.append(n),
+        node_children=lambda n: list(children[n]),
+        release_node=lambda n: released.append(n),
+        clip=(0, 0, 1000, 1000),
+        cursor_xy=(205, 5),
+        budgets=WalkBudgets(
+            max_hits=2,
+            max_nodes=100,
+            max_seconds=5.0,
+            max_children_per_parent=80,
+        ),
+    )
+    assert result.truncated is True
+    assert result.stop_reason == "max_hits"
+    assert result.hits == 2
+    assert matched[0] == 2  # closest to cursor
+    assert set(released) == set(boxes.keys())
+
+
+def test_budgeted_priority_walk_stops_on_max_nodes() -> None:
+    from src.recorder.uia_input_boxes import WalkBudgets, run_budgeted_priority_walk
+
+    boxes = {i: (i * 10, 0, i * 10 + 5, 5) for i in range(10)}
+    matched: list[int] = []
+
+    result = run_budgeted_priority_walk(
+        list(boxes.keys()),
+        node_bbox=lambda n: boxes[n],
+        node_matches=lambda _n: False,
+        on_match=lambda n: matched.append(n),
+        node_children=lambda _n: [],
+        release_node=lambda _n: None,
+        clip=(0, 0, 1000, 1000),
+        cursor_xy=None,
+        budgets=WalkBudgets(
+            max_hits=500,
+            max_nodes=3,
+            max_seconds=5.0,
+            max_children_per_parent=80,
+        ),
+    )
+    assert result.truncated is True
+    assert result.stop_reason == "max_nodes"
+    assert result.nodes == 3
+    assert matched == []
+
+
+def test_budgeted_priority_walk_sibling_cap_keeps_nearest_children() -> None:
+    from src.recorder.uia_input_boxes import WalkBudgets, run_budgeted_priority_walk
+
+    # Root seed is parent 0; it expands to many children. Cap keeps 2 nearest.
+    boxes = {
+        0: (0, 0, 500, 500),
+        1: (10, 10, 20, 20),
+        2: (100, 10, 110, 20),
+        3: (200, 10, 210, 20),
+        4: (300, 10, 310, 20),
+    }
+    children = {
+        0: [1, 2, 3, 4],
+        1: [],
+        2: [],
+        3: [],
+        4: [],
+    }
+    matched: list[int] = []
+    visited: list[int] = []
+
+    def _on_match(n: int) -> None:
+        matched.append(n)
+
+    def _release(n: int) -> None:
+        visited.append(n)
+
+    result = run_budgeted_priority_walk(
+        [0],
+        node_bbox=lambda n: boxes[n],
+        node_matches=lambda n: n != 0,
+        on_match=_on_match,
+        node_children=lambda n: list(children[n]),
+        release_node=_release,
+        clip=(0, 0, 1000, 1000),
+        cursor_xy=(15, 15),
+        budgets=WalkBudgets(
+            max_hits=50,
+            max_nodes=50,
+            max_seconds=5.0,
+            max_children_per_parent=2,
+        ),
+    )
+    assert result.truncated is False
+    assert result.stop_reason == "complete"
+    assert set(matched) == {1, 2}
+    # Dropped siblings are released without becoming matches.
+    assert 3 not in matched and 4 not in matched
+    assert set(visited) >= {0, 1, 2, 3, 4}
+
+
+def test_budgeted_priority_walk_stops_on_max_seconds() -> None:
+    from src.recorder.uia_input_boxes import WalkBudgets, run_budgeted_priority_walk
+
+    boxes = {i: (i, 0, i + 1, 1) for i in range(5)}
+    ticks = {"t": 0.0}
+
+    def _clock() -> float:
+        # Advance past budget after the first visit check inside the loop.
+        ticks["t"] += 1.0
+        return float(ticks["t"])
+
+    result = run_budgeted_priority_walk(
+        list(boxes.keys()),
+        node_bbox=lambda n: boxes[n],
+        node_matches=lambda _n: True,
+        on_match=lambda _n: None,
+        node_children=lambda _n: [],
+        release_node=lambda _n: None,
+        clip=(0, 0, 100, 100),
+        cursor_xy=None,
+        budgets=WalkBudgets(
+            max_hits=500,
+            max_nodes=500,
+            max_seconds=0.5,
+            max_children_per_parent=80,
+        ),
+        clock=_clock,
+    )
+    assert result.truncated is True
+    assert result.stop_reason == "max_seconds"
+
+
+def test_uia_worker_call_runs_and_is_reentrant() -> None:
+    from src.recorder.uia_thread import uia_call, uia_worker_is_current_thread
+
+    marker: list[bool] = []
+
+    def _inner() -> str:
+        marker.append(uia_worker_is_current_thread())
+        return "ok"
+
+    def _outer() -> str:
+        assert uia_worker_is_current_thread()
+        return uia_call(_inner, timeout_s=2.5) or ""
+
+    assert uia_call(_outer, timeout_s=2.5) == "ok"
+    assert marker == [True]

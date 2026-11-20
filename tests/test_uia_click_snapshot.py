@@ -397,7 +397,7 @@ def test_settle_uia_publishes_for_next_press(tmp_path: Path) -> None:
 
     calls: list[int] = []
 
-    def _snap(hwnd: int) -> dict:
+    def _snap(hwnd: int, **_kwargs) -> dict:
         calls.append(int(hwnd))
         label = "樹A" if hwnd == 10 else "樹B"
         return {
@@ -438,7 +438,7 @@ def test_seed_uia_covers_taskbar_and_skips_noise(tmp_path: Path, monkeypatch: py
 
     calls: list[int] = []
 
-    def _snap(hwnd: int) -> dict:
+    def _snap(hwnd: int, **_kwargs) -> dict:
         calls.append(int(hwnd))
         label = {10: "前景", 131388: "搜尋", 99: "噪音"}.get(hwnd, f"hwnd{hwnd}")
         return {
@@ -542,7 +542,7 @@ def test_seed_uia_covers_progman_desktop_shell(
 
     calls: list[int] = []
 
-    def _snap(hwnd: int) -> dict:
+    def _snap(hwnd: int, **_kwargs) -> dict:
         calls.append(int(hwnd))
         label = {10: "前景", 131256: "WinMaster7 Console"}.get(hwnd, f"hwnd{hwnd}")
         return {
@@ -778,7 +778,7 @@ def test_seed_then_settle_keeps_taskbar_for_later_click(
     from src.recorder.models import RecordedEvent
     from src.recorder.window_snapshot import ClickWindowInfo, WindowInfo
 
-    def _snap(hwnd: int) -> dict:
+    def _snap(hwnd: int, **_kwargs) -> dict:
         label = {10: "前景", 131388: "搜尋"}.get(hwnd, f"hwnd{hwnd}")
         return {
             "window": [0, 0, 40, 40],
@@ -1503,7 +1503,7 @@ def test_cross_window_press_skips_findall_for_normal_windows(tmp_path: Path) -> 
 
     calls: list[int] = []
 
-    def _snap(hwnd: int) -> dict:
+    def _snap(hwnd: int, **_kwargs) -> dict:
         calls.append(int(hwnd))
         return {
             "window": [0, 0, 40, 40],
@@ -1572,7 +1572,7 @@ def test_combolbox_press_findall_under_click_hwnd(tmp_path: Path) -> None:
 
     calls: list[int] = []
 
-    def _snap(hwnd: int) -> dict:
+    def _snap(hwnd: int, **_kwargs) -> dict:
         calls.append(int(hwnd))
         return {
             "window": [0, 0, 40, 40],
@@ -1659,7 +1659,7 @@ def test_progman_press_findall_under_click_hwnd(tmp_path: Path) -> None:
 
     calls: list[int] = []
 
-    def _snap(hwnd: int) -> dict:
+    def _snap(hwnd: int, **_kwargs) -> dict:
         calls.append(int(hwnd))
         return {
             "window": [0, 0, 1918, 920],
@@ -1754,7 +1754,7 @@ def test_live_double_click_keeps_first_press_uia_snapshot(tmp_path: Path) -> Non
 
     calls: list[int] = []
 
-    def _snap(hwnd: int) -> dict:
+    def _snap(hwnd: int, **_kwargs) -> dict:
         calls.append(int(hwnd))
         return {
             "window": [0, 0, 1918, 920],

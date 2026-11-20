@@ -105,7 +105,7 @@ def test_typing_prefetch_publishes_attachable_while_text_pending(tmp_path: Path)
     session._typing_uia_generation = 5
     flyout = _search_flyout(131762)
 
-    def _snap(hwnd: int) -> dict:
+    def _snap(hwnd: int, **_kwargs) -> dict:
         assert hwnd == 131762
         return _snap_with_label("Google Chrome")
 

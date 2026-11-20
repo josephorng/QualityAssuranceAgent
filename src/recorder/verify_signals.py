@@ -1209,7 +1209,7 @@ def _walk_for(
     return None
 
 
-def read_uia_fields(
+def _read_uia_fields_impl(
     *,
     cursor_xy: tuple[int, int] | None,
     want_control: bool,
@@ -1336,3 +1336,27 @@ def read_uia_fields(
                 ole32.CoUninitialize()
             except Exception:
                 pass
+
+
+def read_uia_fields(
+    *,
+    cursor_xy: tuple[int, int] | None,
+    want_control: bool,
+    want_focused: bool,
+    want_scroll: bool,
+) -> dict[str, Any]:
+    """Marshal UIA field reads onto the dedicated UIA worker thread."""
+    from src.recorder.uia_thread import uia_call
+
+    try:
+        result = uia_call(
+            _read_uia_fields_impl,
+            cursor_xy=cursor_xy,
+            want_control=want_control,
+            want_focused=want_focused,
+            want_scroll=want_scroll,
+            timeout_s=2.5,
+        )
+    except Exception:
+        return {}
+    return result if isinstance(result, dict) else {}

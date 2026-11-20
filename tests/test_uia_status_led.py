@@ -22,7 +22,7 @@ def test_collect_and_publish_settle_uia_emits_yellow_then_red_without_cursor() -
     session = RecordingSession(runs_root=None)  # type: ignore[arg-type]
     session.set_on_uia_status(statuses.append)
 
-    def _snap(hwnd: int) -> dict:
+    def _snap(hwnd: int, **_kwargs) -> dict:
         return {
             "window": [0, 0, 10, 10],
             "inputs": [],
@@ -79,7 +79,7 @@ def test_collect_and_publish_settle_uia_emits_green_when_cursor_ready() -> None:
     session._idle_efp_probed_name = "關閉"
     session._idle_efp_probed_value = ""
 
-    def _snap(hwnd: int) -> dict:
+    def _snap(hwnd: int, **_kwargs) -> dict:
         return {
             "window": [0, 0, 10, 10],
             "inputs": [],
@@ -595,7 +595,7 @@ def test_settle_yellow_clears_efp_and_reschedules(tmp_path: Path) -> None:
     session._idle_efp_probed_value = "x"
     reschedule: list[tuple[int, int]] = []
 
-    def _sched(x: int, y: int) -> None:
+    def _sched(x: int, y: int, **_kwargs) -> None:
         reschedule.append((int(x), int(y)))
 
     with (

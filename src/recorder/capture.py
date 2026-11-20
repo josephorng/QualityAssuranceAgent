@@ -2343,10 +2343,12 @@ class RecordingSession:
             except Exception:
                 cursor = None
         try:
-            slow = capture_slow_signals(cursor)
+            from src.recorder.uia_thread import uia_call
+
+            slow = uia_call(capture_slow_signals, cursor, timeout_s=2.5)
         except Exception:
             return
-        if not slow:
+        if not isinstance(slow, dict) or not slow:
             return
         with self._lock:
             if self._run_dir is not run_dir or epoch != self._context_epoch:
@@ -3566,8 +3568,10 @@ class RecordingSession:
         self._begin_settle_uia_yellow(after_index=int(after_event_index))
         from src.recorder.uia_input_boxes import snapshot_uia_screen
 
+        with self._lock:
+            cursor_xy = self._last_pointer_cursor_xy or self._last_move_xy
         try:
-            value = snapshot_uia_screen(host)
+            value = snapshot_uia_screen(host, cursor_xy=cursor_xy)
         except Exception:
             value = None
         paint_red = False
@@ -5192,8 +5196,10 @@ class RecordingSession:
         self._begin_settle_uia_yellow(after_index=int(after_event_index))
         from src.recorder.uia_input_boxes import snapshot_uia_screen
 
+        with self._lock:
+            cursor_xy = self._last_pointer_cursor_xy or self._last_move_xy
         try:
-            value = snapshot_uia_screen(hwnd)
+            value = snapshot_uia_screen(hwnd, cursor_xy=cursor_xy)
         except Exception:
             with self._lock:
                 self._last_settle_uia_by_hwnd = self._by_hwnd_retained_across_settle(
@@ -5410,8 +5416,10 @@ class RecordingSession:
     def _findall_uia_for_click_window(
         self,
         click_window: ClickWindowInfo | None,
+        *,
+        cursor_xy: tuple[int, int] | None = None,
     ) -> dict[str, Any] | None:
-        """Worker-side FindAll under ``click_window.hwnd`` (never on the hook)."""
+        """Worker-side budgeted UIA walk under ``click_window.hwnd`` (never on the hook)."""
         if click_window is None:
             return None
         hwnd = int(click_window.hwnd or 0)
@@ -5419,8 +5427,11 @@ class RecordingSession:
             return None
         from src.recorder.uia_input_boxes import snapshot_uia_screen
 
+        if cursor_xy is None:
+            with self._lock:
+                cursor_xy = self._last_pointer_cursor_xy or self._last_move_xy
         try:
-            value = snapshot_uia_screen(hwnd)
+            value = snapshot_uia_screen(hwnd, cursor_xy=cursor_xy)
         except Exception:
             return None
         if not isinstance(value, dict):

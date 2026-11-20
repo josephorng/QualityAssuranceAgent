@@ -71,6 +71,10 @@ def _default_capture_window_patches():
     with patch("src.recorder.capture.mouse.Listener", DummyListener), patch(
         "src.recorder.capture.keyboard.Listener",
         DummyListener,
+    ), patch(
+        # Avoid host AV/policy hook probes failing unit tests.
+        "src.recorder.capture._probe_input_hooks",
+        return_value=[],
     ), patch("src.recorder.capture.snapshot_top_level_windows", return_value=[]), patch(
         "src.recorder.capture.settle_delay_for_click",
         return_value=0.0,
@@ -3971,4 +3975,136 @@ def test_click_notifies_on_event_before_window_step_joins(tmp_path) -> None:
             session._join_window_step_threads()
         finally:
             session.stop()
+
+
+def _focused_signals(name: str, value: str, hwnd: int = 100) -> dict:
+    return {
+        "focused": {"name": name, "value": value},
+        "caret": {"hwnd": hwnd, "rect": [0, 0, 0, 10]},
+    }
+
+
+def test_missed_typing_from_uia_delta_helpers() -> None:
+    from src.recorder.capture import _missed_typing_from_uia_delta
+
+    before = _focused_signals("帳號|Textbox|txt_ID", "")
+    after = _focused_signals("帳號|Textbox|txt_ID", "claude")
+    text, reason = _missed_typing_from_uia_delta(before, after)
+    assert text == "claude"
+    assert reason is None
+
+    masked = _focused_signals("密碼|Textbox|txt_Password", "••••••")
+    text, reason = _missed_typing_from_uia_delta(
+        _focused_signals("密碼|Textbox|txt_Password", ""),
+        masked,
+    )
+    assert text is None
+    assert reason == "masked"
+
+    empty = _focused_signals("密碼|Textbox|txt_Password", "")
+    text, reason = _missed_typing_from_uia_delta(
+        _focused_signals("密碼|Textbox|txt_Password", "x"),
+        empty,
+    )
+    assert text is None
+    assert reason == "empty"
+
+
+def test_uia_recovers_missed_typing_between_clicks(tmp_path) -> None:
+    """Dead WH_KEYBOARD_LL: synthesize text_input from focused value growth."""
+    session = RecordingSession(runs_root=tmp_path)
+    restarts: list[str] = []
+
+    def _track_restart(*_args, reason: str = "", **_kwargs) -> None:
+        restarts.append(reason)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch.object(
+        RecordingSession,
+        "_restart_keyboard_listener",
+        side_effect=_track_restart,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.mouse import Button
+
+            session._last_settle_signals = _focused_signals("帳號|Textbox|txt_ID", "")
+            session._on_mouse_click(100, 100, Button.left, True)
+            session._on_mouse_click(100, 100, Button.left, False)
+            time.sleep(_DOUBLE_CLICK_INTERVAL_S + 0.05)
+            session.wait_for_deferred_work()
+
+            # Typing happened in the UI but the keyboard hook delivered nothing.
+            session._last_settle_signals = _focused_signals(
+                "帳號|Textbox|txt_ID", "claude"
+            )
+            session._on_mouse_click(100, 140, Button.left, True)
+            session._on_mouse_click(100, 140, Button.left, False)
+            time.sleep(_DOUBLE_CLICK_INTERVAL_S + 0.05)
+            session.wait_for_deferred_work()
+        finally:
+            session.stop()
+
+    assert session.event_count() == 3
+    click1 = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    text = json.loads((run_dir / "events" / "event_002.json").read_text(encoding="utf-8"))
+    click2 = json.loads((run_dir / "events" / "event_003.json").read_text(encoding="utf-8"))
+    assert click1["kind"] == "click"
+    assert text["kind"] == "text_input"
+    assert text["text"] == "claude"
+    assert click2["kind"] == "click"
+    assert "uia_focus_value_miss" in restarts
+
+
+def test_uia_miss_password_skips_text_but_restarts_keyboard(tmp_path) -> None:
+    """Masked password UIA values are unrecoverable; still restart the hook."""
+    session = RecordingSession(runs_root=tmp_path)
+    restarts: list[str] = []
+
+    def _track_restart(*_args, reason: str = "", **_kwargs) -> None:
+        restarts.append(reason)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch.object(
+        RecordingSession,
+        "_restart_keyboard_listener",
+        side_effect=_track_restart,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.mouse import Button
+
+            session._last_settle_signals = _focused_signals(
+                "密碼|Textbox|txt_Password", ""
+            )
+            session._on_mouse_click(100, 100, Button.left, True)
+            session._on_mouse_click(100, 100, Button.left, False)
+            time.sleep(_DOUBLE_CLICK_INTERVAL_S + 0.05)
+            session.wait_for_deferred_work()
+
+            session._last_settle_signals = _focused_signals(
+                "密碼|Textbox|txt_Password", "••••••"
+            )
+            session._on_mouse_click(100, 140, Button.left, True)
+            session._on_mouse_click(100, 140, Button.left, False)
+            time.sleep(_DOUBLE_CLICK_INTERVAL_S + 0.05)
+            session.wait_for_deferred_work()
+        finally:
+            session.stop()
+
+    kinds = []
+    for idx in range(1, session.event_count() + 1):
+        raw = json.loads(
+            (run_dir / "events" / f"event_{idx:03d}.json").read_text(encoding="utf-8")
+        )
+        kinds.append(raw["kind"])
+    assert "text_input" not in kinds
+    assert kinds == ["click", "click"]
+    assert "uia_focus_value_miss" in restarts
+    log_text = (run_dir / "record.log").read_text(encoding="utf-8")
+    assert "key_hook_miss_password_unrecoverable" in log_text
 

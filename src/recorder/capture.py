@@ -61,6 +61,7 @@ from src.recorder.window_snapshot import (
 )
 from src.recorder.hotkey import is_recording_toggle_hotkey
 from src.recorder.ime_state import ImeInputState, read_ime_input_state
+from src.recorder.text_choose import is_masked_ocr_text
 
 _DOUBLE_CLICK_INTERVAL_S = 0.35
 _DOUBLE_CLICK_MAX_DIST_PX = 8
@@ -166,6 +167,7 @@ class _DeferredCaptureJob:
     # | pending_left_press | pending_right_press | pending_drag_end
     # | emit_left_gesture | emit_right_gesture | mouse_pointer_event
     # | seed_settle_windows | read_clipboard_paste | idle_efp
+    # | append_record_log | restart_keyboard_listener
     # idle_efp: ElementFromPoint LED label, then optional hover FindAll warm
     meta: dict[str, Any] | None = None
     pending_pre_type: _PendingPreTypeShot | None = None
@@ -817,8 +819,17 @@ def _format_windows_error(code: int) -> str:
     return f"Win32 error {code}"
 
 
-def _probe_low_level_hook() -> tuple[bool, int | None]:
-    """Install and remove WH_MOUSE_LL to detect hook blocking."""
+# Windows low-level hook ids (winuser.h).
+_WH_KEYBOARD_LL = 13
+_WH_MOUSE_LL = 14
+_KEYBOARD_RESTART_COOLDOWN_S = 2.0
+
+
+def _probe_low_level_hook(hook_id: int = _WH_MOUSE_LL) -> tuple[bool, int | None]:
+    """Install and remove a low-level hook to detect hook blocking.
+
+    ``hook_id`` is ``WH_MOUSE_LL`` (14) or ``WH_KEYBOARD_LL`` (13).
+    """
     if os.name != "nt":
         return True, None
     user32 = ctypes.windll.user32
@@ -826,11 +837,70 @@ def _probe_low_level_hook() -> tuple[bool, int | None]:
     hook_proc = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_int, ctypes.c_uint, ctypes.c_void_p)(
         lambda *_args: 0
     )
-    hook = user32.SetWindowsHookExW(14, hook_proc, None, 0)
+    hook = user32.SetWindowsHookExW(int(hook_id), hook_proc, None, 0)
     if not hook:
         return False, int(kernel32.GetLastError())
     user32.UnhookWindowsHookEx(hook)
     return True, None
+
+
+def _focused_signals_snapshot(
+    signals: dict[str, Any] | None,
+) -> tuple[str, str, int | None]:
+    """Return ``(focused_name, focused_value, caret_hwnd)`` from a signals dict."""
+    if not isinstance(signals, dict):
+        return "", "", None
+    focused = signals.get("focused")
+    name = ""
+    value = ""
+    if isinstance(focused, dict):
+        name = str(focused.get("name") or "").strip()
+        value = str(focused.get("value") or "")
+    caret = signals.get("caret")
+    hwnd: int | None = None
+    if isinstance(caret, dict) and caret.get("hwnd") is not None:
+        try:
+            hwnd = int(caret["hwnd"])
+        except (TypeError, ValueError):
+            hwnd = None
+    return name, value, hwnd
+
+
+def _missed_typing_from_uia_delta(
+    baseline: dict[str, Any] | None,
+    sealed_signals: dict[str, Any] | None,
+) -> tuple[str | None, str | None]:
+    """Derive missed typed text from a UIA focused-value delta.
+
+    Returns ``(recovered_text, skip_reason)``:
+    - ``(text, None)`` when recoverable typed text was found
+    - ``(None, reason)`` when a miss was detected but text is unrecoverable
+      (empty/masked password-style values)
+    - ``(None, None)`` when there is no evidence of missed typing
+    """
+    if not isinstance(baseline, dict) or not isinstance(sealed_signals, dict):
+        return None, None
+    old_name, old_value, old_hwnd = _focused_signals_snapshot(baseline)
+    new_name, new_value, new_hwnd = _focused_signals_snapshot(sealed_signals)
+    same_name = bool(old_name and new_name and old_name == new_name)
+    same_hwnd = old_hwnd is not None and new_hwnd is not None and old_hwnd == new_hwnd
+    if not (same_name or same_hwnd):
+        return None, None
+    if new_value == old_value:
+        return None, None
+    if is_masked_ocr_text(new_value):
+        return None, "masked"
+    if not str(new_value).strip():
+        # Password / protected fields often expose empty UIA values after typing.
+        return None, "empty"
+    if old_value and new_value.startswith(old_value):
+        typed = new_value[len(old_value) :]
+    else:
+        typed = new_value
+    typed = str(typed)
+    if not typed:
+        return None, None
+    return typed, None
 
 
 def _listener_thread_error(
@@ -883,9 +953,6 @@ def _build_input_listener_error(issues: list[str]) -> str:
         admin = _windows_is_admin()
         if admin is not None:
             lines.append(f"目前程序管理員權限：{'是' if admin else '否'}")
-        hook_ok, err_code = _probe_low_level_hook()
-        if not hook_ok and err_code is not None:
-            lines.append(f"Windows low-level hook 探測失敗：{_format_windows_error(err_code)}")
 
     lines.append(
         "可能原因：防毒軟體封鎖 keyboard/mouse hook、公司安全政策、或 listener 執行緒異常退出。"
@@ -893,6 +960,27 @@ def _build_input_listener_error(issues: list[str]) -> str:
     if os.name == "nt" and _windows_is_admin() is False:
         lines.append("若僅在操作「以系統管理員執行」的程式時失敗，可嘗試以系統管理員身分執行此程式。")
     return "\n".join(lines)
+
+
+def _probe_input_hooks() -> list[str]:
+    """Probe WH_MOUSE_LL and WH_KEYBOARD_LL; return human-readable failure lines."""
+    if os.name != "nt":
+        return []
+    issues: list[str] = []
+    for hook_id, label in (
+        (_WH_MOUSE_LL, "滑鼠 WH_MOUSE_LL"),
+        (_WH_KEYBOARD_LL, "鍵盤 WH_KEYBOARD_LL"),
+    ):
+        ok, err_code = _probe_low_level_hook(hook_id)
+        if ok:
+            continue
+        detail = (
+            _format_windows_error(err_code)
+            if err_code is not None
+            else "unknown error"
+        )
+        issues.append(f"{label} 探測失敗：{detail}")
+    return issues
 
 
 def _wait_for_input_listeners(
@@ -904,6 +992,9 @@ def _wait_for_input_listeners(
         issue = _diagnose_listener_startup(label, listener)
         if issue:
             issues.append(issue)
+    # pynput may report running=True even when SetWindowsHookEx failed; probe
+    # both low-level hook ids independently and treat failures as startup errors.
+    issues.extend(_probe_input_hooks())
     return issues
 
 
@@ -1085,6 +1176,12 @@ class RecordingSession:
         self._pending_signals_before: dict[str, Any] | None = None
         self._pending_right_signals_before: dict[str, Any] | None = None
         self._last_pointer_cursor_xy: tuple[int, int] | None = None
+        # UIA focused snapshot from the last gesture boundary; used to recover
+        # typing when WH_KEYBOARD_LL silently stops delivering key callbacks.
+        self._focus_baseline_signals: dict[str, Any] | None = None
+        self._keys_seen_since_last_gesture: bool = False
+        self._last_key_callback_monotonic: float | None = None
+        self._keyboard_restart_mono: float | None = None
         self._event_queue: queue.Queue[object] = queue.Queue()
         self._worker_thread: threading.Thread | None = None
         self._on_event: Callable[[RecordedEvent], None] | None = None
@@ -1370,6 +1467,8 @@ class RecordingSession:
         following_gesture = pending_coords is not None or pending_right_coords is not None
         # Drop a pending Chinese-IME Enter delay; stop must not leave text hanging.
         self._cancel_ime_commit_timer()
+        stop_signals = press_signals if following_gesture else self._cached_signals_before()
+        self._recover_missed_text_before_flush(stop_signals)
         self._flush_pending_text_input(
             seal_after_to_cache=following_gesture,
             sealed_windows=press_windows,
@@ -1554,6 +1653,18 @@ class RecordingSession:
     def _log(self, run_dir: Path, text: str) -> None:
         append_text(run_dir / "record.log", f"{utc_now_iso()} {text}\n")
 
+    def _enqueue_record_log(self, text: str) -> None:
+        """Queue a ``record.log`` line so the keyboard hook never does disk I/O."""
+        try:
+            self._enqueue(
+                _DeferredCaptureJob(
+                    action="append_record_log",
+                    meta={"text": str(text)},
+                )
+            )
+        except Exception:
+            pass
+
     def _log_key_press(
         self,
         *,
@@ -1568,7 +1679,8 @@ class RecordingSession:
 
         Safe to call from the keyboard hook: failures never raise. Logs the
         pending text buffer after the press was applied so Backspace/edits are
-        visible next to the key that changed them.
+        visible next to the key that changed them. Disk writes are deferred to
+        the capture worker so ``WH_KEYBOARD_LL`` cannot stall on OneDrive I/O.
         """
         try:
             with self._lock:
@@ -1599,15 +1711,166 @@ class RecordingSession:
             pending_s = repr(pending) if pending is not None else "-"
             caret_s = str(caret) if caret is not None else "-"
             event_s = str(text_event) if text_event is not None else "-"
-            self._log(
-                run_dir,
+            self._enqueue_record_log(
                 "key "
                 f"action={action} token={token!r} typed={typed!r} mods={mods_s} "
                 f"key={key_s} ime={mode_label} lang={lang_label} "
-                f"pending_text={pending_s} caret={caret_s} text_event={event_s}",
+                f"pending_text={pending_s} caret={caret_s} text_event={event_s}"
             )
         except Exception:
             pass
+
+    def _note_key_callback(self) -> None:
+        """Mark that the keyboard hook delivered a callback since the last gesture."""
+        with self._lock:
+            self._keys_seen_since_last_gesture = True
+            self._last_key_callback_monotonic = time.monotonic()
+
+    def _update_focus_baseline(self, signals: dict[str, Any] | None) -> None:
+        """Remember focused UIA state at a gesture boundary for miss recovery."""
+        with self._lock:
+            self._focus_baseline_signals = dict(signals) if isinstance(signals, dict) else None
+            self._keys_seen_since_last_gesture = False
+
+    def _maybe_recover_missed_text_input(
+        self,
+        sealed_signals: dict[str, Any] | None,
+    ) -> bool:
+        """Synthesize pending typed chars from UIA when the keyboard hook missed.
+
+        Call before ``_flush_pending_text_input`` on the next gesture. Returns
+        True when a keyboard-hook miss was detected (recovered or unrecoverable).
+        """
+        with self._lock:
+            run_dir = self._run_dir
+            pending_chars = list(self._pending_text_chars)
+            keys_seen = self._keys_seen_since_last_gesture
+            baseline = (
+                dict(self._focus_baseline_signals)
+                if isinstance(self._focus_baseline_signals, dict)
+                else None
+            )
+            cursor_xy = self._last_pointer_cursor_xy
+        if run_dir is None:
+            self._update_focus_baseline(sealed_signals)
+            return False
+        if pending_chars or keys_seen:
+            self._update_focus_baseline(sealed_signals)
+            return False
+
+        recovered, skip_reason = _missed_typing_from_uia_delta(baseline, sealed_signals)
+        if recovered:
+            try:
+                self._log(
+                    run_dir,
+                    "key "
+                    f"action=uia_recover_missed_text recovered={recovered!r}",
+                )
+            except Exception:
+                pass
+            self._append_text_input_text(
+                recovered,
+                cursor_xy,
+                before_pending_left_click=True,
+            )
+            self._update_focus_baseline(sealed_signals)
+            return True
+        if skip_reason is not None:
+            try:
+                self._log(
+                    run_dir,
+                    "key "
+                    f"action=key_hook_miss_password_unrecoverable reason={skip_reason}",
+                )
+            except Exception:
+                pass
+            self._update_focus_baseline(sealed_signals)
+            return True
+
+        self._update_focus_baseline(sealed_signals)
+        return False
+
+    def _request_keyboard_listener_restart(self, reason: str) -> None:
+        """Ask the capture worker to rebuild ``keyboard.Listener`` off the hook thread."""
+        self._enqueue(
+            _DeferredCaptureJob(
+                action="restart_keyboard_listener",
+                meta={"reason": str(reason)},
+            )
+        )
+
+    def _restart_keyboard_listener(self, *, reason: str = "") -> None:
+        """Stop and recreate the keyboard listener after a detected hook miss."""
+        now = time.monotonic()
+        with self._lock:
+            if not self._accepting_input or self._finalizing:
+                return
+            last = self._keyboard_restart_mono
+            if last is not None and (now - last) < _KEYBOARD_RESTART_COOLDOWN_S:
+                return
+            self._keyboard_restart_mono = now
+            old = self._keyboard_listener
+            self._keyboard_listener = None
+            run_dir = self._run_dir
+        if old is not None:
+            try:
+                old.stop()
+            except Exception:
+                pass
+            try:
+                old.join(timeout=0.5)
+            except Exception:
+                pass
+        new_listener = keyboard.Listener(
+            on_press=self._on_key_press,
+            on_release=self._on_key_release,
+            win32_event_filter=self._on_win32_key_filter,
+        )
+        try:
+            new_listener.start()
+        except Exception as exc:
+            if run_dir is not None:
+                self._log(
+                    run_dir,
+                    "keyboard listener restart failed "
+                    f"reason={reason!r} error={type(exc).__name__}: {exc}",
+                )
+            return
+        issue = _diagnose_listener_startup("鍵盤", new_listener)
+        with self._lock:
+            still_active = self._accepting_input and not self._finalizing
+            if still_active:
+                self._keyboard_listener = new_listener
+            run_dir = self._run_dir
+        if not still_active:
+            try:
+                new_listener.stop()
+            except Exception:
+                pass
+            return
+        if run_dir is None:
+            return
+        if issue:
+            self._log(
+                run_dir,
+                f"keyboard listener restart failed reason={reason!r} detail={issue}",
+            )
+        else:
+            self._log(
+                run_dir,
+                f"keyboard listener restarted reason={reason!r}",
+            )
+
+    def _recover_missed_text_before_flush(
+        self,
+        sealed_signals: dict[str, Any] | None,
+    ) -> None:
+        """Run UIA miss recovery and restart the keyboard hook when needed."""
+        # A following gesture must cancel a delayed Chinese-IME Enter flush before
+        # any recover work, matching ``_flush_pending_text_input``.
+        self._cancel_ime_commit_timer()
+        if self._maybe_recover_missed_text_input(sealed_signals):
+            self._request_keyboard_listener_restart("uia_focus_value_miss")
 
     def _sync_ime_state(self) -> ImeInputState:
         """Sample IME 中/英 mode; wipe the pending text buffer on zh→en switches."""
@@ -3158,11 +3421,7 @@ class RecordingSession:
             run_dir = self._run_dir
             if run_dir is None:
                 return
-            if event_index is None:
-                index = self._next_index
-                self._next_index += 1
-            else:
-                index = event_index
+            reserved_index = event_index
         # One settle-cache copy feeds the flushed text, this event's before-sample,
         # and the previous event's after-cache.
         windows_before = self._cached_windows_before()
@@ -3171,6 +3430,17 @@ class RecordingSession:
             int(cursor_xy[0]),
             int(cursor_xy[1]),
         )
+        # Recover before reserving this gesture's index so synthesized text sorts
+        # before the following click/scroll/etc.
+        self._recover_missed_text_before_flush(signals_before)
+        with self._lock:
+            if self._run_dir is None:
+                return
+            if reserved_index is None:
+                index = self._next_index
+                self._next_index += 1
+            else:
+                index = reserved_index
         self._flush_pending_text_input(
             shared_end_index=index,
             shared_end_monitor=shared_mon,
@@ -3874,11 +4144,16 @@ class RecordingSession:
         cursor_xy: tuple[int, int] | None,
         *,
         timestamp_utc: str | None = None,
+        before_pending_left_click: bool = False,
     ) -> None:
         """Reserve the text-input event; defer UIA + before-shot off the hook thread.
 
         Prefer a pre-captured empty-field frame (taken after the focusing click /
         key), falling back to a live grab only when none is available.
+
+        When ``before_pending_left_click`` is set (UIA miss recovery), steal the
+        index already reserved for the pending left gesture so the synthesized
+        ``text_input`` sorts before that click.
         """
         mouse_xy = cursor_xy
         try:
@@ -3890,8 +4165,15 @@ class RecordingSession:
             if self._run_dir is None:
                 return
             last_click_xy = self._last_pointer_cursor_xy
-            index = self._next_index
-            self._next_index += 1
+            reserved = self._pending_click_event_index
+            if before_pending_left_click and reserved is not None:
+                index = int(reserved)
+                self._pending_click_event_index = index + 1
+                if self._next_index < index + 2:
+                    self._next_index = index + 2
+            else:
+                index = self._next_index
+                self._next_index += 1
             self._pending_text_chars = []
             self._pending_text_caret = 0
             pending_pre_type = self._pending_pre_type_screenshot
@@ -3936,6 +4218,7 @@ class RecordingSession:
         cursor_xy: tuple[int, int] | None,
         *,
         timestamp_utc: str | None = None,
+        before_pending_left_click: bool = False,
     ) -> None:
         with self._lock:
             if self._run_dir is None:
@@ -3943,7 +4226,11 @@ class RecordingSession:
             starting_burst = self._pending_text_meta is None
 
         if starting_burst:
-            self._begin_pending_text_input(cursor_xy, timestamp_utc=timestamp_utc)
+            self._begin_pending_text_input(
+                cursor_xy,
+                timestamp_utc=timestamp_utc,
+                before_pending_left_click=before_pending_left_click,
+            )
 
         with self._lock:
             caret = max(0, min(self._pending_text_caret, len(self._pending_text_chars)))
@@ -4103,6 +4390,7 @@ class RecordingSession:
         cursor_xy: tuple[int, int] | None,
         *,
         timestamp_utc: str | None = None,
+        before_pending_left_click: bool = False,
     ) -> None:
         if not text:
             return
@@ -4112,7 +4400,11 @@ class RecordingSession:
             starting_burst = self._pending_text_meta is None
 
         if starting_burst:
-            self._begin_pending_text_input(cursor_xy, timestamp_utc=timestamp_utc)
+            self._begin_pending_text_input(
+                cursor_xy,
+                timestamp_utc=timestamp_utc,
+                before_pending_left_click=before_pending_left_click,
+            )
 
         with self._lock:
             caret = max(0, min(self._pending_text_caret, len(self._pending_text_chars)))
@@ -4343,6 +4635,15 @@ class RecordingSession:
                 return False
             if self._pending_click_coords != (x, y, button):
                 return False
+            press_windows = self._pending_windows_before
+            press_signals = self._pending_signals_before
+        # Recover before reserving the click index so text_input sorts earlier.
+        self._recover_missed_text_before_flush(press_signals)
+        with self._lock:
+            if self._run_dir is None:
+                return False
+            if self._pending_click_coords != (x, y, button):
+                return False
             click_index = self._take_pending_left_event_index_locked()
             press_seq = self._left_press_seq
             resolved_timestamp = (
@@ -4404,6 +4705,14 @@ class RecordingSession:
                 return
             if self._pending_click_coords != (x, y, button):
                 return
+            press_windows = self._pending_windows_before
+            press_signals = self._pending_signals_before
+        self._recover_missed_text_before_flush(press_signals)
+        with self._lock:
+            if self._run_dir is None:
+                return
+            if self._pending_click_coords != (x, y, button):
+                return
             hold_index = self._take_pending_left_event_index_locked()
             press_seq = self._left_press_seq
             timestamp_utc = self._pending_click_timestamp_utc or utc_now_iso()
@@ -4462,6 +4771,14 @@ class RecordingSession:
                 return
             if self._pending_right_coords != (x, y):
                 return
+            press_windows = self._pending_right_windows_before
+            press_signals = self._pending_right_signals_before
+        self._recover_missed_text_before_flush(press_signals)
+        with self._lock:
+            if self._run_dir is None:
+                return
+            if self._pending_right_coords != (x, y):
+                return
             right_index = self._next_index
             self._next_index += 1
             press_seq = self._right_press_seq
@@ -4513,6 +4830,14 @@ class RecordingSession:
         with self._lock:
             run_dir = self._run_dir
             if run_dir is None:
+                return
+            if self._pending_click_coords != (x1, y1, button):
+                return
+            press_windows = self._pending_windows_before
+            press_signals = self._pending_signals_before
+        self._recover_missed_text_before_flush(press_signals)
+        with self._lock:
+            if self._run_dir is None:
                 return
             if self._pending_click_coords != (x1, y1, button):
                 return
@@ -4645,6 +4970,20 @@ class RecordingSession:
             self._worker_read_clipboard_paste(job)
         elif job.action == "idle_efp":
             self._worker_idle_efp(job)
+        elif job.action == "append_record_log":
+            meta = job.meta if isinstance(job.meta, dict) else {}
+            text = meta.get("text")
+            with self._lock:
+                run_dir = self._run_dir
+            if run_dir is not None and isinstance(text, str) and text:
+                try:
+                    self._log(run_dir, text)
+                except Exception:
+                    pass
+        elif job.action == "restart_keyboard_listener":
+            meta = job.meta if isinstance(job.meta, dict) else {}
+            reason = str(meta.get("reason") or "")
+            self._restart_keyboard_listener(reason=reason)
         # Window settle and UI Automation run on a per-step thread started
         # after the event is saved.
 
@@ -7244,6 +7583,7 @@ class RecordingSession:
             hardware = self._pop_hardware_key_sample_locked()
         if not active:
             return
+        self._note_key_callback()
         # Close a sticky left press before typing/hotkeys so a missed mouse-up
         # cannot invert gesture vs text order or inflate into a false hold.
         self._reconcile_sticky_left_press_from_os()
@@ -7439,14 +7779,15 @@ class RecordingSession:
         )
 
     def _on_key_release(self, key: keyboard.Key | keyboard.KeyCode) -> None:
+        with self._lock:
+            active = self._accepting_input
+        if active:
+            self._note_key_callback()
         mod = _modifier_name(key)
         if mod:
             with self._lock:
                 self._pressed_modifiers.discard(mod)
             # Shift toggles 中/英 on many Chinese IMEs at key-up; wipe here so
             # composition Latin keys do not stick around for the English burst.
-            if mod == "shift":
-                with self._lock:
-                    active = self._accepting_input
-                if active:
-                    self._sync_ime_state()
+            if mod == "shift" and active:
+                self._sync_ime_state()

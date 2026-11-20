@@ -16,6 +16,10 @@ _IMC_GETCONVERSIONMODE = 0x0001
 _IMC_GETOPENSTATUS = 0x0005
 _IME_CMODE_NATIVE = 0x0001
 
+# Abort hung IME windows quickly so WH_KEYBOARD_LL is not unhooked for timeout.
+_SMTO_ABORTIFHUNG = 0x0002
+_IME_SENDMESSAGE_TIMEOUT_MS = 50
+
 
 @dataclass(frozen=True)
 class ImeInputState:
@@ -59,6 +63,31 @@ def _is_cjk_lang(lang_id: int) -> bool:
     return (lang_id & 0xFF) in (_LANG_CHINESE, _LANG_JAPANESE, _LANG_KOREAN)
 
 
+def _ime_send_message_timeout(user32: object, hwnd: int, msg: int, wparam: int) -> int | None:
+    """``SendMessageTimeoutW`` with a short abort; ``None`` on timeout/failure."""
+    import ctypes
+    from ctypes import wintypes
+
+    result = wintypes.DWORD()
+    send_timeout = getattr(user32, "SendMessageTimeoutW", None)
+    if send_timeout is None:
+        return None
+    ok = int(
+        send_timeout(
+            hwnd,
+            msg,
+            wparam,
+            0,
+            _SMTO_ABORTIFHUNG,
+            _IME_SENDMESSAGE_TIMEOUT_MS,
+            ctypes.byref(result),
+        )
+    )
+    if not ok:
+        return None
+    return int(result.value)
+
+
 def read_ime_input_state() -> ImeInputState:
     """Read the foreground window thread's layout + 中/英 conversion mode.
 
@@ -66,12 +95,14 @@ def read_ime_input_state() -> ImeInputState:
     ``ImmGetDefaultIMEWnd`` + ``WM_IME_CONTROL`` for conversion mode (the same
     signal the language bar's 中/英 indicator uses). Non-Windows hosts return
     an unknown snapshot.
+
+    IME queries use ``SendMessageTimeoutW`` so a hung IME window cannot stall
+    the keyboard hook long enough for Windows to remove ``WH_KEYBOARD_LL``.
     """
     if os.name != "nt":
         return _UNKNOWN
     try:
         import ctypes
-        from ctypes import wintypes
 
         user32 = ctypes.windll.user32
         imm32 = ctypes.windll.imm32
@@ -101,13 +132,19 @@ def read_ime_input_state() -> ImeInputState:
                 opened=None,
             )
 
-        # SendMessage returns LRESULT; conversion/open are small integers.
-        conv = int(
-            user32.SendMessageW(hime, _WM_IME_CONTROL, _IMC_GETCONVERSIONMODE, 0)
+        conv = _ime_send_message_timeout(
+            user32, int(hime), _WM_IME_CONTROL, _IMC_GETCONVERSIONMODE
         )
-        opened_raw = int(
-            user32.SendMessageW(hime, _WM_IME_CONTROL, _IMC_GETOPENSTATUS, 0)
+        opened_raw = _ime_send_message_timeout(
+            user32, int(hime), _WM_IME_CONTROL, _IMC_GETOPENSTATUS
         )
+        if conv is None or opened_raw is None:
+            return ImeInputState(
+                lang_id=lang_id,
+                chinese_mode=None,
+                conversion=None,
+                opened=None,
+            )
         opened = bool(opened_raw)
         chinese_mode = bool(opened and (conv & _IME_CMODE_NATIVE))
         return ImeInputState(

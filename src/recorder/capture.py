@@ -1732,26 +1732,23 @@ class RecordingSession:
         self._idle_efp_generation += 1
         return int(self._idle_efp_generation)
 
-    def _idle_efp_same_data_item_bbox_locked(self, x: int, y: int) -> bool:
-        """True when ``(x, y)`` is still inside the last usable data_item EFP bbox.
+    def _idle_efp_same_leaf_bbox_locked(self, x: int, y: int) -> bool:
+        """True when ``(x, y)`` is still inside the last usable labeled-leaf EFP bbox.
 
         Caller holds ``_lock``. Used to skip mouse-move re-probes inside an
-        Excel cell; settle/hover force-refresh bypasses this.
+        Excel cell or File-tab button; settle/hover force-refresh bypasses this.
         """
-        from src.recorder.uia_input_boxes import efp_payload_is_usable_data_item
+        from src.recorder.uia_input_boxes import (
+            efp_payload_is_usable_labeled_leaf,
+            efp_payload_screen_bbox_xywh,
+        )
 
         payload = self._idle_efp_payload
-        if not efp_payload_is_usable_data_item(payload):
+        if not efp_payload_is_usable_labeled_leaf(payload):
             return False
         assert isinstance(payload, dict)
-        raw_bbox = payload.get("bbox")
-        if not (isinstance(raw_bbox, (list, tuple)) and len(raw_bbox) == 4):
-            return False
-        try:
-            bbox = (int(raw_bbox[0]), int(raw_bbox[1]), int(raw_bbox[2]), int(raw_bbox[3]))
-        except (TypeError, ValueError):
-            return False
-        if bbox[2] <= 0 or bbox[3] <= 0:
+        bbox = efp_payload_screen_bbox_xywh(payload)
+        if bbox is None:
             return False
         return point_in_rect_xywh(int(x), int(y), bbox)
 
@@ -1759,13 +1756,13 @@ class RecordingSession:
         """Debounce ElementFromPoint for the LED label. Hook-safe (timer only).
 
         When ``force`` is False and the cursor remains inside a usable idle
-        ``data_item`` bbox, skip cancel/bump/timer so the LED label does not
+        labeled-leaf bbox, skip cancel/bump/timer so the LED label does not
         clear to pending and COM is not re-probed.
         """
         with self._lock:
             if not self._accepting_input or self._finalizing:
                 return
-            if not force and self._idle_efp_same_data_item_bbox_locked(int(x), int(y)):
+            if not force and self._idle_efp_same_leaf_bbox_locked(int(x), int(y)):
                 return
             self._cancel_idle_efp_timer_locked()
             generation = self._bump_idle_efp_generation_locked()
@@ -1836,10 +1833,10 @@ class RecordingSession:
         *,
         efp_payload: dict[str, Any] | None | object = _EFP_UNSET,
     ) -> bool:
-        """True when FindAll or a usable EFP DataItem would record a UIA path.
+        """True when a walk snapshot or usable labeled EFP leaf would record a UIA path.
 
-        DataItem cells are omitted from FindAll; a usable idle/press EFP
-        ``data_item`` leaf alone is enough for green readiness.
+        Excel ``data_item`` cells are omitted from FindAll; labeled chrome EFP
+        (button/tab/…) can also green the LED without a covering walk.
         """
         if cursor_xy is None:
             return False
@@ -1847,12 +1844,21 @@ class RecordingSession:
         if efp_payload is _EFP_UNSET:
             with self._lock:
                 efp_payload = self._idle_efp_payload
-        from src.recorder.uia_input_boxes import efp_payload_is_usable_data_item
+        from src.recorder.uia_input_boxes import efp_payload_is_usable_labeled_leaf
 
-        if efp_payload_is_usable_data_item(
+        if efp_payload_is_usable_labeled_leaf(
             efp_payload if isinstance(efp_payload, dict) else None
         ):
             return True
+        return self._uia_walk_snapshot_ready_at_cursor((x, y))
+
+    def _uia_walk_snapshot_ready_at_cursor(
+        self, cursor_xy: tuple[int, int] | None
+    ) -> bool:
+        """True when an attachable settle/hover walk covers ``cursor_xy``."""
+        if cursor_xy is None:
+            return False
+        x, y = int(cursor_xy[0]), int(cursor_xy[1])
         click_window = self._click_window_payload_at(x, y)
         snapshot = self._cached_uia_before(click_window, cursor_xy=(x, y))
         if not isinstance(snapshot, dict):
@@ -1862,6 +1868,40 @@ class RecordingSession:
         return recording_uia_snapshot_ready_at_point(
             snapshot,
             screen_xy=(x, y),
+        )
+
+    def _should_skip_hover_findall_at_cursor(
+        self,
+        cursor_xy: tuple[int, int] | None,
+        *,
+        efp_payload: dict[str, Any] | None | object = _EFP_UNSET,
+    ) -> bool:
+        """Skip idle hover walk when a walk leaf covers the point or EFP is a cell.
+
+        Empty-synth readiness alone (unique far hub) does not skip hover — a
+        File-tab hover must still warm a ribbon walk after a grid settle.
+        Labeled chrome EFP may green the LED without a walk; hover still runs.
+        Usable ``data_item`` EFP alone skips hover (cells stay FindAll-excluded).
+        """
+        if cursor_xy is not None:
+            try:
+                x, y = int(cursor_xy[0]), int(cursor_xy[1])
+            except (TypeError, ValueError, IndexError):
+                x = y = None  # type: ignore[assignment]
+            else:
+                click_window = self._click_window_payload_at(x, y)
+                cached = self._cached_uia_before(click_window, cursor_xy=(x, y))
+                if isinstance(cached, dict) and self._uia_snapshot_covers_screen_point(
+                    cached, (x, y)
+                ):
+                    return True
+        if efp_payload is _EFP_UNSET:
+            with self._lock:
+                efp_payload = self._idle_efp_payload
+        from src.recorder.uia_input_boxes import efp_payload_is_usable_data_item
+
+        return efp_payload_is_usable_data_item(
+            efp_payload if isinstance(efp_payload, dict) else None
         )
 
     def _emit_uia_path_readiness(
@@ -2028,18 +2068,25 @@ class RecordingSession:
                 and not self._hover_uia_led_active
             ):
                 leave_settle_yellow = True
-        # Cache already ready — paint green and skip hover FindAll.
-        if self._uia_path_ready_at_cursor(cursor_xy):
-            if leave_settle_yellow:
-                return
+        if leave_settle_yellow:
+            return
+        # Walk already covers the point, or usable data_item EFP (no FindAll cells).
+        if self._should_skip_hover_findall_at_cursor(
+            cursor_xy, efp_payload=stored
+        ):
             self._emit_uia_path_readiness(
                 cursor_xy=cursor_xy,
                 efp_name=name,
                 efp_value=value,
             )
             return
-        if leave_settle_yellow:
-            return
+        # Labeled chrome EFP can green before hover; still warm a ribbon walk.
+        if self._uia_path_ready_at_cursor(cursor_xy, efp_payload=stored):
+            self._emit_uia_path_readiness(
+                cursor_xy=cursor_xy,
+                efp_name=name,
+                efp_value=value,
+            )
         hovered = self._maybe_hover_findall_uia(
             generation,
             int(cursor[0]),
@@ -2122,9 +2169,12 @@ class RecordingSession:
         assert click_window is not None
         hwnd = int(click_window.hwnd)
         cursor_xy = (int(x), int(y))
-        # Skip only when an attachable cache already covers this cursor point.
-        if self._uia_path_ready_at_cursor(cursor_xy):
+        # Skip when a walk covers the point or usable data_item EFP (no cells).
+        # Labeled chrome EFP may already green the LED — still warm a walk.
+        if self._should_skip_hover_findall_at_cursor(cursor_xy):
             return False
+
+        from src.recorder.uia_input_boxes import efp_payload_screen_bbox_xywh
 
         with self._lock:
             if not self._accepting_input or self._finalizing:
@@ -2136,6 +2186,13 @@ class RecordingSession:
                 and not self._hover_uia_led_active
             ):
                 return False
+            # Capture starting leaf bbox so micro-moves that bump generation
+            # do not discard a completed hover while still on the same control.
+            start_leaf_bbox = efp_payload_screen_bbox_xywh(
+                self._idle_efp_payload
+                if isinstance(self._idle_efp_payload, dict)
+                else None
+            )
             # Readiness was checked outside the lock; do not re-enter
             # ``_cached_uia_before`` here (same non-reentrant ``_lock``).
             self._hover_uia_led_token += 1
@@ -2195,12 +2252,29 @@ class RecordingSession:
             ):
                 # Settle stole the LED; do not upsert or paint readiness.
                 return True
+            still_in_start_leaf = False
             if generation != int(self._idle_efp_generation):
-                # Cursor moved; drop stale hover without merge or LED paint.
-                self._hover_uia_led_active = False
-                stale_generation = True
-            elif (
-                self._accepting_input
+                check_xy = (
+                    self._last_move_xy
+                    or self._last_pointer_cursor_xy
+                    or self._idle_efp_cursor_xy
+                    or cursor_xy
+                )
+                if (
+                    start_leaf_bbox is not None
+                    and check_xy is not None
+                    and point_in_rect_xywh(
+                        int(check_xy[0]), int(check_xy[1]), start_leaf_bbox
+                    )
+                ):
+                    still_in_start_leaf = True
+                else:
+                    # Cursor left the starting leaf; drop without merge/LED paint.
+                    self._hover_uia_led_active = False
+                    stale_generation = True
+            if (
+                not stale_generation
+                and self._accepting_input
                 and not self._finalizing
                 and self._uia_snapshot_has_leaves(snapshot)
             ):
@@ -2212,19 +2286,36 @@ class RecordingSession:
                 except (TypeError, ValueError):
                     current_last = None
                     current_last_hwnd = 0
-                # Do not merge into the primary settle tree for this hwnd; peers
-                # in by_hwnd are progressive hover warms.
-                if hwnd != current_last_hwnd:
+                # Covering leaf under cursor — not empty-synth "ready" alone —
+                # so a far unique grid cell does not block ribbon hover upsert.
+                primary_covers_point = (
+                    hwnd == current_last_hwnd
+                    and isinstance(current_last, dict)
+                    and self._uia_snapshot_has_leaves(current_last)
+                    and self._uia_snapshot_covers_screen_point(
+                        current_last, cursor_xy
+                    )
+                )
+                # Upsert by_hwnd when hwnd differs, or same-hwnd primary has no
+                # leaf under the hover point (e.g. grid settle after typing).
+                if hwnd != current_last_hwnd or not primary_covers_point:
                     existing = self._last_settle_uia_by_hwnd.get(hwnd)
                     merged = self._merge_uia_hover_snapshot(
                         existing if isinstance(existing, dict) else None,
                         snapshot,
                     )
                     self._last_settle_uia_by_hwnd[hwnd] = merged
+                    if hwnd == current_last_hwnd and not primary_covers_point:
+                        # Prefer ribbon hover for the next press without bumping
+                        # after_index (generation gate stays intact).
+                        self._last_settle_uia = merged
             # Re-check token before painting (settle may have raced).
             if int(claim_token) != int(self._hover_uia_led_token):
                 self._hover_uia_led_active = False
                 return True
+            if still_in_start_leaf:
+                # Generation bumped from a micro-move; treat as current for LED.
+                pass
         if stale_generation:
             self._reschedule_idle_efp_from_last_pointer()
             return True
@@ -4789,6 +4880,35 @@ class RecordingSession:
                 return True
         return False
 
+    @classmethod
+    def _uia_snapshot_covers_screen_point(
+        cls,
+        snapshot: dict[str, Any] | None,
+        screen_xy: tuple[int, int],
+    ) -> bool:
+        """True when any stored leaf bbox contains ``screen_xy`` (screen xyxy)."""
+        if not isinstance(snapshot, dict):
+            return False
+        try:
+            px, py = int(screen_xy[0]), int(screen_xy[1])
+        except (TypeError, ValueError, IndexError):
+            return False
+        for key in ("texts", "inputs", "scrollbars"):
+            raw = snapshot.get(key)
+            if not isinstance(raw, list):
+                continue
+            for row in raw:
+                box = row.get("bbox") if isinstance(row, dict) else row
+                if not (isinstance(box, (list, tuple)) and len(box) == 4):
+                    continue
+                try:
+                    x1, y1, x2, y2 = (int(v) for v in box[:4])
+                except (TypeError, ValueError):
+                    continue
+                if x1 <= px < x2 and y1 <= py < y2:
+                    return True
+        return False
+
     @staticmethod
     def _uia_box_key(box: object) -> tuple[int, int, int, int] | None:
         if isinstance(box, (list, tuple)) and len(box) == 4:
@@ -5066,15 +5186,37 @@ class RecordingSession:
         tree.
 
         Event-1 seed may publish several hwnd trees; prefer the click hwnd from
-        that map when present.
+        that map when present. When ``cursor_xy`` is set, prefer a mapped
+        snapshot that is ready at that point and covers the cursor over a
+        same-hwnd primary that does not (e.g. ribbon hover vs stale grid).
         """
         previous_index = self._previous_event_index_for_settle_cache()
         with self._lock:
             cached = self._last_settle_uia
-            by_hwnd = self._last_settle_uia_by_hwnd
+            by_hwnd = dict(self._last_settle_uia_by_hwnd)
             after_index = self._last_settle_uia_after_index
         if after_index != previous_index:
             return None
+        point_xy: tuple[int, int] | None = None
+        if cursor_xy is not None:
+            try:
+                point_xy = (int(cursor_xy[0]), int(cursor_xy[1]))
+            except (TypeError, ValueError, IndexError):
+                point_xy = None
+
+        def _ready_at_point(snap: dict[str, Any] | None) -> bool:
+            if not isinstance(snap, dict) or not self._uia_snapshot_has_leaves(snap):
+                return False
+            if point_xy is None:
+                return True
+            from src.recorder.vision_context import (
+                recording_uia_snapshot_ready_at_point,
+            )
+
+            return bool(
+                recording_uia_snapshot_ready_at_point(snap, screen_xy=point_xy)
+            )
+
         if click_window is not None and by_hwnd:
             try:
                 click_hwnd = int(click_window.hwnd or 0)
@@ -5083,7 +5225,24 @@ class RecordingSession:
             if click_hwnd > 0:
                 mapped = by_hwnd.get(click_hwnd)
                 if isinstance(mapped, dict) and self._uia_snapshot_has_leaves(mapped):
-                    return self._copy_uia_snapshot(mapped)
+                    if point_xy is None:
+                        return self._copy_uia_snapshot(mapped)
+                    mapped_covers = self._uia_snapshot_covers_screen_point(
+                        mapped, point_xy
+                    )
+                    primary_covers_ready = (
+                        isinstance(cached, dict)
+                        and self._uia_snapshot_matches_click(
+                            cached, click_window, cursor_xy=point_xy
+                        )
+                        and self._uia_snapshot_has_leaves(cached)
+                        and self._uia_snapshot_covers_screen_point(cached, point_xy)
+                        and _ready_at_point(cached)
+                    )
+                    # by_hwnd-first, unless a covering ready primary beats a
+                    # non-covering map (stale grid / empty-synth vs ribbon).
+                    if not (primary_covers_ready and not mapped_covers):
+                        return self._copy_uia_snapshot(mapped)
         if not self._uia_snapshot_matches_click(
             cached, click_window, cursor_xy=cursor_xy
         ):
@@ -6693,6 +6852,10 @@ class RecordingSession:
                 )
         else:
             # Next gesture already sealed after-cache; skip FindAll for this step.
+            # Still advance settle generation so idle hover can warm the next
+            # press (e.g. Excel File after IME-sealed typing cleared the cache).
+            with self._lock:
+                self._last_settle_uia_after_index = int(item.event_index)
             self._emit_uia_status(state="red", after_index=int(item.event_index))
         if (
             change is None

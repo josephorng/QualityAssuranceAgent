@@ -1211,7 +1211,8 @@ def test_hover_findall_skips_when_already_cached_or_yellow_or_mismatch(
     }
     assert _run(session) == []
 
-    # Unique far hub is empty-synth ready — skip hover FindAll
+    # Unique far hub is empty-synth ready but does not cover the cursor —
+    # still warm hover so ribbon/chrome under the pointer can attach.
     session._last_settle_uia_by_hwnd = {
         55: {
             "hwnd": 55,
@@ -1223,7 +1224,7 @@ def test_hover_findall_skips_when_already_cached_or_yellow_or_mismatch(
             "texts": [{"bbox": [0, 0, 4, 4], "text": "far"}],
         }
     }
-    assert _run(session) == []
+    assert _run(session) == [55]
 
     # Ambiguous same-label hubs are not ready — hover FindAll retries / merges
     session._last_settle_uia_by_hwnd = {
@@ -1479,6 +1480,229 @@ def test_hover_findall_stale_generation_skips_merge(tmp_path: Path) -> None:
     ):
         session._maybe_hover_findall_uia(1, 100, 100)
     assert 55 not in session._last_settle_uia_by_hwnd
+
+
+def test_hover_same_hwnd_upserts_when_primary_not_ready_at_point(
+    tmp_path: Path,
+) -> None:
+    """After typing, same-hwnd grid settle is not ready on File — hover stores ribbon."""
+    from src.recorder.capture import RecordingSession
+    from src.recorder.window_snapshot import ClickWindowInfo
+
+    session = RecordingSession(runs_root=tmp_path)
+    session._accepting_input = True
+    session._idle_efp_generation = 1
+    session._last_settle_uia_after_index = 0
+    # Same XLMAIN hwnd; ambiguous far hubs so File is not walk-ready (no empty-synth).
+    session._last_settle_uia = {
+        "hwnd": 10,
+        "class_name": "XLMAIN",
+        "window": [0, 0, 800, 600],
+        "inputs": [],
+        "scrollbars": [],
+        "texts": [
+            {"bbox": [400, 400, 480, 440], "text": "G8"},
+            {"bbox": [500, 400, 580, 440], "text": "G8"},
+        ],
+    }
+    session._last_settle_uia_by_hwnd = {}
+    session._idle_efp_payload = {
+        "name": "[檔案] 索引標籤",
+        "value": "",
+        "control_type": "button",
+        "bbox": [40, 10, 60, 24],
+    }
+    excel = ClickWindowInfo(
+        hwnd=10,
+        title="Book1 - Excel",
+        process_name="EXCEL.EXE",
+        left=0,
+        top=0,
+        width=800,
+        height=600,
+        is_maximized=False,
+        class_name="XLMAIN",
+    )
+
+    def _snap(hwnd: int, x: int, y: int) -> dict:
+        return {
+            "window": [0, 0, 800, 600],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [{"bbox": [40, 10, 100, 34], "text": "[檔案] 索引標籤"}],
+        }
+
+    with (
+        patch(
+            "src.recorder.capture.resolve_click_window",
+            return_value=excel,
+        ),
+        patch(
+            "src.recorder.uia_input_boxes.snapshot_uia_hover_subtree",
+            side_effect=_snap,
+        ),
+    ):
+        assert session._maybe_hover_findall_uia(1, 50, 20)
+    assert 10 in session._last_settle_uia_by_hwnd
+    warmed = session._last_settle_uia_by_hwnd[10]
+    assert warmed["texts"][0]["text"] == "[檔案] 索引標籤"
+    assert warmed.get("cache_kind") == "hover"
+    # Primary replaced for press attach; after_index unchanged.
+    assert session._last_settle_uia is warmed
+    assert session._last_settle_uia_after_index == 0
+    hit = session._cached_uia_before(excel, cursor_xy=(50, 20))
+    assert hit is not None
+    assert hit["texts"][0]["text"] == "[檔案] 索引標籤"
+
+
+def test_hover_stale_generation_keeps_merge_inside_start_leaf(
+    tmp_path: Path,
+) -> None:
+    """Micro-move bump during hover still upserts when cursor stays on the leaf."""
+    from src.recorder.capture import RecordingSession
+    from src.recorder.window_snapshot import ClickWindowInfo
+
+    session = RecordingSession(runs_root=tmp_path)
+    session._accepting_input = True
+    session._idle_efp_generation = 1
+    session._last_settle_uia_after_index = 0
+    session._last_settle_uia = {"hwnd": 10, "window": [0, 0, 1, 1]}
+    session._last_settle_uia_by_hwnd = {}
+    session._idle_efp_payload = {
+        "name": "[檔案] 索引標籤",
+        "value": "",
+        "control_type": "button",
+        "bbox": [40, 10, 60, 24],
+    }
+    session._last_move_xy = (50, 20)
+    hover_win = ClickWindowInfo(
+        hwnd=55,
+        title="Other",
+        process_name="other.exe",
+        left=0,
+        top=0,
+        width=400,
+        height=300,
+        is_maximized=False,
+        class_name="Chrome_WidgetWin_1",
+    )
+
+    def _snap_and_bump(hwnd: int, x: int, y: int) -> dict:
+        session._idle_efp_generation = 2
+        session._last_move_xy = (55, 22)
+        return {
+            "window": [0, 0, 400, 300],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [{"bbox": [40, 10, 100, 34], "text": "檔案"}],
+        }
+
+    with (
+        patch(
+            "src.recorder.capture.resolve_click_window",
+            return_value=hover_win,
+        ),
+        patch(
+            "src.recorder.uia_input_boxes.snapshot_uia_hover_subtree",
+            side_effect=_snap_and_bump,
+        ),
+    ):
+        session._maybe_hover_findall_uia(1, 50, 20)
+    assert 55 in session._last_settle_uia_by_hwnd
+    assert session._last_settle_uia_by_hwnd[55]["texts"][0]["text"] == "檔案"
+
+
+def test_cached_uia_before_prefers_ready_by_hwnd_over_stale_primary(
+    tmp_path: Path,
+) -> None:
+    """Ready ribbon in by_hwnd wins over a same-hwnd grid primary not ready at point."""
+    from src.recorder.capture import RecordingSession
+    from src.recorder.window_snapshot import ClickWindowInfo
+
+    session = RecordingSession(runs_root=tmp_path)
+    session._last_settle_uia_after_index = 0
+    session._last_settle_uia = {
+        "hwnd": 10,
+        "class_name": "XLMAIN",
+        "window": [0, 0, 800, 600],
+        "inputs": [],
+        "scrollbars": [],
+        "texts": [{"bbox": [400, 400, 480, 440], "text": "G8"}],
+    }
+    session._last_settle_uia_by_hwnd = {
+        10: {
+            "hwnd": 10,
+            "cache_kind": "hover",
+            "class_name": "XLMAIN",
+            "window": [0, 0, 800, 600],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [{"bbox": [40, 10, 100, 34], "text": "[檔案] 索引標籤"}],
+        }
+    }
+    excel = ClickWindowInfo(
+        hwnd=10,
+        title="Book1 - Excel",
+        process_name="EXCEL.EXE",
+        left=0,
+        top=0,
+        width=800,
+        height=600,
+        is_maximized=False,
+        class_name="XLMAIN",
+    )
+    hit = session._cached_uia_before(excel, cursor_xy=(50, 20))
+    assert hit is not None
+    assert hit["texts"][0]["text"] == "[檔案] 索引標籤"
+    assert hit.get("cache_kind") == "hover"
+
+
+def test_cached_uia_before_skips_stale_by_hwnd_for_ready_primary(
+    tmp_path: Path,
+) -> None:
+    """Ambiguous grid in by_hwnd must not beat a ready same-hwnd primary at the point."""
+    from src.recorder.capture import RecordingSession
+    from src.recorder.window_snapshot import ClickWindowInfo
+
+    session = RecordingSession(runs_root=tmp_path)
+    session._last_settle_uia_after_index = 0
+    session._last_settle_uia = {
+        "hwnd": 10,
+        "class_name": "XLMAIN",
+        "window": [0, 0, 800, 600],
+        "inputs": [],
+        "scrollbars": [],
+        "texts": [{"bbox": [40, 10, 100, 34], "text": "[檔案] 索引標籤"}],
+    }
+    session._last_settle_uia_by_hwnd = {
+        10: {
+            "hwnd": 10,
+            "cache_kind": "hover",
+            "class_name": "XLMAIN",
+            "window": [0, 0, 800, 600],
+            "inputs": [],
+            "scrollbars": [],
+            # Ambiguous peers → not ready at File; fall through to primary ribbon.
+            "texts": [
+                {"bbox": [400, 400, 480, 440], "text": "G8"},
+                {"bbox": [500, 400, 580, 440], "text": "G8"},
+            ],
+        }
+    }
+    excel = ClickWindowInfo(
+        hwnd=10,
+        title="Book1 - Excel",
+        process_name="EXCEL.EXE",
+        left=0,
+        top=0,
+        width=800,
+        height=600,
+        is_maximized=False,
+        class_name="XLMAIN",
+    )
+    hit = session._cached_uia_before(excel, cursor_xy=(50, 20))
+    assert hit is not None
+    assert hit["texts"][0]["text"] == "[檔案] 索引標籤"
 
 
 def test_cross_window_press_skips_stale_settle_cache(tmp_path: Path) -> None:

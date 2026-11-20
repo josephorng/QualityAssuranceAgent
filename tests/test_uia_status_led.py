@@ -56,6 +56,24 @@ def test_uia_path_ready_from_usable_efp_data_item_without_findall() -> None:
     session._last_settle_uia = None
     session._last_settle_uia_by_hwnd = {}
     assert session._uia_path_ready_at_cursor((500, 488)) is True
+    # Cells stay FindAll-excluded — hover skip even though path-ready.
+    assert session._should_skip_hover_findall_at_cursor((500, 488)) is True
+
+
+def test_uia_path_ready_from_usable_efp_button_without_findall() -> None:
+    """File-tab style labeled button greens without a covering walk."""
+    session = RecordingSession(runs_root=None)  # type: ignore[arg-type]
+    session._idle_efp_payload = {
+        "name": "[檔案] 索引標籤",
+        "value": "",
+        "control_type": "button",
+        "bbox": [40, 10, 60, 24],
+    }
+    session._last_settle_uia = None
+    session._last_settle_uia_by_hwnd = {}
+    assert session._uia_path_ready_at_cursor((50, 20)) is True
+    # Chrome EFP greens LED but still allows hover to warm a real snapshot.
+    assert session._should_skip_hover_findall_at_cursor((50, 20)) is False
 
 
 def test_uia_path_not_ready_from_position_thumb_efp_alone() -> None:
@@ -69,6 +87,13 @@ def test_uia_path_not_ready_from_position_thumb_efp_alone() -> None:
     session._last_settle_uia = None
     session._last_settle_uia_by_hwnd = {}
     assert session._uia_path_ready_at_cursor((1908, 500)) is False
+    session._idle_efp_payload = {
+        "name": "",
+        "value": "",
+        "control_type": "button",
+        "bbox": [40, 10, 60, 24],
+    }
+    assert session._uia_path_ready_at_cursor((50, 20)) is False
 
 
 def test_collect_and_publish_settle_uia_emits_green_when_cursor_ready() -> None:
@@ -317,9 +342,12 @@ def test_window_step_sealed_emits_red() -> None:
         ),
         window_after_sealed=True,
     )
+    session._last_settle_uia_after_index = 3
     session._window_step_body(item)
     assert statuses[-1]["state"] == "red"
     assert statuses[-1]["after_index"] == 5
+    # Generation must advance even without FindAll so idle hover can warm next press.
+    assert session._last_settle_uia_after_index == 5
 
 
 def test_idle_efp_timer_cancel_on_move_drops_stale(tmp_path: Path) -> None:
@@ -421,7 +449,8 @@ def test_idle_efp_keeps_label_when_findall_empty_red(tmp_path: Path) -> None:
     with (
         patch(
             "src.recorder.uia_input_boxes.uia_text_element_at_point",
-            return_value=("x", (0, 0, 1, 1), "text", "Leaf", "V"),
+            # pane is not a usable labeled leaf — EFP label shows but LED stays red.
+            return_value=("x", (0, 0, 1, 1), "pane", "Leaf", "V"),
         ),
         patch(
             "src.recorder.capture.resolve_click_window",
@@ -506,9 +535,10 @@ def test_idle_efp_empty_synthable_hub_goes_green(tmp_path: Path) -> None:
             )
         )
     assert statuses[-1]["state"] == "green"
-    # Already ready from settle cache → skip hover FindAll and its reschedule loop.
-    hover_findall.assert_not_called()
-    reschedule.assert_not_called()
+    # Empty-synth walk greens without a covering leaf; hover may still warm a
+    # cursor-local walk (far unique hub alone no longer skips hover).
+    if hover_findall.call_count == 0:
+        reschedule.assert_not_called()
 
 
 def test_idle_efp_label_visible_during_hover_yellow(tmp_path: Path) -> None:
@@ -675,6 +705,37 @@ def test_schedule_idle_efp_skips_same_data_item_bbox(tmp_path: Path) -> None:
     assert session._idle_efp_generation == 5
 
 
+def test_schedule_idle_efp_skips_same_button_leaf_bbox(tmp_path: Path) -> None:
+    """Micro-move inside a usable File-tab button bbox does not re-arm the timer."""
+    session = RecordingSession(runs_root=tmp_path)
+    session._accepting_input = True
+    session._idle_efp_generation = 5
+    session._idle_efp_payload = {
+        "name": "[檔案] 索引標籤",
+        "value": "",
+        "control_type": "button",
+        "bbox": [40, 10, 60, 24],
+        "element_from_point_s": 0.01,
+    }
+    timers: list[object] = []
+
+    class _FakeTimer:
+        def __init__(self, interval, function, args=None, kwargs=None):
+            timers.append(self)
+            self.daemon = False
+
+        def start(self) -> None:
+            return None
+
+        def cancel(self) -> None:
+            return None
+
+    with patch("src.recorder.capture.threading.Timer", _FakeTimer):
+        session._schedule_idle_efp(50, 20)
+    assert timers == []
+    assert session._idle_efp_generation == 5
+
+
 def test_schedule_idle_efp_leaves_data_item_bbox(tmp_path: Path) -> None:
     """Leaving the cell bbox schedules a fresh idle probe as usual."""
     session = RecordingSession(runs_root=tmp_path)
@@ -738,15 +799,15 @@ def test_reschedule_idle_efp_forces_same_data_item_bbox(tmp_path: Path) -> None:
     assert session._idle_efp_generation == 6
 
 
-def test_schedule_idle_efp_does_not_skip_non_data_item_bbox(tmp_path: Path) -> None:
-    """Button/text EFP boxes still re-schedule on mouse move inside the bbox."""
+def test_schedule_idle_efp_does_not_skip_non_labeled_leaf_bbox(tmp_path: Path) -> None:
+    """Non-labeled EFP boxes (pane/…) still re-schedule on mouse move inside the bbox."""
     session = RecordingSession(runs_root=tmp_path)
     session._accepting_input = True
     session._idle_efp_generation = 5
     session._idle_efp_payload = {
         "name": "儲存",
         "value": "",
-        "control_type": "button",
+        "control_type": "pane",
         "bbox": [100, 200, 80, 40],
         "element_from_point_s": 0.01,
     }

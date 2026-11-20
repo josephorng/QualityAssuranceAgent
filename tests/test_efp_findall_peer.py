@@ -935,3 +935,46 @@ def test_efp_data_item_beats_generic_list_row_hub(monkeypatch) -> None:
     assert primary.get("text") == "電腦名稱|lannie-Ubuntu26"
     assert primary.get("source") == "uia_efp"
     assert primary.get("uia_control_type") == "data_item"
+
+
+def test_merge_sparse_uia_detections_with_yolo_peers() -> None:
+    from cua_mcp.select_mouse_target import UiDetection
+    from src.recorder.vision_context import merge_sparse_uia_detections_with_yolo_peers
+
+    def _det(
+        text: str,
+        *,
+        source: str,
+        xy: tuple[int, int] = (10, 10),
+    ) -> UiDetection:
+        cx, cy = xy
+        return UiDetection(
+            bbox=(cx - 5, cy - 5, 10, 10),
+            cx=cx,
+            cy=cy,
+            class_id=YOLO_CLASS_TEXT,
+            class_name="text",
+            text=text,
+            source=source,
+        )
+
+    uia = [
+        _det("N19", source="uia_efp", xy=(100, 100)),
+        _det("全選", source="uia", xy=(20, 20)),
+    ]
+    yolo = [
+        _det("N19", source="ocr", xy=(100, 100)),  # duplicate label — skip
+        _det("19", source="ocr", xy=(20, 100)),
+        _det("18", source="ocr", xy=(20, 80)),
+        _det("20", source="ocr", xy=(20, 120)),
+    ]
+    merged = merge_sparse_uia_detections_with_yolo_peers(
+        uia, yolo, min_peer_labels=8
+    )
+    assert [d.text for d in merged[:2]] == ["N19", "全選"]
+    assert {d.text for d in merged[2:]} == {"19", "18", "20"}
+
+    rich_uia = [_det(f"L{i}", source="uia", xy=(i * 10, 0)) for i in range(8)]
+    assert merge_sparse_uia_detections_with_yolo_peers(
+        rich_uia, yolo, min_peer_labels=8
+    ) == rich_uia

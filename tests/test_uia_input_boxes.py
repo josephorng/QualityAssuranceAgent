@@ -610,6 +610,47 @@ def test_efp_payload_is_usable_data_item() -> None:
     )
 
 
+def test_efp_payload_is_usable_labeled_leaf() -> None:
+    from src.recorder.uia_input_boxes import efp_payload_is_usable_labeled_leaf
+
+    assert efp_payload_is_usable_labeled_leaf(
+        {
+            "name": "G8",
+            "value": "",
+            "control_type": "data_item",
+            "bbox": [466, 477, 72, 22],
+        }
+    )
+    assert efp_payload_is_usable_labeled_leaf(
+        {
+            "name": "[檔案] 索引標籤",
+            "value": "",
+            "control_type": "button",
+            "bbox": [40, 10, 60, 24],
+        }
+    )
+    assert efp_payload_is_usable_labeled_leaf(
+        {
+            "name": "Home",
+            "value": "",
+            "control_type": "tab_item",
+            "bbox": [100, 10, 48, 22],
+        }
+    )
+    assert not efp_payload_is_usable_labeled_leaf(
+        {"name": "Position", "control_type": "button", "bbox": [1, 1, 10, 10]}
+    )
+    assert not efp_payload_is_usable_labeled_leaf(
+        {"name": "CoreInput", "control_type": "button", "bbox": [1, 1, 10, 10]}
+    )
+    assert not efp_payload_is_usable_labeled_leaf(
+        {"name": "檔案", "control_type": "pane", "bbox": [1, 1, 10, 10]}
+    )
+    assert not efp_payload_is_usable_labeled_leaf(
+        {"name": "檔案", "control_type": "button"}
+    )
+
+
 def test_select_uia_field_clip_picks_smallest_containing_caret() -> None:
     from src.recorder.uia_input_boxes import select_uia_field_clip_containing_point
 

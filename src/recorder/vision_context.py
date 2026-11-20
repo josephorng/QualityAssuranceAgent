@@ -787,6 +787,63 @@ def _is_efp_labeled_primary(det: UiDetection) -> bool:
     )
 
 
+def _usable_landmark_label_key(det: UiDetection) -> str | None:
+    """Casefolded visible label when usable for nearby picking; else ``None``."""
+    label = _visible_text(det.text)
+    if det.class_id == YOLO_CLASS_TEXT and len(label) >= 2:
+        return label.casefold()
+    if _is_icon_detection(det):
+        icons = det.icons if isinstance(det.icons, list) else []
+        for icon in icons:
+            if not isinstance(icon, dict):
+                continue
+            meta = str(icon.get("chinese_id") or icon.get("id") or "").strip()
+            if meta:
+                return meta.casefold()
+        if label:
+            return label.casefold()
+    return None
+
+
+def _count_unique_nearby_peer_labels(detections: list[UiDetection]) -> int:
+    """Count unique text/icon labels available for ``collect_nearby_hints``."""
+    keys: set[str] = set()
+    for det in detections:
+        key = _usable_landmark_label_key(det)
+        if key:
+            keys.add(key)
+    return len(keys)
+
+
+def merge_sparse_uia_detections_with_yolo_peers(
+    uia_detections: list[UiDetection],
+    yolo_detections: list[UiDetection],
+    *,
+    min_peer_labels: int = _MIN_NEARBY_TEXT_CANDIDATES,
+) -> list[UiDetection]:
+    """Append unique YOLO peers when the UIA pool is too thin for nearby landmarks.
+
+    Keeps UIA / EFP detections first so click-primary promotion still prefers the
+    UIA hub. Used for Excel cells (FindAll omits ``data_item``) and EFP-only
+    chrome when settle/hover left an empty snapshot.
+    """
+    if _count_unique_nearby_peer_labels(uia_detections) >= int(min_peer_labels):
+        return list(uia_detections)
+    seen: set[str] = set()
+    for det in uia_detections:
+        key = _usable_landmark_label_key(det)
+        if key:
+            seen.add(key)
+    merged = list(uia_detections)
+    for det in yolo_detections:
+        key = _usable_landmark_label_key(det)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        merged.append(det)
+    return merged
+
+
 def _is_usable_uia_text_detection(det: UiDetection) -> bool:
     """True for UIA-sourced text with a usable landmark label."""
     return (
@@ -4224,7 +4281,13 @@ def _detect_recording_mouse_targets(
         vision_timing.pop("vision_path_reason", None)
         vision_timing["recording_uia_sufficient"] = True
         vision_timing["yolo_ocr_fallback_detections"] = detections
-        return uia_detections, vision_timing
+        # Sparse UIA (Excel cells / EFP-only chrome): borrow YOLO peers for nearby.
+        merged = merge_sparse_uia_detections_with_yolo_peers(
+            uia_detections, detections
+        )
+        if len(merged) > len(uia_detections):
+            vision_timing["uia_yolo_nearby_peers_merged"] = True
+        return merged, vision_timing
 
     vision_timing["vision_path"] = "yolo_ocr"
     vision_timing["vision_path_reason"] = skip_reason

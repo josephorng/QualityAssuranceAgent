@@ -314,6 +314,41 @@ def test_resolve_deletable_run_folder_finds_sibling_recording(
     assert found == recording.resolve()
 
 
+def test_delete_aborted_recording_shell_from_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Index can delete start()-only recording folders that never finalized."""
+    runs_root = tmp_path / "runs"
+    recordings_root = tmp_path / "recordings"
+    runs_root.mkdir()
+    orphan = recordings_root / "recording_aborted_shell"
+    orphan.mkdir(parents=True)
+    (orphan / "events").mkdir()
+    (orphan / "screenshots").mkdir()
+    (orphan / "record.log").write_text("recording started\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "src.common.settings.resolve_runs_dir",
+        lambda configured=None: runs_root.resolve(),
+    )
+    monkeypatch.setattr(
+        "src.common.settings.resolve_recordings_dir",
+        lambda configured=None: recordings_root.resolve(),
+    )
+
+    write_runs_index_html(runs_root, recordings_root=recordings_root, backfill=False)
+    index_html = (runs_root / "index.html").read_text(encoding="utf-8")
+    assert "recording_aborted_shell" in index_html
+    assert "未完成" in index_html
+
+    deleted = delete_run_report_folder(tmp_path, "recording_aborted_shell")
+
+    assert deleted.name == "recording_aborted_shell"
+    assert not orphan.exists()
+    rebuilt = (runs_root / "index.html").read_text(encoding="utf-8")
+    assert "recording_aborted_shell" not in rebuilt
+
+
 def test_apply_recording_event_landmarks_persists_and_rebuilds(tmp_path: Path) -> None:
     runs_root = tmp_path / "runs"
     _make_recording_landmark_run(runs_root, "recording_landmark_edit")

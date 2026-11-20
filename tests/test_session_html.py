@@ -3626,7 +3626,10 @@ def test_write_runs_index_skips_recording_backfill_when_disabled(tmp_path: Path)
     html = write_runs_index_html(tmp_path, backfill=False).read_text(encoding="utf-8")
 
     assert not (recording / "recording_steps.html").is_file()
-    assert "recording_20260721_120000_000011" not in html
+    # Incomplete folders still appear so the index can delete them.
+    assert "recording_20260721_120000_000011" in html
+    assert 'href="recording_20260721_120000_000011/recording_steps.html"' not in html
+    assert "未完成" in html
 
 
 def test_write_session_html_from_run_skips_recording_backfill(tmp_path: Path) -> None:
@@ -3664,7 +3667,26 @@ def test_write_session_html_from_run_skips_recording_backfill(tmp_path: Path) ->
     assert not (recording / "recording_steps.html").is_file()
     index_html = runs_index_html_path(tmp_path).read_text(encoding="utf-8")
     assert 'href="task_20260721_130000_000001/session_steps.html"' in index_html
-    assert "recording_20260721_120000_000014" not in index_html
+    assert "recording_20260721_120000_000014" in index_html
+    assert 'href="recording_20260721_120000_000014/recording_steps.html"' not in index_html
+
+
+def test_write_runs_index_lists_aborted_recording_shell_for_delete(tmp_path: Path) -> None:
+    """Folders created by start() but never finalized still appear for deletion."""
+    orphan = tmp_path / "recording_20260721_120000_000099"
+    orphan.mkdir()
+    (orphan / "events").mkdir()
+    (orphan / "screenshots").mkdir()
+    (orphan / "yolo_ocr").mkdir()
+    (orphan / "record.log").write_text("recording started\n", encoding="utf-8")
+
+    html = write_runs_index_html(tmp_path, backfill=False).read_text(encoding="utf-8")
+
+    assert "recording_20260721_120000_000099" in html
+    assert 'data-run-id="recording_20260721_120000_000099"' in html
+    assert "未完成" in html
+    assert 'href="recording_20260721_120000_000099/recording_steps.html"' not in html
+    assert 'class="delete-run" data-run-id="recording_20260721_120000_000099"' in html
 
 
 def test_write_runs_index_backfills_missing_recording_html(tmp_path: Path) -> None:

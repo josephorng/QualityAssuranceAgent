@@ -5479,8 +5479,9 @@ def _iter_smart_report_run_dirs(runs_root: Path) -> list[Path]:
 
 
 def _is_recording_run_dir(run_root: Path) -> bool:
-    """Recording folders are identified by ``session.json``, not a name prefix."""
-    return (Path(run_root) / "session.json").is_file()
+    """Recording folders: finished ones have ``session.json``; aborted starts keep ``events/``."""
+    root = Path(run_root)
+    return (root / "session.json").is_file() or (root / "events").is_dir()
 
 
 def _is_smart_run_dir(run_root: Path) -> bool:
@@ -5511,11 +5512,17 @@ def _iter_recording_source_dirs(runs_root: Path) -> list[Path]:
 
 
 def _iter_recording_report_dirs(runs_root: Path) -> list[Path]:
+    """List recording folders for the index, including incomplete/aborted shells.
+
+    Finished recordings usually have ``recording_steps.html``. Aborted starts may
+    only have ``events/`` (and optionally ``session.json``); still list them so
+    the index delete control can remove the leftover folder.
+    """
     if not runs_root.is_dir():
         return []
     found: list[Path] = []
     for child in runs_root.iterdir():
-        if child.is_dir() and _is_recording_run_dir(child) and (child / _RECORDING_HTML_NAME).is_file():
+        if child.is_dir() and _is_recording_run_dir(child):
             found.append(child)
     found.sort(key=lambda path: (path.name, path.stat().st_mtime), reverse=True)
     return found
@@ -7484,10 +7491,8 @@ def _render_recording_event_html(
 
 def _render_recording_index_row(run_root: Path, *, index_dir: Path) -> str:
     run_id = run_root.name
-    href = escape(
-        _href_relative_to_index(run_root / _RECORDING_HTML_NAME, index_dir),
-        quote=True,
-    )
+    html_path = run_root / _RECORDING_HTML_NAME
+    has_page = html_path.is_file()
     manifest = _load_session_manifest(run_root)
     report = _load_run_report(run_root)
     run_time_raw = _resolve_recording_datetime(run_root, manifest)
@@ -7495,6 +7500,7 @@ def _render_recording_index_row(run_root: Path, *, index_dir: Path) -> str:
     run_id_title = escape(run_id, quote=True)
     label = escape(run_id)
     label_attr = escape(run_id, quote=True)
+    incomplete = not has_page or manifest is None
 
     event_count: int | None = None
     if isinstance(manifest, dict) and isinstance(manifest.get("event_count"), int):
@@ -7519,14 +7525,27 @@ def _render_recording_index_row(run_root: Path, *, index_dir: Path) -> str:
     def _count_text(value: Any) -> str:
         return escape(str(value)) if isinstance(value, int) else "—"
 
+    if has_page:
+        href = escape(
+            _href_relative_to_index(html_path, index_dir),
+            quote=True,
+        )
+        name_html = f'<a href="{href}" title="{run_id_title}">{label}</a>'
+    else:
+        name_html = f'<span class="incomplete-recording" title="{run_id_title}">{label}</span>'
+    if incomplete:
+        name_html += (
+            ' <span class="badge neutral" title="錄製未完成或缺少報告頁">'
+            "未完成</span>"
+        )
+
     return (
         "<tr>"
         f'<td class="select-col" data-label="選取" data-sort="">'
         f'<input type="checkbox" class="select-run" data-run-id="{run_id_title}" '
         f'data-run-label="{label_attr}" '
         f'aria-label="選取錄製 {run_id_title}"></td>'
-        f'<td data-label="錄製"{_sort_attr(run_id)}>'
-        f'<a href="{href}" title="{run_id_title}">{label}</a></td>'
+        f'<td data-label="錄製"{_sort_attr(run_id)}>{name_html}</td>'
         f'<td data-label="時間"{_sort_attr(run_time_raw)}>{run_time}</td>'
         f'<td data-label="事件"{_sort_attr(event_count)}>{_count_text(event_count)}</td>'
         f'<td data-label="已分析"{_sort_attr(analyzed_count)}>{_count_text(analyzed_count)}</td>'
@@ -7618,7 +7637,7 @@ def _render_recordings_tab_panel(
         )
         intro = (
             f"共 {len(recording_dirs)} 筆錄製。勾選多筆後可批次回報或刪除（按住 Shift 可連續選取）；"
-            "點選錄製名稱開啟事件紀錄；"
+            "點選錄製名稱開啟事件紀錄；未完成的錄製仍可刪除整個資料夾；"
             "點選欄位標題可排序；🐛 可回報 bug；"
             "垃圾桶可刪除整份錄製資料夾。"
         )

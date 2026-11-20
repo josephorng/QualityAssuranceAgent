@@ -7982,6 +7982,86 @@ async def test_landmark_efp_neighbor_hit_commits_not_ocr_scrollbar_twin(
 
 
 @pytest.mark.asyncio
+async def test_uia_data_item_name_hit_commits_not_ocr_scrollbar_twin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Excel DataItem Name FindFirst hit must not adopt OCR scrollbar twin."""
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+    from src.recorder.uia_replay_repair import (
+        YoloOcrMoveFallback,
+        bind_yolo_ocr_fallbacks,
+    )
+
+    hit_x, hit_y = 2936, 641
+    name_det = smt._detection_from_bbox(
+        (2900, 630, 72, 22),
+        YOLO_CLASS_TEXT,
+        text="N15",
+        source="uia",
+        uia_control_type="data_item",
+    )
+    uia_scrollbar = _detection_from_bbox(
+        (19, 300, 1654, 672),
+        YOLO_CLASS_SCROLLBAR,
+        source="uia",
+    )
+
+    def fake_grab(*_a, **_k):
+        frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], 0.01
+
+    def boom_finish(*_a, **_k):
+        raise AssertionError(
+            "DataItem Name hit must not enter uia_yolo_subtarget / OCR twin YOLO"
+        )
+
+    monkeypatch.setattr(smt, "_grab_selected_monitors", fake_grab)
+    monkeypatch.setattr(
+        smt,
+        "_uia_only_detections_for_click_window",
+        lambda *_a, **_k: [uia_scrollbar],
+    )
+    monkeypatch.setattr(
+        smt,
+        "_try_uia_first_unique_select",
+        lambda *_a, **_k: (name_det, "uia_data_item_name_hit"),
+    )
+    monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", boom_finish)
+    monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
+
+    fallback = YoloOcrMoveFallback(
+        instruction=(
+            "（YOLO+OCR）將滑鼠移到滾動條的42%處（在「A1」文字的下面），"
+            "並點擊滑鼠一下。"
+        ),
+    )
+    with bind_yolo_ocr_fallbacks([fallback]):
+        found = await smt.find_mouse_point(
+            "（UIA）將滑鼠移到「N15」資料項目（在滾動條的裡面），並點擊滑鼠一下。",
+            click_window={
+                "hwnd": 5,
+                "title": "活頁簿1 - Excel",
+                "process_name": "EXCEL.EXE",
+                "rect": [0, 0, 1920, 1080],
+            },
+            vision_mode="uia",
+            anchor_text="N15",
+            control_type="data_item",
+            recorded_efp_name="N15",
+            recorded_efp_value="",
+        )
+    assert found is not None
+    assert found[0:2] == (hit_x, hit_y)
+    assert found[2]["selection_method"] == "uia_data_item_name_hit"
+    assert "YOLO" not in str(found[2].get("anchor_instruction") or "")
+    assert "42%" not in str(found[2].get("anchor_instruction") or "")
+    assert found[2].get("track_percent") is None
+    assert found[2].get("class_name") != "scrollbar"
+
+
+@pytest.mark.asyncio
 async def test_uia_hit_with_fallback_unique_element_skips_ocr(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

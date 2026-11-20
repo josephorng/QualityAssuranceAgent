@@ -1072,7 +1072,7 @@ def test_scan_efp_neighbors_skips_occupied_bbox_then_hits() -> None:
 
 
 def test_uia_first_data_item_neighbor_hit() -> None:
-    """Constellation miss at K11 → neighbor scan finds K10."""
+    """Constellation miss at K11 → neighbor scan finds K10 (FindFirst absent)."""
     landmark = _det(100, 100, text="LM", class_name="text")
     synth_xy = (800, 800)
     geom_far = _simple_landmark_geometry(
@@ -1107,6 +1107,148 @@ def test_uia_first_data_item_neighbor_hit() -> None:
     assert reason == "landmark_efp_neighbor_hit"
     assert chosen is not None
     assert (chosen.cx, chosen.cy) == k10_point
+
+
+def test_uia_first_data_item_name_findfirst_hit_before_scan() -> None:
+    """Pool/synth miss + FindFirst hit commits without needing neighbor scan."""
+    landmark = _det(100, 100, text="LM", class_name="text")
+    synth_xy = (800, 800)
+    geom_far = _simple_landmark_geometry(
+        landmark_xy=(100.0, 100.0),
+        target_xy=(float(synth_xy[0]), float(synth_xy[1])),
+        scale=50.0,
+    )
+    scan_calls = {"n": 0}
+
+    def probe(x: int, y: int):
+        # Wrong cell at synth — would force a neighbor walk without FindFirst.
+        if (x, y) == synth_xy:
+            return ("K15", (780, 780, 40, 40), "data_item", "K15", "")
+        scan_calls["n"] += 1
+        return ("LM", (x - 5, y - 5, 10, 10), "text", "LM", "")
+
+    def lookup(name: str):
+        assert name == "N15"
+        return ((2900, 630, 72, 22), "N15", "")
+
+    chosen, reason = _try_uia_first_unique_select(
+        [landmark],
+        anchor="N15",
+        nearby_hints=[],
+        nearby_labels=[],
+        nearby_phrases=[],
+        control_type_token="data_item",
+        landmark_geometry=geom_far,
+        recorded_efp_name="N15",
+        recorded_efp_value="",
+        point_probe_fn=probe,
+        data_item_lookup_fn=lookup,
+    )
+    assert reason == "uia_data_item_name_hit"
+    assert chosen is not None
+    assert (chosen.cx, chosen.cy) == (2936, 641)
+    assert chosen.uia_control_type == "data_item"
+    assert scan_calls["n"] == 0
+
+
+def test_uia_first_data_item_findfirst_miss_then_neighbor_hit() -> None:
+    """FindFirst miss still allows scan-EFP neighbor hit."""
+    landmark = _det(100, 100, text="LM", class_name="text")
+    synth_xy = (800, 800)
+    geom_far = _simple_landmark_geometry(
+        landmark_xy=(100.0, 100.0),
+        target_xy=(float(synth_xy[0]), float(synth_xy[1])),
+        scale=50.0,
+    )
+    k11_bbox = (780, 780, 40, 40)
+    k10_point = (800, 760)
+
+    def probe(x: int, y: int):
+        if (x, y) == synth_xy:
+            return ("K11", k11_bbox, "data_item", "K11", "")
+        if (x, y) == k10_point:
+            return ("K10", (780, 750, 40, 20), "data_item", "K10", "")
+        return ("LM", (x - 5, y - 5, 10, 10), "text", "LM", "")
+
+    chosen, reason = _try_uia_first_unique_select(
+        [landmark],
+        anchor="K10",
+        nearby_hints=[],
+        nearby_labels=[],
+        nearby_phrases=[],
+        control_type_token="data_item",
+        landmark_geometry=geom_far,
+        recorded_efp_name="K10",
+        recorded_efp_value="",
+        point_probe_fn=probe,
+        data_item_lookup_fn=lambda _name: None,
+    )
+    assert reason == "landmark_efp_neighbor_hit"
+    assert chosen is not None
+    assert (chosen.cx, chosen.cy) == k10_point
+
+
+def test_uia_first_data_item_findfirst_and_neighbor_miss() -> None:
+    """FindFirst miss + neighbor miss → landmark_efp_miss."""
+    landmark = _det(100, 100, text="LM", class_name="text")
+    synth_xy = (800, 800)
+    geom_far = _simple_landmark_geometry(
+        landmark_xy=(100.0, 100.0),
+        target_xy=(float(synth_xy[0]), float(synth_xy[1])),
+        scale=50.0,
+    )
+
+    def probe(x: int, y: int):
+        if (x, y) == synth_xy:
+            return ("K15", (780, 780, 40, 40), "data_item", "K15", "")
+        return ("OTHER", (x - 5, y - 5, 10, 10), "data_item", "OTHER", "")
+
+    chosen, reason = _try_uia_first_unique_select(
+        [landmark],
+        anchor="N15",
+        nearby_hints=[],
+        nearby_labels=[],
+        nearby_phrases=[],
+        control_type_token="data_item",
+        landmark_geometry=geom_far,
+        recorded_efp_name="N15",
+        recorded_efp_value="",
+        point_probe_fn=probe,
+        data_item_lookup_fn=lambda _name: None,
+    )
+    assert reason == "landmark_efp_miss"
+    assert chosen is None
+
+
+def test_uia_first_data_item_geom_unavailable_findfirst_hit() -> None:
+    """No synth geometry → FindFirst can still resolve the cell."""
+    # Landmark label missing from detections → geom unavailable.
+    orphan = _det(50, 50, text="OTHER", class_name="text")
+
+    def lookup(name: str):
+        assert name == "N15"
+        return ((1000, 600, 70, 20), "N15", "")
+
+    chosen, reason = _try_uia_first_unique_select(
+        [orphan],
+        anchor="N15",
+        nearby_hints=[],
+        nearby_labels=[],
+        nearby_phrases=[],
+        control_type_token="data_item",
+        landmark_geometry=_simple_landmark_geometry(
+            landmark_label="MISSING",
+            landmark_xy=(100.0, 100.0),
+            target_xy=(1000.0, 600.0),
+        ),
+        recorded_efp_name="N15",
+        recorded_efp_value="",
+        point_probe_fn=lambda *_a: ("x", (0, 0, 1, 1), "text", "x", ""),
+        data_item_lookup_fn=lookup,
+    )
+    assert reason == "uia_data_item_name_hit"
+    assert chosen is not None
+    assert (chosen.cx, chosen.cy) == (1035, 610)
 
 
 def test_recorded_efp_agrees_with_hub_rejects_overlay_poison() -> None:

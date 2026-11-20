@@ -5234,15 +5234,77 @@ def _try_uia_first_unique_select(
     recorded_efp_name: str | None = None,
     recorded_efp_value: str | None = None,
     point_probe_fn: Any | None = None,
+    data_item_lookup_fn: Any | None = None,
 ) -> tuple[UiDetection | None, str]:
     """Soft UIA-first commit: unique after filter + nearby prefilter, else miss reason.
 
     When ``landmark_geometry`` and recorded EFP Name/Value are present, synthesize
     the constellation point and EFP-probe FindAll UIA items nearer-first (not only
     Name-matched anchors). Hit commits; miss soft-falls through without unique
-    Name commit.
+    Name commit. For ``data_item``, Name FindFirst runs after pool/synth EFP miss
+    and before scan-EFP (cells are omitted from FindAll).
     """
+    from src.recorder.uia_input_boxes import split_uia_name_value_label
+
+    token = (control_type_token or "").strip().lower()
+
+    def _data_item_target_name() -> str:
+        name = str(recorded_efp_name or "").strip()
+        if name:
+            return name
+        return str(split_uia_name_value_label(anchor)[0] or "").strip()
+
+    def _try_data_item_name_lookup() -> tuple[UiDetection | None, str | None]:
+        if token != "data_item" or data_item_lookup_fn is None:
+            return None, None
+        target_name = _data_item_target_name()
+        if not target_name:
+            return None, None
+        try:
+            hit = data_item_lookup_fn(target_name)
+        except Exception as exc:
+            _log_info(
+                "move_mouse uia_first data_item_name_lookup error "
+                f"name={target_name!r} err={exc!r}"
+            )
+            return None, None
+        if hit is None:
+            _log_info(
+                "move_mouse uia_first data_item_name_miss "
+                f"name={target_name!r}"
+            )
+            return None, None
+        bbox, live_name, _live_value = hit
+        if not (
+            isinstance(bbox, (list, tuple))
+            and len(bbox) == 4
+        ):
+            return None, None
+        try:
+            sx, sy, sw, sh = (int(v) for v in bbox[:4])
+        except (TypeError, ValueError):
+            return None, None
+        if sw <= 0 or sh <= 0:
+            return None, None
+        label = str(live_name or "").strip() or target_name
+        det = _detection_from_bbox(
+            (sx, sy, sw, sh),
+            YOLO_CLASS_TEXT,
+            text=label,
+            source="uia",
+            uia_control_type="data_item",
+        )
+        _log_info(
+            "move_mouse uia_first uia_data_item_name_hit "
+            f"center=[{det.cx},{det.cy}] name={label!r}"
+        )
+        return det, "uia_data_item_name_hit"
+
     if not detections:
+        # DataItem cells are omitted from FindAll; still allow Name FindFirst.
+        name_det, name_reason = _try_data_item_name_lookup()
+        if name_det is not None and name_reason is not None:
+            return name_det, name_reason
         return None, "no_detections"
 
     # Inputs/scrollbars only — full UIA text dumps are too large for every step.
@@ -5256,6 +5318,7 @@ def _try_uia_first_unique_select(
         ],
     )
 
+    constellation_ran = False
     # Constellation-first: FindAll near synth + live EFP (skip Name shortlist).
     # Skip when press-time EFP disagrees with the FindAll hub (overlay poison).
     if (
@@ -5273,6 +5336,7 @@ def _try_uia_first_unique_select(
     elif landmark_geometry is not None and _recorded_efp_present(
         recorded_efp_name, recorded_efp_value
     ):
+        constellation_ran = True
         geom_hit = _resolve_with_landmark_geometry(
             detections,
             landmark_geometry,
@@ -5281,6 +5345,9 @@ def _try_uia_first_unique_select(
             synth_only=True,
         )
         if geom_hit is None:
+            name_det, name_reason = _try_data_item_name_lookup()
+            if name_det is not None and name_reason is not None:
+                return name_det, name_reason
             _log_info(
                 "move_mouse uia_first landmark_geom_unavailable; "
                 "soft-miss (no Name unique)"
@@ -5334,10 +5401,12 @@ def _try_uia_first_unique_select(
                 f"point=[{efp_point[0]},{efp_point[1]}]"
             )
             return synth_det, "landmark_efp_synth_hit"
-        # Excel DataItem: FindAll omits cells — walk fixed-step EFP neighbors
-        # around the constellation synth before soft-missing.
-        token = (control_type_token or "").strip().lower()
+        # Excel DataItem: FindAll omits cells — Name FindFirst first, then
+        # fixed-step EFP neighbors around the constellation synth.
         if token == "data_item":
+            name_det, name_reason = _try_data_item_name_lookup()
+            if name_det is not None and name_reason is not None:
+                return name_det, name_reason
             neighbor = _scan_efp_neighbors_for_name(
                 geom_point,
                 str(recorded_efp_name or ""),
@@ -5369,6 +5438,11 @@ def _try_uia_first_unique_select(
             "move_mouse uia_first landmark_efp_miss soft_input_hub "
             f"pool={len(pool)}; continue Name shortlist"
         )
+
+    if not constellation_ran and token == "data_item":
+        name_det, name_reason = _try_data_item_name_lookup()
+        if name_det is not None and name_reason is not None:
+            return name_det, name_reason
 
     if filter_by_control_type:
         # Anchor: Name-then-Value inside the control-type pool. Nearby: full
@@ -6741,6 +6815,17 @@ async def _find_mouse_point_attempt(
         _note_capture(captured)
         grabbed_frames = True
 
+        def _data_item_lookup_by_name(
+            name: str,
+        ) -> tuple[tuple[int, int, int, int], str, str] | None:
+            from src.recorder.uia_input_boxes import find_uia_data_item_by_name
+            from src.recorder.window_snapshot import find_matching_click_window
+
+            live = find_matching_click_window(click_window)
+            if live is None or not int(live.hwnd or 0):
+                return None
+            return find_uia_data_item_by_name(int(live.hwnd), str(name))
+
         def _select_uia_snapshot(
             dets: list[UiDetection],
         ) -> tuple[UiDetection | None, str]:
@@ -6756,6 +6841,7 @@ async def _find_mouse_point_attempt(
                 landmark_geometry=landmark_geometry,
                 recorded_efp_name=recorded_efp_name,
                 recorded_efp_value=recorded_efp_value,
+                data_item_lookup_fn=_data_item_lookup_by_name,
             )
 
         constellation_joint = (
@@ -6961,6 +7047,7 @@ async def _find_mouse_point_attempt(
         commit_efp_synth = uia_first_reason in (
             "landmark_efp_synth_hit",
             "landmark_efp_neighbor_hit",
+            "uia_data_item_name_hit",
         )
         if uia_first_chosen is not None and (
             ocr_fallback is None
@@ -7587,6 +7674,7 @@ async def _find_mouse_point_attempt(
                 "landmark_efp_hit",
                 "landmark_efp_synth_hit",
                 "landmark_efp_neighbor_hit",
+                "uia_data_item_name_hit",
             ):
                 selection_method = uia_first_reason
                 select_phase = uia_first_reason

@@ -69,9 +69,11 @@ _UIA_ELEMENT_FROM_POINT = 7
 _UIA_GET_CONTROL_VIEW_WALKER = 14
 _UIA_CREATE_CACHE_REQUEST = 20
 _UIA_CREATE_PROPERTY_CONDITION = 23
+_UIA_CREATE_AND_CONDITION = 25
 _UIA_CREATE_OR_CONDITION = 28
 
 # IUIAutomationElement
+_UIA_FIND_FIRST = 5
 _UIA_FIND_ALL = 6
 _UIA_FIND_ALL_BUILD_CACHE = 8
 _UIA_GET_CURRENT_PATTERN = 16
@@ -137,6 +139,7 @@ _UIA_VALUE_GET_CURRENT = 4
 _TREE_SCOPE_ELEMENT = 0x1
 _TREE_SCOPE_DESCENDANTS = 0x4
 _VT_I4 = 3
+_VT_BSTR = 8
 # Idle hover FindAll: climb to a container covering at least this fraction of
 # the top-level window area (or Window/Document / hwnd root).
 _HOVER_SUBTREE_AREA_FRAC = 0.15
@@ -306,6 +309,27 @@ def _variant_i4(value: int) -> VARIANT:
     var.vt = _VT_I4
     var._.lVal = int(value)
     return var
+
+
+def _variant_bstr(value: str) -> tuple[VARIANT, ctypes.c_void_p | None]:
+    """Build a VT_BSTR VARIANT; caller must ``SysFreeString`` the returned ptr."""
+    oleaut32 = ctypes.windll.oleaut32
+    oleaut32.SysAllocString.argtypes = [wintypes.LPCWSTR]
+    oleaut32.SysAllocString.restype = ctypes.c_void_p
+    bstr = oleaut32.SysAllocString(wintypes.LPCWSTR(str(value)))
+    var = VARIANT()
+    var.vt = _VT_BSTR
+    var._.pv = bstr
+    return var, bstr
+
+
+def _sys_free_string(bstr: ctypes.c_void_p | None) -> None:
+    if not bstr:
+        return
+    try:
+        ctypes.windll.oleaut32.SysFreeString(ctypes.c_void_p(int(bstr)))
+    except Exception:
+        pass
 
 
 def is_oversized_uia_rect(
@@ -1353,6 +1377,60 @@ def _create_control_type_condition(
     if hr != _S_OK or not cond_ptr:
         return None
     return cond_ptr
+
+
+def _create_name_condition(
+    automation: ctypes.c_void_p, name: str
+) -> ctypes.c_void_p | None:
+    """PropertyCondition on ``Name``; frees the temporary BSTR after create."""
+    create_prop = ctypes.WINFUNCTYPE(
+        ctypes.HRESULT,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        VARIANT,
+        ctypes.POINTER(ctypes.c_void_p),
+    )(
+        _com_vtable(automation, _UIA_CREATE_PROPERTY_CONDITION + 1)[
+            _UIA_CREATE_PROPERTY_CONDITION
+        ]
+    )
+    var, bstr = _variant_bstr(str(name))
+    cond_ptr = ctypes.c_void_p()
+    try:
+        hr = create_prop(
+            automation,
+            _UIA_NAME_PROPERTY_ID,
+            var,
+            ctypes.byref(cond_ptr),
+        )
+    finally:
+        _sys_free_string(bstr)
+    if hr != _S_OK or not cond_ptr:
+        return None
+    return cond_ptr
+
+
+def _create_and_condition(
+    automation: ctypes.c_void_p,
+    left: ctypes.c_void_p,
+    right: ctypes.c_void_p,
+) -> ctypes.c_void_p | None:
+    create_and = ctypes.WINFUNCTYPE(
+        ctypes.HRESULT,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    )(
+        _com_vtable(automation, _UIA_CREATE_AND_CONDITION + 1)[
+            _UIA_CREATE_AND_CONDITION
+        ]
+    )
+    and_ptr = ctypes.c_void_p()
+    hr = create_and(automation, left, right, ctypes.byref(and_ptr))
+    if hr != _S_OK or not and_ptr:
+        return None
+    return and_ptr
 
 
 def _create_or_condition(
@@ -2946,6 +3024,126 @@ def _snapshot_uia_screen_impl(
                 ole32.CoUninitialize()
             except Exception:
                 pass
+
+
+def _find_uia_data_item_by_name_impl(
+    hwnd: int, name: str
+) -> tuple[RectXywh, str, str] | None:
+    """Worker-thread FindFirst: DataItem AND Name under ``hwnd``."""
+    target = str(name or "").strip()
+    if not int(hwnd or 0) or not target:
+        return None
+
+    ole32, initialized_here = _coinitialize_uia()
+    if ole32 is None:
+        return None
+
+    automation: ctypes.c_void_p | None = None
+    root: ctypes.c_void_p | None = None
+    type_cond: ctypes.c_void_p | None = None
+    name_cond: ctypes.c_void_p | None = None
+    and_cond: ctypes.c_void_p | None = None
+    found: ctypes.c_void_p | None = None
+    try:
+        automation = _create_uia_automation()
+        if automation is None:
+            return None
+        root = _element_from_handle(automation, int(hwnd))
+        if root is None:
+            return None
+        type_cond = _create_control_type_condition(
+            automation, _UIA_DATAITEM_CONTROL_TYPE_ID
+        )
+        if type_cond is None:
+            return None
+        name_cond = _create_name_condition(automation, target)
+        if name_cond is None:
+            return None
+        and_cond = _create_and_condition(automation, type_cond, name_cond)
+        if and_cond is None:
+            return None
+
+        find_first = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        )(_com_vtable(root, _UIA_FIND_FIRST + 1)[_UIA_FIND_FIRST])
+        found_ptr = ctypes.c_void_p()
+        hr = find_first(
+            root,
+            _TREE_SCOPE_DESCENDANTS,
+            and_cond,
+            ctypes.byref(found_ptr),
+        )
+        # S_FALSE / null element = no match.
+        if hr not in (_S_OK, _S_FALSE) or not found_ptr:
+            return None
+        found = found_ptr
+        bounds = _element_bounding_xyxy(found)
+        if bounds is None:
+            return None
+        x1, y1, x2, y2 = (int(v) for v in bounds)
+        w = x2 - x1
+        h = y2 - y1
+        if w <= 0 or h <= 0:
+            return None
+        _label, live_name, live_value = _element_label_parts(found)
+        return (
+            (x1, y1, w, h),
+            str(live_name or ""),
+            str(live_value or ""),
+        )
+    except Exception:
+        return None
+    finally:
+        _com_release(found)
+        _com_release(and_cond)
+        _com_release(name_cond)
+        _com_release(type_cond)
+        _com_release(root)
+        _com_release(automation)
+        if initialized_here:
+            try:
+                ole32.CoUninitialize()
+            except Exception:
+                pass
+
+
+def find_uia_data_item_by_name(
+    hwnd: int,
+    name: str,
+    *,
+    timeout_s: float = 2.5,
+) -> tuple[RectXywh, str, str] | None:
+    """FindFirst under ``hwnd``: ControlType=DataItem AND Name=``name``.
+
+    Returns ``(screen_xywh, live_name, live_value)`` or ``None``. Does not add
+    DataItems to the default budgeted FindAll walk — targeted lookup only.
+    Marshals onto the UIA worker thread when not already running there.
+    """
+    if os.name != "nt" or not int(hwnd or 0) or not str(name or "").strip():
+        return None
+    from src.recorder.uia_thread import uia_call
+
+    try:
+        result = uia_call(
+            _find_uia_data_item_by_name_impl,
+            int(hwnd),
+            str(name),
+            timeout_s=float(timeout_s),
+        )
+    except Exception:
+        return None
+    if (
+        isinstance(result, tuple)
+        and len(result) == 3
+        and isinstance(result[0], tuple)
+        and len(result[0]) == 4
+    ):
+        return result  # type: ignore[return-value]
+    return None
 
 
 def snapshot_uia_screen(

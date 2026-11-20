@@ -8,10 +8,12 @@ from src.recorder.uia_input_boxes import (
     _UIA_BUTTON_CONTROL_TYPE_ID,
     _UIA_CHECKBOX_CONTROL_TYPE_ID,
     _UIA_COMBOBOX_CONTROL_TYPE_ID,
+    _UIA_CREATE_AND_CONDITION,
     _UIA_CUSTOM_CONTROL_TYPE_ID,
     _UIA_DOCUMENT_CONTROL_TYPE_ID,
     _UIA_EDIT_CONTROL_TYPE_ID,
     _UIA_FIND_ALL_BUILD_CACHE,
+    _UIA_FIND_FIRST,
     _UIA_HEADER_CONTROL_TYPE_ID,
     _UIA_HEADERITEM_CONTROL_TYPE_ID,
     _UIA_INPUT_CONTROL_TYPE_IDS,
@@ -27,6 +29,7 @@ from src.recorder.uia_input_boxes import (
     element_from_point_name_value,
     filter_uia_input_rects,
     filter_uia_scrollbar_rects,
+    find_uia_data_item_by_name,
     is_oversized_uia_rect,
     is_uia_input_container_rect,
     is_usable_uia_landmark_label,
@@ -87,6 +90,9 @@ def test_control_type_token_from_id_maps_expanded_labeled_types() -> None:
 def test_findall_build_cache_slot_and_timing_helpers() -> None:
     # Full vtable index for IUIAutomationElement::FindAllBuildCache.
     assert _UIA_FIND_ALL_BUILD_CACHE == 8
+    # FindFirst / CreateAndCondition slots used by DataItem Name lookup.
+    assert _UIA_FIND_FIRST == 5
+    assert _UIA_CREATE_AND_CONDITION == 25
     with bind_findall_timing() as samples:
         from src.recorder.uia_input_boxes import _note_findall_timing
 
@@ -96,6 +102,12 @@ def test_findall_build_cache_slot_and_timing_helpers() -> None:
     assert calls == 2
     assert hits == 15
     assert abs(total_s - 0.175) < 1e-6
+
+
+def test_find_uia_data_item_by_name_rejects_empty_inputs() -> None:
+    assert find_uia_data_item_by_name(0, "N15") is None
+    assert find_uia_data_item_by_name(123, "") is None
+    assert find_uia_data_item_by_name(123, "   ") is None
 
 
 def test_snapshot_uia_screen_keeps_expanded_labeled_control_types(monkeypatch) -> None:

@@ -1207,6 +1207,67 @@ _NON_INPUT_UIA_LEAF_TYPES = frozenset(
 )
 
 
+def _candidate_usable_non_decorative_icon(candidate: dict[str, Any]) -> bool:
+    """True when ``candidate`` has a labeled icon that is not decorative-only."""
+    icons = candidate.get("icons")
+    if not isinstance(icons, list) or not icons:
+        return False
+    has_label = False
+    for icon in icons:
+        if not isinstance(icon, dict):
+            continue
+        label = str(icon.get("chinese_id") or icon.get("id") or "").strip()
+        if label:
+            has_label = True
+            break
+    if not has_label:
+        return False
+    return not _icons_are_decorative_only(icons)
+
+
+def _prefer_nested_icon_over_containing_input(
+    hits: list[dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Prefer a smaller nested non-decorative icon over a containing Input.
+
+    Runs before named-input promotion so chevron / show-password / taskbar glyph
+    clicks are not absorbed into ``「…」文字所在的輸入欄``. Input may carry
+    Name/Value text; the cursor must still be on the icon (both are in ``hits``).
+
+    Returns ``(icon, input)`` when a pair qualifies.
+    """
+    inputs = [
+        c for c in hits if str(c.get("class_name") or "").strip() == "input"
+    ]
+    icons = [c for c in hits if _candidate_usable_non_decorative_icon(c)]
+    if not inputs or not icons:
+        return None
+
+    best: tuple[dict[str, Any], dict[str, Any]] | None = None
+    best_key: tuple[int, int] | None = None
+    for inp in inputs:
+        ib = _as_bbox_xywh(inp.get("bbox"))
+        if ib is None:
+            continue
+        input_area = _bbox_area(ib)
+        if input_area <= 0:
+            continue
+        for icon in icons:
+            ob = _as_bbox_xywh(icon.get("bbox"))
+            if ob is None:
+                continue
+            icon_area = _bbox_area(ob)
+            if icon_area <= 0 or icon_area >= input_area:
+                continue
+            if not _bbox_center_inside(ib, ob):
+                continue
+            key = (_candidate_hit_content_priority(icon), icon_area)
+            if best_key is None or key < best_key:
+                best = (icon, inp)
+                best_key = key
+    return best
+
+
 def _prefer_coextensive_named_input(
     hits: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
@@ -1335,9 +1396,12 @@ def _candidate_containing_click(
     smallest area breaks ties. Includes inputs/scrollbars so an on-field click
     keeps that container as the primary anchor.
 
-    Exception: a multi-char Text nearly coextensive with a containing Input
-    (document-surface Name), or a UIA Name leaf mostly inside a field-sized
-    Edit, yields the Input with that Name copied on.
+    Exceptions (in order):
+    1. A smaller nested non-decorative icon inside a containing Input (Name/Value
+       text allowed) → that icon. Promote keeps the Input as secondary.
+    2. A multi-char Text nearly coextensive with a containing Input
+       (document-surface Name), or a UIA Name leaf mostly inside a field-sized
+       Edit → the Input with that Name copied on.
     """
     hits = [
         candidate
@@ -1347,6 +1411,10 @@ def _candidate_containing_click(
     ]
     if not hits:
         return None
+
+    nested_icon = _prefer_nested_icon_over_containing_input(hits)
+    if nested_icon is not None:
+        return nested_icon[0]
 
     named_input = _prefer_coextensive_named_input(hits)
     if named_input is not None:
@@ -1436,6 +1504,40 @@ def select_click_primary_candidate(
     return best
 
 
+def _containing_input_secondary_for_icon(
+    candidates: list[dict[str, Any]],
+    icon: dict[str, Any],
+    local_x: int,
+    local_y: int,
+) -> dict[str, Any] | None:
+    """Return the containing Input to keep as secondary after an icon primary."""
+    ib = _as_bbox_xywh(icon.get("bbox"))
+    if ib is None:
+        return None
+    icon_area = _bbox_area(ib)
+    best: dict[str, Any] | None = None
+    best_area: int | None = None
+    for candidate in candidates:
+        if not isinstance(candidate, dict) or candidate is icon:
+            continue
+        if str(candidate.get("class_name") or "").strip() != "input":
+            continue
+        if not _drop_point_inside_candidate(local_x, local_y, candidate):
+            continue
+        ob = _as_bbox_xywh(candidate.get("bbox"))
+        if ob is None:
+            continue
+        input_area = _bbox_area(ob)
+        if input_area <= icon_area:
+            continue
+        if not _bbox_center_inside(ob, ib):
+            continue
+        if best_area is None or input_area < best_area:
+            best = candidate
+            best_area = input_area
+    return best
+
+
 def promote_click_primary_candidates(
     candidates: list[dict[str, Any]],
     local_x: int,
@@ -1445,6 +1547,9 @@ def promote_click_primary_candidates(
 
     Preserves relative order of the remaining entries. When no better primary
     is found, returns ``candidates`` unchanged (same object if already correct).
+
+    When the primary is a nested non-decorative icon inside a containing Input,
+    order becomes ``[icon, input, …rest]`` so repair can fall back to Input.
     """
     if not candidates:
         return candidates
@@ -1464,6 +1569,31 @@ def promote_click_primary_candidates(
             ),
             0,
         )
+
+    secondary: dict[str, Any] | None = None
+    if _candidate_usable_non_decorative_icon(primary):
+        secondary = _containing_input_secondary_for_icon(
+            candidates, primary, local_x, local_y
+        )
+
+    if secondary is not None:
+        secondary_bbox = secondary.get("bbox")
+
+        def _is_secondary(c: dict[str, Any]) -> bool:
+            return c is secondary or (
+                isinstance(c, dict) and c.get("bbox") == secondary_bbox
+            )
+
+        rest = [
+            c
+            for i, c in enumerate(candidates)
+            if i != index and not (isinstance(c, dict) and _is_secondary(c))
+        ]
+        ordered = [candidates[index], secondary, *rest]
+        if ordered == candidates:
+            return candidates
+        return ordered
+
     if index == 0:
         return candidates
     return [candidates[index], *candidates[:index], *candidates[index + 1 :]]

@@ -497,6 +497,119 @@ def test_select_click_primary_prefers_containing_input_over_nearby_text() -> Non
     assert primary["class_name"] == "input"
 
 
+def test_select_click_primary_prefers_nested_icon_over_textless_input() -> None:
+    """Cursor on nested non-decorative icon → icon primary, Input secondary."""
+    inp = {
+        "bbox": [83, 1528, 924, 72],
+        "center": [545, 1564],
+        "class_name": "input",
+        "text": None,
+        "source": "uia",
+    }
+    icon = {
+        "bbox": [892, 1544, 32, 35],
+        "center": [908, 1561],
+        "class_name": "element",
+        "text": "\ue065",
+        "icons": [{"chinese_id": "SMR WM7、神網7"}],
+        "source": "ocr",
+    }
+    candidates = [inp, icon]
+    primary = select_click_primary_candidate(candidates, 908, 1561)
+    assert primary is icon
+    promoted = promote_click_primary_candidates(candidates, 908, 1561)
+    assert promoted[0] is icon
+    assert promoted[1] is inp
+
+
+def test_select_click_primary_prefers_nested_icon_over_named_input() -> None:
+    """Chevron / eye on a named Edit still wins over 「…」文字所在的輸入欄."""
+    inp = {
+        "bbox": [200, 240, 120, 40],
+        "center": [260, 260],
+        "class_name": "input",
+        "text": "密碼|Textbox|txt_Password",
+        "source": "uia",
+    }
+    icon = {
+        "bbox": [300, 248, 12, 10],
+        "center": [306, 253],
+        "class_name": "element",
+        "text": "\ue084",
+        "icons": [{"chinese_id": "向下V箭頭"}],
+        "source": "ocr",
+    }
+    name_text = {
+        "bbox": [210, 250, 60, 16],
+        "center": [240, 258],
+        "class_name": "text",
+        "text": "密碼|Textbox|txt_Password",
+        "source": "uia",
+        "uia_control_type": "input",
+    }
+    candidates = [inp, icon, name_text]
+    primary = select_click_primary_candidate(candidates, 306, 253)
+    assert primary is icon
+    promoted = promote_click_primary_candidates(candidates, 306, 253)
+    assert promoted[0] is icon
+    assert promoted[1] is inp
+
+
+def test_select_click_primary_named_input_body_keeps_input_not_side_icon() -> None:
+    """Click on named field body (not on icon) keeps Input as primary."""
+    inp = {
+        "bbox": [200, 240, 120, 40],
+        "center": [260, 260],
+        "class_name": "input",
+        "text": "密碼|Textbox|txt_Password",
+        "source": "uia",
+    }
+    icon = {
+        "bbox": [300, 248, 12, 10],
+        "center": [306, 253],
+        "class_name": "element",
+        "text": "\ue084",
+        "icons": [{"chinese_id": "向下V箭頭"}],
+        "source": "ocr",
+    }
+    name_text = {
+        "bbox": [210, 250, 60, 16],
+        "center": [240, 258],
+        "class_name": "text",
+        "text": "密碼|Textbox|txt_Password",
+        "source": "uia",
+        "uia_control_type": "input",
+    }
+    candidates = [inp, icon, name_text]
+    # Body click inside Name text / Input, outside icon.
+    primary = select_click_primary_candidate(candidates, 240, 258)
+    assert primary is not None
+    assert primary["class_name"] == "input"
+    assert primary.get("text") == "密碼|Textbox|txt_Password"
+
+
+def test_select_click_primary_decorative_icon_inside_input_keeps_input() -> None:
+    """Decorative-only nested icon must not steal the Input hub."""
+    inp = {
+        "bbox": [200, 240, 120, 40],
+        "center": [260, 260],
+        "class_name": "input",
+        "text": None,
+        "source": "uia",
+    }
+    icon = {
+        "bbox": [220, 250, 16, 16],
+        "center": [228, 258],
+        "class_name": "element",
+        "text": "\ue02d",
+        "icons": [{"chinese_id": "頭像、使用者頭像"}],
+        "source": "ocr",
+    }
+    candidates = [inp, icon]
+    primary = select_click_primary_candidate(candidates, 228, 258)
+    assert primary is inp
+
+
 def test_select_click_primary_gap_click_prefers_side_text_landmark() -> None:
     """Gap between wide input rows: pick landmark text, not the nearer wide input."""
     candidates = [

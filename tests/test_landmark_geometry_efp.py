@@ -957,7 +957,8 @@ def test_uia_first_input_hub_soft_miss_does_not_unique_hit_sibling_text() -> Non
     assert chosen is None
 
 
-def test_uia_first_geom_unavailable_soft_miss() -> None:
+def test_uia_first_geom_unavailable_continues_name_unique() -> None:
+    """Missing landmarks → no synth; unique Name still commits."""
     geom = _simple_landmark_geometry(landmark_label="MISSING")
     only = _det(148, 100, text="下載", class_name="text")
 
@@ -972,8 +973,8 @@ def test_uia_first_geom_unavailable_soft_miss() -> None:
         recorded_efp_value="",
         point_probe_fn=lambda x, y: ("", (0, 0, 1, 1), "", "X", "Y"),
     )
-    assert reason == "landmark_geom_unavailable"
-    assert chosen is None
+    assert reason == "hit"
+    assert chosen is only
 
 
 def test_uia_first_blank_efp_keeps_name_unique() -> None:

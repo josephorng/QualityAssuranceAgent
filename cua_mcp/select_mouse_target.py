@@ -5240,9 +5240,10 @@ def _try_uia_first_unique_select(
 
     When ``landmark_geometry`` and recorded EFP Name/Value are present, synthesize
     the constellation point and EFP-probe FindAll UIA items nearer-first (not only
-    Name-matched anchors). Hit commits; miss soft-falls through without unique
-    Name commit. For ``data_item``, Name FindFirst runs after pool/synth EFP miss
-    and before scan-EFP (cells are omitted from FindAll).
+    Name-matched anchors). Hit commits. Labeled-hub EFP miss soft-falls without
+    unique Name commit so YOLO/OCR can take over; geometry unavailable continues
+    into the Name shortlist. For ``data_item``, Name FindFirst runs after
+    pool/synth EFP miss and before scan-EFP (cells are omitted from FindAll).
     """
     from src.recorder.uia_input_boxes import split_uia_name_value_label
 
@@ -5345,99 +5346,102 @@ def _try_uia_first_unique_select(
             synth_only=True,
         )
         if geom_hit is None:
+            # Cannot build synth (e.g. full-row ComboLBox landmarks collapse).
+            # Fall through to Name unique rather than hard soft-miss.
             name_det, name_reason = _try_data_item_name_lookup()
             if name_det is not None and name_reason is not None:
                 return name_det, name_reason
             _log_info(
                 "move_mouse uia_first landmark_geom_unavailable; "
-                "soft-miss (no Name unique)"
+                "continue Name shortlist"
             )
-            return None, "landmark_geom_unavailable"
-        _geom_det, geom_point, _geom_method = geom_hit
-        scale = _recorded_geometry_scale(landmark_geometry)
-        preferred_yolo = _preferred_yolo_class_for_near_synth(
-            anchor, control_type_token
-        )
-        pool_detections = _filter_yolo_for_near_synth_pool(
-            detections, preferred_yolo_class=preferred_yolo
-        )
-        pool = _findall_pool_near_synth(
-            pool_detections, geom_point, scale=scale, k=_FINDALL_EFP_POOL_K
-        )
-        yolo_class_note = ""
-        if preferred_yolo is not None:
-            yolo_class_note = (
-                f" yolo_class={YOLO_CLASS_NAMES.get(preferred_yolo, preferred_yolo)!r}"
+            constellation_ran = False
+        else:
+            _geom_det, geom_point, _geom_method = geom_hit
+            scale = _recorded_geometry_scale(landmark_geometry)
+            preferred_yolo = _preferred_yolo_class_for_near_synth(
+                anchor, control_type_token
             )
-        _log_info(
-            "move_mouse uia_first findall_near_synth "
-            f"pool={len(pool)} k={_FINDALL_EFP_POOL_K} "
-            f"synth=[{int(geom_point[0])},{int(geom_point[1])}] "
-            f"scale={scale!r}{yolo_class_note}"
-        )
-        _log_move_mouse_detections("uia_first findall_near_synth", pool)
-        # Pool-first (FindAll/YOLO boxes), synth last — keep FindAll hub boxes.
-        efp_det, efp_point, efp_reason = _verify_geometry_candidates_with_efp(
-            pool,
-            synth=geom_point,
-            geom_det=None,
-            recorded_name=str(recorded_efp_name or ""),
-            recorded_value=str(recorded_efp_value or ""),
-            point_probe_fn=point_probe_fn,
-            prefer_synth_first=False,
-        )
-        if efp_reason == "hit" and efp_det is not None:
+            pool_detections = _filter_yolo_for_near_synth_pool(
+                detections, preferred_yolo_class=preferred_yolo
+            )
+            pool = _findall_pool_near_synth(
+                pool_detections, geom_point, scale=scale, k=_FINDALL_EFP_POOL_K
+            )
+            yolo_class_note = ""
+            if preferred_yolo is not None:
+                yolo_class_note = (
+                    f" yolo_class={YOLO_CLASS_NAMES.get(preferred_yolo, preferred_yolo)!r}"
+                )
             _log_info(
-                "move_mouse uia_first landmark_efp_hit "
-                f"center=[{efp_det.cx},{efp_det.cy}] text={efp_det.text!r}"
+                "move_mouse uia_first findall_near_synth "
+                f"pool={len(pool)} k={_FINDALL_EFP_POOL_K} "
+                f"synth=[{int(geom_point[0])},{int(geom_point[1])}] "
+                f"scale={scale!r}{yolo_class_note}"
             )
-            return efp_det, "landmark_efp_hit"
-        if efp_reason == "synth_hit" and efp_point is not None:
-            synth_det = _synth_detection_at_point(
-                efp_point, text=str(recorded_efp_name or "").strip() or None
-            )
-            _log_info(
-                "move_mouse uia_first landmark_efp_synth_hit "
-                f"point=[{efp_point[0]},{efp_point[1]}]"
-            )
-            return synth_det, "landmark_efp_synth_hit"
-        # Excel DataItem: FindAll omits cells — Name FindFirst first, then
-        # fixed-step EFP neighbors around the constellation synth.
-        if token == "data_item":
-            name_det, name_reason = _try_data_item_name_lookup()
-            if name_det is not None and name_reason is not None:
-                return name_det, name_reason
-            neighbor = _scan_efp_neighbors_for_name(
-                geom_point,
-                str(recorded_efp_name or ""),
-                str(recorded_efp_value or ""),
+            _log_move_mouse_detections("uia_first findall_near_synth", pool)
+            # Pool-first (FindAll/YOLO boxes), synth last — keep FindAll hub boxes.
+            efp_det, efp_point, efp_reason = _verify_geometry_candidates_with_efp(
+                pool,
+                synth=geom_point,
+                geom_det=None,
+                recorded_name=str(recorded_efp_name or ""),
+                recorded_value=str(recorded_efp_value or ""),
                 point_probe_fn=point_probe_fn,
+                prefer_synth_first=False,
             )
-            if neighbor is not None:
-                neighbor_det = _synth_detection_at_point(
-                    neighbor,
-                    text=str(recorded_efp_name or "").strip() or None,
+            if efp_reason == "hit" and efp_det is not None:
+                _log_info(
+                    "move_mouse uia_first landmark_efp_hit "
+                    f"center=[{efp_det.cx},{efp_det.cy}] text={efp_det.text!r}"
+                )
+                return efp_det, "landmark_efp_hit"
+            if efp_reason == "synth_hit" and efp_point is not None:
+                synth_det = _synth_detection_at_point(
+                    efp_point, text=str(recorded_efp_name or "").strip() or None
                 )
                 _log_info(
-                    "move_mouse uia_first landmark_efp_neighbor_hit "
-                    f"point=[{neighbor[0]},{neighbor[1]}]"
+                    "move_mouse uia_first landmark_efp_synth_hit "
+                    f"point=[{efp_point[0]},{efp_point[1]}]"
                 )
-                return neighbor_det, "landmark_efp_neighbor_hit"
-        # Input/scrollbar: EFP is soft — continue Name shortlist / unique path.
-        # Labeled hubs: hard miss so YOLO/OCR can take over.
-        if not _hub_is_input_or_scrollbar(
-            anchor=anchor,
-            control_type_token=control_type_token,
-        ):
+                return synth_det, "landmark_efp_synth_hit"
+            # Excel DataItem: FindAll omits cells — Name FindFirst first, then
+            # fixed-step EFP neighbors around the constellation synth.
+            if token == "data_item":
+                name_det, name_reason = _try_data_item_name_lookup()
+                if name_det is not None and name_reason is not None:
+                    return name_det, name_reason
+                neighbor = _scan_efp_neighbors_for_name(
+                    geom_point,
+                    str(recorded_efp_name or ""),
+                    str(recorded_efp_value or ""),
+                    point_probe_fn=point_probe_fn,
+                )
+                if neighbor is not None:
+                    neighbor_det = _synth_detection_at_point(
+                        neighbor,
+                        text=str(recorded_efp_name or "").strip() or None,
+                    )
+                    _log_info(
+                        "move_mouse uia_first landmark_efp_neighbor_hit "
+                        f"point=[{neighbor[0]},{neighbor[1]}]"
+                    )
+                    return neighbor_det, "landmark_efp_neighbor_hit"
+            # Input/scrollbar: EFP is soft — continue Name shortlist / unique path.
+            # Labeled hubs: hard miss so YOLO/OCR can take over.
+            if not _hub_is_input_or_scrollbar(
+                anchor=anchor,
+                control_type_token=control_type_token,
+            ):
+                _log_info(
+                    "move_mouse uia_first landmark_efp_miss "
+                    f"pool={len(pool)}; soft-miss (no Name unique)"
+                )
+                return None, "landmark_efp_miss"
             _log_info(
-                "move_mouse uia_first landmark_efp_miss "
-                f"pool={len(pool)}; soft-miss (no Name unique)"
+                "move_mouse uia_first landmark_efp_miss soft_input_hub "
+                f"pool={len(pool)}; continue Name shortlist"
             )
-            return None, "landmark_efp_miss"
-        _log_info(
-            "move_mouse uia_first landmark_efp_miss soft_input_hub "
-            f"pool={len(pool)}; continue Name shortlist"
-        )
 
     if not constellation_ran and token == "data_item":
         name_det, name_reason = _try_data_item_name_lookup()

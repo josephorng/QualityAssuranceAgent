@@ -3603,6 +3603,23 @@ def _anchor_type_suffix(anchor: str) -> str | None:
     return None
 
 
+# UIA-first reasons that already matched recorded EFP Name/Value (or data_item
+# Name FindFirst). Subtarget soft-miss must not clear these into OCR twin.
+_EFP_VERIFIED_UIA_FIRST_REASONS = frozenset(
+    {
+        "landmark_efp_hit",
+        "landmark_efp_synth_hit",
+        "landmark_efp_neighbor_hit",
+        "uia_data_item_name_hit",
+    }
+)
+
+
+def _keep_uia_first_on_subtarget_efp_soft_miss(uia_first_reason: str) -> bool:
+    """True when subtarget EFP soft-miss should keep the UIA-first hub."""
+    return str(uia_first_reason or "").strip() in _EFP_VERIFIED_UIA_FIRST_REASONS
+
+
 def _hub_is_input_or_scrollbar(
     *,
     instruction: str = "",
@@ -4817,6 +4834,83 @@ def _order_geometry_efp_candidates(
     return ordered
 
 
+def _detection_from_efp_leaf_bbox(
+    leaf_bbox: tuple[int, int, int, int],
+    *,
+    live_name: str,
+    live_value: str,
+    pool_det: UiDetection | None = None,
+) -> UiDetection:
+    """Build a click hub from live EFP leaf geometry (not the FindAll pool box)."""
+    from src.recorder.uia_input_boxes import uia_label_combine_name_value
+
+    text = uia_label_combine_name_value(
+        str(live_name or ""),
+        str(live_value or ""),
+    ).strip() or None
+    if pool_det is not None:
+        class_id = int(pool_det.class_id)
+        source = str(pool_det.source or "").strip() or "uia"
+        uia_ct = pool_det.uia_control_type
+    else:
+        class_id = YOLO_CLASS_TEXT
+        source = "uia"
+        uia_ct = None
+    return _detection_from_bbox(
+        leaf_bbox,
+        class_id,
+        text=text,
+        source=source,
+        uia_control_type=uia_ct,
+    )
+
+
+def _commit_geometry_efp_hit(
+    *,
+    pool_det: UiDetection | None,
+    leaf_bbox: tuple[int, int, int, int] | None,
+    live_name: str,
+    live_value: str,
+    probe_xy: tuple[int, int],
+    recorded_name: str,
+    recorded_value: str,
+    via: str,
+) -> tuple[UiDetection | None, tuple[int, int] | None, str]:
+    """Commit a Name/Value EFP match, preferring live leaf bbox over pool geometry."""
+    rn = str(recorded_name or "").strip()
+    rv = str(recorded_value or "").strip()
+    if leaf_bbox is not None:
+        snapped = _detection_from_efp_leaf_bbox(
+            leaf_bbox,
+            live_name=live_name,
+            live_value=live_value,
+            pool_det=pool_det,
+        )
+        _log_info(
+            "move_mouse landmark_geometry_efp hit "
+            f"center=[{snapped.cx},{snapped.cy}] "
+            f"name={live_name!r} value={live_value!r} "
+            f"recorded_name={rn!r} recorded_value={rv!r} "
+            f"leaf_bbox={list(leaf_bbox)!r} via={via}"
+        )
+        return snapped, (int(snapped.cx), int(snapped.cy)), "hit"
+    if pool_det is not None:
+        _log_info(
+            "move_mouse landmark_geometry_efp hit "
+            f"center=[{pool_det.cx},{pool_det.cy}] "
+            f"name={live_name!r} value={live_value!r} "
+            f"recorded_name={rn!r} recorded_value={rv!r} "
+            f"via={via}"
+        )
+        return pool_det, (int(pool_det.cx), int(pool_det.cy)), "hit"
+    _log_info(
+        "move_mouse landmark_geometry_efp synth_hit "
+        f"point=[{int(probe_xy[0])},{int(probe_xy[1])}] "
+        f"name={live_name!r} value={live_value!r}"
+    )
+    return None, (int(probe_xy[0]), int(probe_xy[1])), "synth_hit"
+
+
 def _verify_geometry_candidates_with_efp(
     pool: list[UiDetection],
     *,
@@ -4831,6 +4925,10 @@ def _verify_geometry_candidates_with_efp(
 
     Returns ``(detection_or_None, point_or_None, reason)`` where reason is
     ``hit``, ``synth_hit``, or ``miss``.
+
+    On a Name/Value match, prefer the live EFP **leaf bbox** (when the probe
+    returns one) over the FindAll/YOLO pool box whose center was probed — so a
+    tree-row hub snaps to the Value cell under that center.
 
     Default (and constellation UIA-first) is **pool-first**, then one synth
     probe last so a FindAll/YOLO box is preferred over a bare synth commit.
@@ -4853,62 +4951,76 @@ def _verify_geometry_candidates_with_efp(
         )
 
     if prefer_synth_first:
-        live_name, live_value = _probe_efp_name_value_at(
+        live_name, live_value, leaf_bbox = _probe_efp_leaf_at(
             int(synth[0]), int(synth[1]), point_probe_fn=point_probe_fn
         )
         _record_probe("synth", int(synth[0]), int(synth[1]), live_name, live_value)
         if _efp_name_value_matches(live_name, live_value, rn, rv):
             # Prefer snapping to a pool det that also matches (FindAll channel
-            # box) instead of returning a bare synth point.
+            # box) instead of returning a bare synth point — then snap that
+            # match to the live EFP leaf bbox when available.
             candidates = _order_geometry_efp_candidates(pool, synth, geom_det)
             for det in candidates:
-                det_name, det_value = _probe_efp_name_value_at(
+                det_name, det_value, det_bbox = _probe_efp_leaf_at(
                     int(det.cx), int(det.cy), point_probe_fn=point_probe_fn
                 )
                 if _efp_name_value_matches(det_name, det_value, rn, rv):
-                    _log_info(
-                        "move_mouse landmark_geometry_efp hit "
-                        f"center=[{det.cx},{det.cy}] "
-                        f"name={det_name!r} value={det_value!r} "
-                        f"recorded_name={rn!r} recorded_value={rv!r} "
-                        "(snapped after synth match)"
+                    return _commit_geometry_efp_hit(
+                        pool_det=det,
+                        leaf_bbox=det_bbox,
+                        live_name=det_name,
+                        live_value=det_value,
+                        probe_xy=(int(det.cx), int(det.cy)),
+                        recorded_name=rn,
+                        recorded_value=rv,
+                        via="pool_after_synth",
                     )
-                    return det, (int(det.cx), int(det.cy)), "hit"
-            _log_info(
-                "move_mouse landmark_geometry_efp synth_hit "
-                f"point=[{int(synth[0])},{int(synth[1])}] "
-                f"name={live_name!r} value={live_value!r}"
+            return _commit_geometry_efp_hit(
+                pool_det=None,
+                leaf_bbox=leaf_bbox,
+                live_name=live_name,
+                live_value=live_value,
+                probe_xy=(int(synth[0]), int(synth[1])),
+                recorded_name=rn,
+                recorded_value=rv,
+                via="synth",
             )
-            return None, (int(synth[0]), int(synth[1])), "synth_hit"
 
     candidates = _order_geometry_efp_candidates(pool, synth, geom_det)
     for det in candidates:
-        live_name, live_value = _probe_efp_name_value_at(
+        live_name, live_value, leaf_bbox = _probe_efp_leaf_at(
             int(det.cx), int(det.cy), point_probe_fn=point_probe_fn
         )
         _record_probe("pool", int(det.cx), int(det.cy), live_name, live_value)
         if _efp_name_value_matches(live_name, live_value, rn, rv):
-            _log_info(
-                "move_mouse landmark_geometry_efp hit "
-                f"center=[{det.cx},{det.cy}] "
-                f"name={live_name!r} value={live_value!r} "
-                f"recorded_name={rn!r} recorded_value={rv!r}"
+            return _commit_geometry_efp_hit(
+                pool_det=det,
+                leaf_bbox=leaf_bbox,
+                live_name=live_name,
+                live_value=live_value,
+                probe_xy=(int(det.cx), int(det.cy)),
+                recorded_name=rn,
+                recorded_value=rv,
+                via="pool",
             )
-            return det, (int(det.cx), int(det.cy)), "hit"
 
     # Synth last: pool-first constellation contract (also when pool was empty).
     if geom_det is None:
-        live_name, live_value = _probe_efp_name_value_at(
+        live_name, live_value, leaf_bbox = _probe_efp_leaf_at(
             int(synth[0]), int(synth[1]), point_probe_fn=point_probe_fn
         )
         _record_probe("synth", int(synth[0]), int(synth[1]), live_name, live_value)
         if _efp_name_value_matches(live_name, live_value, rn, rv):
-            _log_info(
-                "move_mouse landmark_geometry_efp synth_hit "
-                f"point=[{int(synth[0])},{int(synth[1])}] "
-                f"name={live_name!r} value={live_value!r}"
+            return _commit_geometry_efp_hit(
+                pool_det=None,
+                leaf_bbox=leaf_bbox,
+                live_name=live_name,
+                live_value=live_value,
+                probe_xy=(int(synth[0]), int(synth[1])),
+                recorded_name=rn,
+                recorded_value=rv,
+                via="synth",
             )
-            return None, (int(synth[0]), int(synth[1])), "synth_hit"
 
     probe_dump = "\n".join(probed) if probed else "(no probes)"
     _log_info(
@@ -7305,41 +7417,48 @@ async def _find_mouse_point_attempt(
             if efp_subtarget_hit:
                 pass
             elif efp_subtarget_required_miss:
-                # Recorded EFP was required and missed: do not undo with a
-                # unique in-pane YOLO box or OCR twin commit on the wrong pane.
-                # Adopt OCR-twin FindAll channel before YOLO fallthrough.
+                # Recorded EFP was required and missed. When UIA-first already
+                # EFP-verified the hub (constellation / data_item name), keep
+                # that hub — do not clear into OCR twin (flaky in-hub EFP).
+                # Unverified hubs still adopt OCR-twin FindAll fallthrough.
                 uia_yolo_subtarget_chosen = None
-                uia_first_chosen = None
-                _log_info(
-                    "move_mouse uia_yolo_subtarget_efp soft_miss; "
-                    "clearing uia_first for YOLO fallthrough; "
-                    "adopting ocr_fallback instruction"
-                )
-                fb_fields = _mouse_select_fields_from_ocr_fallback_instruction(
-                    ocr_fallback.instruction,
-                    list(ocr_fallback.nearby_objects) or None,
-                )
-                instruction_text = str(fb_fields["instruction_text"])
-                nearby_objects = fb_fields["nearby_objects"]
-                landmark_geometry = ocr_fallback.landmark_geometry
-                recorded_anchor_match = bool(fb_fields["recorded_anchor_match"])
-                control_type_token = fb_fields["control_type_token"]
-                vision_mode = str(fb_fields["vision_mode"] or "")
-                vision_plan = fb_fields["vision_plan"]
-                allow_uia_select = bool(fb_fields["allow_uia_select"])
-                filter_by_control_type = bool(
-                    fb_fields["filter_by_control_type"]
-                )
-                anchor = str(fb_fields["anchor"] or "")
-                offset_dx = int(fb_fields["offset_dx"])
-                offset_dy = int(fb_fields["offset_dy"])
-                char_target = fb_fields["char_target"]
-                char_occurrence = int(fb_fields["char_occurrence"] or 0)
-                track_percent = fb_fields["track_percent"]
-                match_anchor = str(fb_fields["match_anchor"] or "")
-                nearby_hints = list(fb_fields["nearby_hints"])
-                nearby_labels = list(fb_fields["nearby_labels"])
-                nearby_phrases = list(fb_fields["nearby_phrases"])
+                if _keep_uia_first_on_subtarget_efp_soft_miss(uia_first_reason):
+                    _log_info(
+                        "move_mouse uia_yolo_subtarget_efp soft_miss; "
+                        f"keeping UIA center reason={uia_first_reason!r}"
+                    )
+                else:
+                    uia_first_chosen = None
+                    _log_info(
+                        "move_mouse uia_yolo_subtarget_efp soft_miss; "
+                        "clearing uia_first for YOLO fallthrough; "
+                        "adopting ocr_fallback instruction"
+                    )
+                    fb_fields = _mouse_select_fields_from_ocr_fallback_instruction(
+                        ocr_fallback.instruction,
+                        list(ocr_fallback.nearby_objects) or None,
+                    )
+                    instruction_text = str(fb_fields["instruction_text"])
+                    nearby_objects = fb_fields["nearby_objects"]
+                    landmark_geometry = ocr_fallback.landmark_geometry
+                    recorded_anchor_match = bool(fb_fields["recorded_anchor_match"])
+                    control_type_token = fb_fields["control_type_token"]
+                    vision_mode = str(fb_fields["vision_mode"] or "")
+                    vision_plan = fb_fields["vision_plan"]
+                    allow_uia_select = bool(fb_fields["allow_uia_select"])
+                    filter_by_control_type = bool(
+                        fb_fields["filter_by_control_type"]
+                    )
+                    anchor = str(fb_fields["anchor"] or "")
+                    offset_dx = int(fb_fields["offset_dx"])
+                    offset_dy = int(fb_fields["offset_dy"])
+                    char_target = fb_fields["char_target"]
+                    char_occurrence = int(fb_fields["char_occurrence"] or 0)
+                    track_percent = fb_fields["track_percent"]
+                    match_anchor = str(fb_fields["match_anchor"] or "")
+                    nearby_hints = list(fb_fields["nearby_hints"])
+                    nearby_labels = list(fb_fields["nearby_labels"])
+                    nearby_phrases = list(fb_fields["nearby_phrases"])
             else:
                 unique_box: UiDetection | None = None
                 if preferred_cls is not None:

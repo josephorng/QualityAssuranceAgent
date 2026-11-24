@@ -16,6 +16,7 @@ from cua_mcp.select_mouse_target import (
     _efp_name_value_matches,
     _filter_yolo_for_near_synth_pool,
     _findall_pool_near_synth,
+    _keep_uia_first_on_subtarget_efp_soft_miss,
     _label_similarity,
     _mouse_select_fields_from_ocr_fallback_instruction,
     _order_geometry_efp_candidates,
@@ -151,7 +152,7 @@ def test_verify_blank_recorded_keeps_geom_det() -> None:
 
     def probe(x: int, y: int):
         probes.append((x, y))
-        return ("", (0, 0, 1, 1), "", "X", "Y")
+        return ("", None, "", "X", "Y")
 
     det, point, reason = _verify_geometry_candidates_with_efp(
         [preferred, other],
@@ -173,8 +174,8 @@ def test_verify_retries_second_candidate_on_name_mismatch() -> None:
 
     def probe(x: int, y: int):
         if (x, y) == (10, 10):
-            return ("label", (0, 0, 1, 1), "text", "錯誤", "錯誤")
-        return ("label", (0, 0, 1, 1), "text", "下載 (已釘選)", "下載 (已釘選)")
+            return ("label", None, "text", "錯誤", "錯誤")
+        return ("label", None, "text", "下載 (已釘選)", "下載 (已釘選)")
 
     det, point, reason = _verify_geometry_candidates_with_efp(
         [wrong, right],
@@ -194,7 +195,7 @@ def test_verify_exhaust_returns_miss() -> None:
     b = _det(40, 10)
 
     def probe(x: int, y: int):
-        return ("label", (0, 0, 1, 1), "text", "其他", "其他")
+        return ("label", None, "text", "其他", "其他")
 
     det, point, reason = _verify_geometry_candidates_with_efp(
         [a, b],
@@ -216,8 +217,8 @@ def test_verify_miss_logs_live_efp_name_value(monkeypatch) -> None:
 
     def probe(x: int, y: int):
         if (x, y) == (10, 10):
-            return ("label", (0, 0, 1, 1), "text", "Word", "")
-        return ("label", (0, 0, 1, 1), "text", "任務列", "")
+            return ("label", None, "text", "Word", "")
+        return ("label", None, "text", "任務列", "")
 
     monkeypatch.setattr(
         "cua_mcp.select_mouse_target._log_info",
@@ -247,7 +248,7 @@ def test_verify_miss_logs_live_efp_name_value(monkeypatch) -> None:
 def test_verify_synth_only_hit() -> None:
     def probe(x: int, y: int):
         assert (x, y) == (99, 88)
-        return ("label", (0, 0, 1, 1), "text", "文件 (已釘選)", "文件 (已釘選)")
+        return ("label", None, "text", "文件 (已釘選)", "文件 (已釘選)")
 
     det, point, reason = _verify_geometry_candidates_with_efp(
         [],
@@ -271,8 +272,8 @@ def test_anchor_efp_pool_scan_second_wins() -> None:
 
     def probe(x: int, y: int):
         if (x, y) == (40, 10):
-            return ("label", (0, 0, 1, 1), "text", "下載 (已釘選)", "下載 (已釘選)")
-        return ("label", (0, 0, 1, 1), "text", "錯誤", "錯誤")
+            return ("label", None, "text", "下載 (已釘選)", "下載 (已釘選)")
+        return ("label", None, "text", "錯誤", "錯誤")
 
     det, point, reason = _verify_geometry_candidates_with_efp(
         [far_wrong, near_right],
@@ -292,7 +293,7 @@ def test_anchor_efp_pool_scan_all_miss() -> None:
     b = _det(40, 10)
 
     def probe(x: int, y: int):
-        return ("label", (0, 0, 1, 1), "text", "其他", "")
+        return ("label", None, "text", "其他", "")
 
     det, point, reason = _verify_geometry_candidates_with_efp(
         [a, b],
@@ -313,7 +314,7 @@ def test_anchor_efp_blank_recorded_skips_probes() -> None:
 
     def probe(x: int, y: int):
         probes.append((x, y))
-        return ("", (0, 0, 1, 1), "", "X", "Y")
+        return ("", None, "", "X", "Y")
 
     # Blank recorded → helper short-circuits; call site keeps unique/LLM.
     assert not _recorded_efp_present("", "")
@@ -339,8 +340,8 @@ def test_uia_yolo_subtarget_efp_nearer_wrong_farther_wins() -> None:
 
     def probe(x: int, y: int):
         if (x, y) == (1990, 280):
-            return ("label", (0, 0, 1, 1), "text", "下載 (已釘選)", "下載 (已釘選)")
-        return ("label", (0, 0, 1, 1), "text", "圖片", "圖片")
+            return ("label", None, "text", "下載 (已釘選)", "下載 (已釘選)")
+        return ("label", None, "text", "圖片", "圖片")
 
     det, point, reason = _verify_geometry_candidates_with_efp(
         [near_wrong, far_right],
@@ -361,7 +362,7 @@ def test_uia_yolo_subtarget_efp_all_miss() -> None:
     b = _det(1990, 280)
 
     def probe(x: int, y: int):
-        return ("label", (0, 0, 1, 1), "text", "圖片", "圖片")
+        return ("label", None, "text", "圖片", "圖片")
 
     det, point, reason = _verify_geometry_candidates_with_efp(
         [a, b],
@@ -443,8 +444,8 @@ def test_uia_first_findall_near_synth_efp_wins_without_name_match() -> None:
 
     def probe(x: int, y: int):
         if (x, y) == (148, 100):
-            return ("label", (0, 0, 1, 1), "text", "下載 (已釘選)", "下載 (已釘選)")
-        return ("label", (0, 0, 1, 1), "text", "其他", "其他")
+            return ("label", None, "text", "下載 (已釘選)", "下載 (已釘選)")
+        return ("label", None, "text", "其他", "其他")
 
     chosen, reason = _try_uia_first_unique_select(
         [landmark, near_empty, far_download],
@@ -480,8 +481,8 @@ def test_uia_first_joint_yolo_leaf_efp_hit() -> None:
 
     def probe(x: int, y: int):
         if (x, y) == (75, 277):
-            return ("label", (0, 0, 1, 1), "text", "下載 (已釘選)", "下載 (已釘選)")
-        return ("label", (0, 0, 1, 1), "text", "其他", "其他")
+            return ("label", None, "text", "下載 (已釘選)", "下載 (已釘選)")
+        return ("label", None, "text", "其他", "其他")
 
     chosen, reason = _try_uia_first_unique_select(
         [landmark, toolbar, yolo_leaf, far_download],
@@ -572,8 +573,8 @@ def test_uia_first_text_hub_skips_nearer_yolo_icon() -> None:
 
     def probe(x: int, y: int):
         if (x, y) in {(166, 350), (193, 349)}:
-            return ("label", (0, 0, 1, 1), "text", "圖片 (已釘選)", "圖片 (已釘選)")
-        return ("label", (0, 0, 1, 1), "text", "其他", "其他")
+            return ("label", None, "text", "圖片 (已釘選)", "圖片 (已釘選)")
+        return ("label", None, "text", "其他", "其他")
 
     chosen, reason = _try_uia_first_unique_select(
         [landmark, yolo_icon, yolo_text],
@@ -619,8 +620,8 @@ def test_uia_first_bare_match_anchor_text_control_skips_nearer_icon() -> None:
 
     def probe(x: int, y: int):
         if (x, y) in {(166, 350), (193, 349)}:
-            return ("label", (0, 0, 1, 1), "text", "圖片 (已釘選)", "圖片 (已釘選)")
-        return ("label", (0, 0, 1, 1), "text", "其他", "其他")
+            return ("label", None, "text", "圖片 (已釘選)", "圖片 (已釘選)")
+        return ("label", None, "text", "其他", "其他")
 
     chosen, reason = _try_uia_first_unique_select(
         [landmark, yolo_icon, yolo_text],
@@ -667,8 +668,8 @@ def test_uia_first_icon_hub_skips_nearer_yolo_text() -> None:
 
     def probe(x: int, y: int):
         if (x, y) in {(166, 350), (193, 349)}:
-            return ("label", (0, 0, 1, 1), "text", "圖片 (已釘選)", "圖片 (已釘選)")
-        return ("label", (0, 0, 1, 1), "text", "其他", "其他")
+            return ("label", None, "text", "圖片 (已釘選)", "圖片 (已釘選)")
+        return ("label", None, "text", "其他", "其他")
 
     chosen, reason = _try_uia_first_unique_select(
         [landmark, yolo_text, yolo_icon],
@@ -714,8 +715,8 @@ def test_uia_first_ambiguous_hub_keeps_nearer_yolo_icon() -> None:
 
     def probe(x: int, y: int):
         if (x, y) in {(166, 350), (193, 349)}:
-            return ("label", (0, 0, 1, 1), "text", "圖片 (已釘選)", "圖片 (已釘選)")
-        return ("label", (0, 0, 1, 1), "text", "其他", "其他")
+            return ("label", None, "text", "圖片 (已釘選)", "圖片 (已釘選)")
+        return ("label", None, "text", "其他", "其他")
 
     chosen, reason = _try_uia_first_unique_select(
         [landmark, yolo_icon, yolo_text],
@@ -738,7 +739,7 @@ def test_verify_prefer_synth_first_snaps_to_matching_pool() -> None:
 
     def probe(x: int, y: int):
         # Both synth and FindAll center expose CoreInput.
-        return ("label", (0, 0, 1, 1), "text", "CoreInput", "")
+        return ("label", None, "text", "CoreInput", "")
 
     det, point, reason = _verify_geometry_candidates_with_efp(
         [findall],
@@ -777,11 +778,11 @@ def test_verify_pool_first_findall_over_synth_coreinput() -> None:
         if (x, y) in {(918, 614), (918, 638), (893, 638)} or (
             abs(x - 918) < 5 and abs(y - 614) < 5
         ):
-            return ("label", (0, 0, 1, 1), "text", "CoreInput", "")
+            return ("label", None, "text", "CoreInput", "")
         if (x, y) == (int(geom["landmarks"][0]["xy"][0]), int(geom["landmarks"][0]["xy"][1])):
-            return ("label", (0, 0, 1, 1), "text", "其他", "")
+            return ("label", None, "text", "其他", "")
         # Default: CoreInput so synth would also match if probed first.
-        return ("label", (0, 0, 1, 1), "text", "CoreInput", "")
+        return ("label", None, "text", "CoreInput", "")
 
     chosen, reason = _try_uia_first_unique_select(
         [landmark, findall],
@@ -821,7 +822,7 @@ def test_uia_first_findall_near_synth_efp_miss() -> None:
     far_download = _det(500, 500, text="下載", class_name="text")
 
     def probe(x: int, y: int):
-        return ("label", (0, 0, 1, 1), "text", "其他", "其他")
+        return ("label", None, "text", "其他", "其他")
 
     chosen, reason = _try_uia_first_unique_select(
         [landmark, near_empty, far_download],
@@ -847,7 +848,7 @@ def test_uia_first_input_hub_efp_miss_continues_name_shortlist() -> None:
     )
 
     def probe(x: int, y: int):
-        return ("label", (0, 0, 1, 1), "text", "其他", "")
+        return ("label", None, "text", "其他", "")
 
     chosen, reason = _try_uia_first_unique_select(
         [landmark, named_input],
@@ -876,7 +877,7 @@ def test_uia_first_input_hub_matches_automation_id_tail() -> None:
     sibling = _det(200, 100, text="連絡電話|txt_Phone", class_name="input")
 
     def probe(x: int, y: int):
-        return ("label", (0, 0, 1, 1), "text", "其他", "")
+        return ("label", None, "text", "其他", "")
 
     chosen, reason = _try_uia_first_unique_select(
         [landmark, named_input, sibling],
@@ -937,7 +938,7 @@ def test_uia_first_input_hub_soft_miss_does_not_unique_hit_sibling_text() -> Non
     unlabeled_input = _det(976, 447, text="", class_name="input")
 
     def probe(x: int, y: int):
-        return ("label", (0, 0, 1, 1), "text", "其他", "")
+        return ("label", None, "text", "其他", "")
 
     chosen, reason = _try_uia_first_unique_select(
         [landmark, sibling_text, unlabeled_input],
@@ -971,7 +972,7 @@ def test_uia_first_geom_unavailable_continues_name_unique() -> None:
         landmark_geometry=geom,
         recorded_efp_name="下載 (已釘選)",
         recorded_efp_value="",
-        point_probe_fn=lambda x, y: ("", (0, 0, 1, 1), "", "X", "Y"),
+        point_probe_fn=lambda x, y: ("", None, "", "X", "Y"),
     )
     assert reason == "hit"
     assert chosen is only
@@ -985,7 +986,7 @@ def test_uia_first_blank_efp_keeps_name_unique() -> None:
 
     def probe(x: int, y: int):
         probes.append((x, y))
-        return ("label", (0, 0, 1, 1), "text", "下載 (已釘選)", "下載 (已釘選)")
+        return ("label", None, "text", "下載 (已釘選)", "下載 (已釘選)")
 
     chosen, reason = _try_uia_first_unique_select(
         [landmark, only_download],
@@ -1016,7 +1017,7 @@ def test_uia_first_empty_pool_synth_hit() -> None:
 
     def probe(x: int, y: int):
         assert (x, y) == (800, 800)
-        return ("label", (0, 0, 1, 1), "text", "下載 (已釘選)", "下載 (已釘選)")
+        return ("label", None, "text", "下載 (已釘選)", "下載 (已釘選)")
 
     chosen, reason = _try_uia_first_unique_select(
         [landmark],
@@ -1244,7 +1245,7 @@ def test_uia_first_data_item_geom_unavailable_findfirst_hit() -> None:
         ),
         recorded_efp_name="N15",
         recorded_efp_value="",
-        point_probe_fn=lambda *_a: ("x", (0, 0, 1, 1), "text", "x", ""),
+        point_probe_fn=lambda *_a: ("x", None, "text", "x", ""),
         data_item_lookup_fn=lookup,
     )
     assert reason == "uia_data_item_name_hit"
@@ -1308,7 +1309,7 @@ def test_uia_first_skips_constellation_efp_when_hub_disagrees() -> None:
     def probe(x: int, y: int):
         return (
             "label",
-            (0, 0, 1, 1),
+            None,
             "text",
             "NVIDIA GeForce Overlay",
             "",
@@ -1381,7 +1382,7 @@ def test_uia_first_oversize_overlay_does_not_win_efp_even_if_name_matches() -> N
     def probe(x: int, y: int):
         # Every point reports the recorded Name — overlay would false-hit
         # without the oversize filter.
-        return ("label", (0, 0, 1, 1), "text", "下載", "")
+        return ("label", None, "text", "下載", "")
 
     chosen, reason = _try_uia_first_unique_select(
         [overlay, landmark, hub, sibling],
@@ -1397,3 +1398,91 @@ def test_uia_first_oversize_overlay_does_not_win_efp_even_if_name_matches() -> N
     assert reason == "landmark_efp_hit"
     assert chosen is hub
     assert chosen is not overlay
+
+
+def test_verify_snaps_hit_to_efp_leaf_bbox() -> None:
+    """Large FindAll row + matching EFP leaf bbox → commit leaf geometry."""
+    # Tree-row hub (wide); Value cell is the true EFP leaf under row center.
+    row = UiDetection(
+        bbox=(648, 1284, 1622, 36),
+        cx=1459,
+        cy=1302,
+        class_id=YOLO_CLASS_TEXT,
+        class_name="text",
+        text="Level2 row 4",
+        source="uia",
+    )
+    leaf_bbox = (872, 1284, 1398, 36)
+
+    def probe(x: int, y: int):
+        if (x, y) == (1459, 1302):
+            return ("Value", leaf_bbox, "data_item", "Value", "RufusYan")
+        return ("other", None, "text", "other", "")
+
+    det, point, reason = _verify_geometry_candidates_with_efp(
+        [row],
+        synth=(1459, 1302),
+        geom_det=None,
+        recorded_name="Value",
+        recorded_value="RufusYan",
+        point_probe_fn=probe,
+    )
+    assert reason == "hit"
+    assert det is not None
+    assert det is not row
+    assert det.bbox == leaf_bbox
+    assert point == (872 + 1398 // 2, 1284 + 36 // 2)
+    assert "RufusYan" in str(det.text or "")
+
+
+def test_uia_first_landmark_efp_hit_snaps_to_leaf_bbox() -> None:
+    """landmark_efp_hit hub is the EFP Value cell, not the FindAll tree row."""
+    geom = _simple_landmark_geometry(
+        landmark_xy=(100.0, 100.0),
+        target_xy=(1459.0, 1302.0),
+        scale=100.0,
+    )
+    landmark = _det(100, 100, text="LM", class_name="text")
+    row = UiDetection(
+        bbox=(648, 1284, 1622, 36),
+        cx=1459,
+        cy=1302,
+        class_id=YOLO_CLASS_TEXT,
+        class_name="text",
+        text="Level2 row 4",
+        source="uia",
+    )
+    leaf_bbox = (872, 1284, 1398, 36)
+
+    def probe(x: int, y: int):
+        if (x, y) == (1459, 1302):
+            return ("Value", leaf_bbox, "data_item", "Value", "RufusYan")
+        return ("other", None, "text", "other", "")
+
+    chosen, reason = _try_uia_first_unique_select(
+        [landmark, row],
+        anchor="Value|RufusYan",
+        nearby_hints=[],
+        nearby_labels=[],
+        nearby_phrases=[],
+        control_type_token="data_item",
+        landmark_geometry=geom,
+        recorded_efp_name="Value",
+        recorded_efp_value="RufusYan",
+        point_probe_fn=probe,
+    )
+    assert reason == "landmark_efp_hit"
+    assert chosen is not None
+    assert chosen is not row
+    assert chosen.bbox == leaf_bbox
+    assert (chosen.cx, chosen.cy) == (872 + 1398 // 2, 1284 + 36 // 2)
+
+
+def test_keep_uia_first_on_subtarget_efp_soft_miss_reasons() -> None:
+    assert _keep_uia_first_on_subtarget_efp_soft_miss("landmark_efp_hit") is True
+    assert _keep_uia_first_on_subtarget_efp_soft_miss("landmark_efp_synth_hit") is True
+    assert _keep_uia_first_on_subtarget_efp_soft_miss("landmark_efp_neighbor_hit") is True
+    assert _keep_uia_first_on_subtarget_efp_soft_miss("uia_data_item_name_hit") is True
+    assert _keep_uia_first_on_subtarget_efp_soft_miss("hit") is False
+    assert _keep_uia_first_on_subtarget_efp_soft_miss("uia_first_unique") is False
+    assert _keep_uia_first_on_subtarget_efp_soft_miss("") is False

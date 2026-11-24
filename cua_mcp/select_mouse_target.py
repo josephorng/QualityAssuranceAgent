@@ -4586,6 +4586,12 @@ def _normalize_hub_source(hub_source: str | None) -> str | None:
     return None
 
 
+def _is_uia_family_source(source: str | None) -> bool:
+    """True for FindAll / EFP UIA sources (not YOLO/OCR deferred boxes)."""
+    text = str(source or "").strip().lower()
+    return text in ("", "uia", "uia_efp")
+
+
 # Stricter than OCR↔UIA soft-agree (0.25): constellation-EFP must not treat
 # unrelated overlay Names (NVIDIA GeForce Overlay ↔ WinMaster7 Console ≈ 0.25)
 # as hub agreement. Used only when ``hub_source`` is missing (legacy caches).
@@ -5451,12 +5457,15 @@ def _try_uia_first_unique_select(
 
     Hard constellation-EFP runs when :func:`_should_run_constellation_efp` is true
     (``hub_source=uia_efp``, or legacy EFP↔hub agree). Synthesize the constellation
-    point and EFP-probe FindAll UIA items nearer-first. Hit commits. Labeled-hub
-    EFP miss soft-falls without unique Name commit so YOLO/OCR can take over;
-    geometry unavailable continues into the Name shortlist. For ``data_item``,
-    Name FindFirst runs after pool/synth EFP miss and before scan-EFP. When the
-    budgeted snapshot Name shortlist is empty, a Name PropertyCondition FindAll
-    (not FindFirst) recovers truncated tree/list hubs.
+    point and EFP-probe FindAll UIA items nearer-first. Hit commits. Constellation
+    EFP miss continues into the Name shortlist / Name FindAll for every hub
+    (``uia_efp`` recording can miss FindAll at press time; live walk may still
+    expose the leaf). After constellation, Name matching uses UIA-family sources
+    only so deferred YOLO/OCR boxes cannot fake a FindAll hit. Geometry
+    unavailable also continues into Name. For ``data_item``, Name FindFirst runs
+    after pool/synth EFP miss and before scan-EFP. When the budgeted snapshot
+    Name shortlist is empty, a Name PropertyCondition FindAll (not FindFirst)
+    recovers truncated tree/list hubs.
     """
     from src.recorder.uia_input_boxes import (
         control_type_id_from_token,
@@ -5636,20 +5645,20 @@ def _try_uia_first_unique_select(
                         f"point=[{neighbor[0]},{neighbor[1]}]"
                     )
                     return neighbor_det, "landmark_efp_neighbor_hit"
-            # Input/scrollbar: EFP is soft — continue Name shortlist / unique path.
-            # Labeled hubs: hard miss so YOLO/OCR can take over.
-            if not _hub_is_input_or_scrollbar(
-                anchor=anchor,
-                control_type_token=control_type_token,
-            ):
-                _log_info(
-                    "move_mouse uia_first landmark_efp_miss "
-                    f"pool={len(pool)}; soft-miss (no Name unique)"
+            # Constellation EFP miss: always continue Name shortlist / Name
+            # FindAll. Recording may have stamped hub_source=uia_efp because
+            # press-time FindAll truncated the leaf; live FindAll can still hit.
+            hub_note = (
+                "soft_input_hub "
+                if _hub_is_input_or_scrollbar(
+                    anchor=anchor,
+                    control_type_token=control_type_token,
                 )
-                return None, "landmark_efp_miss"
+                else ""
+            )
             _log_info(
-                "move_mouse uia_first landmark_efp_miss soft_input_hub "
-                f"pool={len(pool)}; continue Name shortlist"
+                "move_mouse uia_first landmark_efp_miss "
+                f"{hub_note}pool={len(pool)}; continue Name shortlist"
             )
 
     if not constellation_ran and token == "data_item":
@@ -5657,11 +5666,20 @@ def _try_uia_first_unique_select(
         if name_det is not None and name_reason is not None:
             return name_det, name_reason
 
+    # After constellation, ignore deferred YOLO/OCR boxes merged for near-synth
+    # EFP so Name unique cannot commit a vision-only label as a FindAll hub.
+    if constellation_ran:
+        name_detections = [
+            det for det in detections if _is_uia_family_source(det.source)
+        ]
+    else:
+        name_detections = list(detections)
+
     if filter_by_control_type:
         # Anchor: Name-then-Value inside the control-type pool. Nearby: full
         # exact label match (unchanged) so landmarks stay strict.
         anchor_pool = _phrase_match_pool(
-            detections, anchor, control_type_token=control_type_token
+            name_detections, anchor, control_type_token=control_type_token
         )
         anchor_matches = _filter_uia_anchor_by_name_then_value(
             anchor_pool, anchor, recorded_anchor=recorded_anchor
@@ -5669,7 +5687,7 @@ def _try_uia_first_unique_select(
         nearby_matches = []
         seen = {id(det) for det in anchor_matches}
         for phrase in nearby_labels:
-            for det in _matches_for_phrase(detections, phrase):
+            for det in _matches_for_phrase(name_detections, phrase):
                 if id(det) in seen:
                     continue
                 seen.add(id(det))
@@ -5678,10 +5696,10 @@ def _try_uia_first_unique_select(
         # UIA Name/Value: Name-primary with Value tiebreak for the anchor.
         # Nearby stays full-string exact. Fuzzy similarity stays on YOLO/OCR.
         anchor_matches = _filter_uia_anchor_by_name_then_value(
-            detections, anchor, recorded_anchor=recorded_anchor
+            name_detections, anchor, recorded_anchor=recorded_anchor
         )
         _anchor_exact, nearby_matches = _filter_mouse_candidates_exact(
-            detections,
+            name_detections,
             anchor,
             nearby_labels,
             recorded_anchor=recorded_anchor,
@@ -5750,7 +5768,7 @@ def _try_uia_first_unique_select(
                         )
                     )
             if recovered:
-                detections.extend(recovered)
+                name_detections.extend(recovered)
                 anchor_matches = _filter_uia_anchor_by_name_then_value(
                     recovered, anchor, recorded_anchor=recorded_anchor
                 )
@@ -5768,14 +5786,14 @@ def _try_uia_first_unique_select(
                     nearby_matches = []
                     seen = {id(det) for det in anchor_matches}
                     for phrase in nearby_labels:
-                        for det in _matches_for_phrase(detections, phrase):
+                        for det in _matches_for_phrase(name_detections, phrase):
                             if id(det) in seen:
                                 continue
                             seen.add(id(det))
                             nearby_matches.append(det)
                 else:
                     _anchor_exact, nearby_matches = _filter_mouse_candidates_exact(
-                        detections,
+                        name_detections,
                         anchor,
                         nearby_labels,
                         recorded_anchor=recorded_anchor,
@@ -5785,8 +5803,16 @@ def _try_uia_first_unique_select(
                         for det in nearby_matches
                         if id(det) not in {id(a) for a in anchor_matches}
                     ]
+
+    def _name_path_miss(reason: str) -> tuple[None, str]:
+        # Preserve constellation-miss reason when Name shortlist / FindAll
+        # recovery also failed (callers and tests key on landmark_efp_miss).
+        if constellation_ran:
+            return None, "landmark_efp_miss"
+        return None, reason
+
     if not anchor_matches:
-        return None, "no_anchor"
+        return _name_path_miss("no_anchor")
 
     before_nearby = len(anchor_matches)
     # Blank unknown icon peers require OCR; skip admit on the partial set.
@@ -5801,7 +5827,7 @@ def _try_uia_first_unique_select(
         )
     _log_move_mouse_detections("uia_first anchors_after_nearby", anchor_matches)
     if len(anchor_matches) != 1:
-        return None, "not_unique"
+        return _name_path_miss("not_unique")
 
     chosen = anchor_matches[0]
     _log_info(

@@ -41,6 +41,7 @@ def _det(
     text: str = "",
     class_name: str = "input",
     class_id: int | None = None,
+    source: str = "uia",
 ) -> UiDetection:
     if class_id is None:
         class_id = YOLO_CLASS_INPUT if class_name == "input" else YOLO_CLASS_TEXT
@@ -51,7 +52,7 @@ def _det(
         class_id=class_id,
         class_name=class_name,
         text=text,
-        source="uia",
+        source=source,
     )
 
 
@@ -820,16 +821,18 @@ def test_ocr_fallback_fields_use_twin_anchor() -> None:
 
 
 def test_uia_first_findall_near_synth_efp_miss() -> None:
+    """Constellation EFP miss + no Name match → landmark_efp_miss."""
     geom = _simple_landmark_geometry()
     landmark = _det(100, 100, text="LM", class_name="text")
     near_empty = _det(148, 100, text="", class_name="input")
-    far_download = _det(500, 500, text="下載", class_name="text")
+    # Non-matching Name so continue-into-Name also fails (unique 下載 would hit).
+    far_other = _det(500, 500, text="遠端", class_name="text")
 
     def probe(x: int, y: int):
         return ("label", None, "text", "其他", "其他")
 
     chosen, reason = _try_uia_first_unique_select(
-        [landmark, near_empty, far_download],
+        [landmark, near_empty, far_other],
         anchor="下載",
         nearby_hints=[],
         nearby_labels=[],
@@ -871,6 +874,98 @@ def test_uia_first_input_hub_efp_miss_continues_name_shortlist() -> None:
     assert reason != "landmark_efp_miss"
     assert reason == "hit"
     assert chosen is named_input
+
+
+def test_uia_first_labeled_hub_efp_miss_continues_name_shortlist() -> None:
+    """Labeled uia_efp hub: constellation miss still unique-hits live FindAll Name."""
+    geom = _simple_landmark_geometry()
+    landmark = _det(100, 100, text="LM", class_name="text")
+    tree_leaf = _det(200, 120, text="龜速的網域 (3)|1", class_name="text")
+
+    def probe(x: int, y: int):
+        return ("label", None, "text", "其他", "")
+
+    chosen, reason = _try_uia_first_unique_select(
+        [landmark, tree_leaf],
+        anchor="龜速的網域 (3)|1",
+        nearby_hints=[],
+        nearby_labels=[],
+        nearby_phrases=[],
+        filter_by_control_type=True,
+        control_type_token="text",
+        recorded_anchor=True,
+        landmark_geometry=geom,
+        recorded_efp_name="龜速的網域 (3)",
+        recorded_efp_value="1",
+        hub_source="uia_efp",
+        point_probe_fn=probe,
+    )
+    assert reason == "hit"
+    assert chosen is tree_leaf
+
+
+def test_uia_first_labeled_hub_efp_miss_name_findall_recovery() -> None:
+    """Constellation miss + empty snapshot Name → Name FindAll recovers the leaf."""
+    geom = _simple_landmark_geometry()
+    landmark = _det(100, 100, text="LM", class_name="text")
+    near_empty = _det(148, 100, text="", class_name="input")
+
+    def probe(x: int, y: int):
+        return ("label", None, "text", "其他", "")
+
+    def name_findall(name: str, type_id):
+        assert name == "龜速的網域 (3)"
+        return [([195, 115, 30, 20], "龜速的網域 (3)", "1", "tree_item")]
+
+    chosen, reason = _try_uia_first_unique_select(
+        [landmark, near_empty],
+        anchor="龜速的網域 (3)|1",
+        nearby_hints=[],
+        nearby_labels=[],
+        nearby_phrases=[],
+        filter_by_control_type=True,
+        control_type_token="text",
+        recorded_anchor=True,
+        landmark_geometry=geom,
+        recorded_efp_name="龜速的網域 (3)",
+        recorded_efp_value="1",
+        hub_source="uia_efp",
+        point_probe_fn=probe,
+        name_findall_fn=name_findall,
+    )
+    assert reason == "hit"
+    assert chosen is not None
+    assert "龜速的網域 (3)" in str(chosen.text)
+
+
+def test_uia_first_labeled_hub_efp_miss_ignores_yolo_name() -> None:
+    """After constellation, YOLO/OCR same-Name boxes must not unique-hit Name path."""
+    geom = _simple_landmark_geometry()
+    landmark = _det(100, 100, text="LM", class_name="text")
+    yolo_twin = _det(
+        200, 120, text="龜速的網域 (3)|1", class_name="text", source="yolo"
+    )
+
+    def probe(x: int, y: int):
+        return ("label", None, "text", "其他", "")
+
+    chosen, reason = _try_uia_first_unique_select(
+        [landmark, yolo_twin],
+        anchor="龜速的網域 (3)|1",
+        nearby_hints=[],
+        nearby_labels=[],
+        nearby_phrases=[],
+        filter_by_control_type=True,
+        control_type_token="text",
+        recorded_anchor=True,
+        landmark_geometry=geom,
+        recorded_efp_name="龜速的網域 (3)",
+        recorded_efp_value="1",
+        hub_source="uia_efp",
+        point_probe_fn=probe,
+    )
+    assert reason == "landmark_efp_miss"
+    assert chosen is None
 
 
 def test_uia_first_input_hub_matches_automation_id_tail() -> None:
@@ -958,7 +1053,8 @@ def test_uia_first_input_hub_soft_miss_does_not_unique_hit_sibling_text() -> Non
         recorded_efp_value="",
         point_probe_fn=probe,
     )
-    assert reason == "no_anchor"
+    # Constellation ran; Name shortlist also empty → preserve landmark_efp_miss.
+    assert reason == "landmark_efp_miss"
     assert chosen is None
 
 

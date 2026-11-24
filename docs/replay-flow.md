@@ -116,8 +116,7 @@ flowchart TD
   EFP -->|synth hit| ES[landmark_efp_synth_hit]
   EFP -->|data_item Name| DI2[uia_data_item_name_hit]
   EFP -->|neighbor| EN[landmark_efp_neighbor_hit]
-  EFP -->|labeled miss| EM[landmark_efp_miss soft]
-  EFP -->|input/scrollbar miss| Cont[Continue Name shortlist]
+  EFP -->|miss any hub| Cont[Continue Name shortlist UIA-family only]
 
   CE -->|no| Name[Name shortlist Name-then-Value]
   Cont --> Name
@@ -128,7 +127,7 @@ flowchart TD
   Name2 --> Pre
   Pre --> Uniq{exactly one?}
   Uniq -->|yes| Hit[reason = hit]
-  Uniq -->|no| NU[not_unique / no_anchor]
+  Uniq -->|no| NU[landmark_efp_miss if constellation else not_unique/no_anchor]
 ```
 
 ### When constellation EFP runs
@@ -139,9 +138,11 @@ flowchart TD
 | `findall` | No — Name shortlist only |
 | missing (legacy) | Soft-agree EFP↔hub ≥ 0.5 |
 
+Constellation EFP miss (labeled or input/scrollbar) always continues into Name shortlist / Name FindAll. That continue path keeps **UIA-family** sources only (`uia`, `uia_efp`, empty) so deferred YOLO/OCR boxes merged for near-synth cannot unique-hit as a FindAll hub. If Name also fails, the reason stays `landmark_efp_miss` so the YOLO twin path still runs.
+
 ### Name FindAll last fallback
 
-If the budgeted snapshot walk truncated the target, a targeted Name PropertyCondition FindAll under the click hwnd recovers candidates. A **unique** recovery still returns `reason="hit"` — same as a normal snapshot hit — so it **still enters** `uia_yolo_subtarget` when a twin is present.
+If the budgeted snapshot walk truncated the target, a targeted Name PropertyCondition FindAll under the click hwnd recovers candidates. A **unique** recovery still returns `reason="hit"` — same as a normal snapshot hit — so it **still enters** `uia_yolo_subtarget` when a twin is present. This recovery also runs after a constellation EFP miss when press-time FindAll stamped `hub_source=uia_efp` but live Name FindAll can still expose the leaf.
 
 ### Reason strings
 

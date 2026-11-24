@@ -5885,7 +5885,7 @@ async def test_find_mouse_point_input_hub_efp_hit_prefers_matching_box(
         if (x, y) == (far.cx, far.cy):
             return (
                 "密碼|Textbox|txt_Password",
-                (0, 0, 1, 1),
+                far.bbox,
                 "input",
                 "密碼|Textbox|txt_Password",
                 "",
@@ -5918,6 +5918,71 @@ async def test_find_mouse_point_input_hub_efp_hit_prefers_matching_box(
     assert found is not None
     assert found[2]["selection_method"] == "landmark_geometry_efp_pick"
     assert (found[0], found[1]) == (far.cx, far.cy)
+
+
+@pytest.mark.asyncio
+async def test_find_mouse_point_efp_leaf_snap_appends_detection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """EFP leaf snap builds a new UiDetection; index must append, not crash."""
+    from cua_mcp import select_mouse_target as smt
+
+    async def fake_pick(*_a, **_k):
+        raise AssertionError("visual one-pass must not run during replay")
+
+    def fake_parse(instruction: str):
+        return ("輸入欄", 0, 0, [], None, 0, None)
+
+    detections = _geometry_landmark_scene(include_target=False)
+    hub = _detection_from_bbox((52, 52, 16, 16), YOLO_CLASS_INPUT, text="")
+    detections.append(hub)
+    # Distinct Value-cell leaf under the hub (not in the detections list).
+    leaf_bbox = (228, 108, 125, 24)
+    leaf_cx = leaf_bbox[0] + leaf_bbox[2] // 2
+    leaf_cy = leaf_bbox[1] + leaf_bbox[3] // 2
+
+    def probe(x: int, y: int):
+        if (x, y) == (hub.cx, hub.cy):
+            return (
+                "龜速的網域 (3)",
+                leaf_bbox,
+                "text",
+                "龜速的網域 (3)",
+                "1",
+            )
+        return ("label", (0, 0, 1, 1), "text", "其他", "")
+
+    _install_find_mouse_point_fakes(monkeypatch, detections, pick=fake_pick)
+    monkeypatch.setattr(smt, "parse_mouse_target_instruction", fake_parse)
+    monkeypatch.setattr(
+        "src.recorder.uia_input_boxes.uia_text_element_at_point",
+        probe,
+    )
+    monkeypatch.setattr(
+        smt,
+        "_prefilter_anchors_by_nearby",
+        lambda anchors, *_a, **_k: list(anchors),
+    )
+
+    with smt.require_similarity_match():
+        found = await smt.find_mouse_point(
+            "（YOLO+OCR）輸入欄",
+            nearby_objects=_GEOMETRY_NEARBY,
+            landmark_geometry=_recorded_input_geometry(),
+            vision_mode="yolo_ocr",
+            control_type="input",
+            recorded_efp_name="龜速的網域 (3)",
+            recorded_efp_value="1",
+        )
+    assert found is not None
+    assert found[2]["selection_method"] == "landmark_geometry_efp_pick"
+    assert (found[0], found[1]) == (leaf_cx, leaf_cy)
+    assert found[2]["target_bbox"] == {
+        "x": leaf_bbox[0],
+        "y": leaf_bbox[1],
+        "w": leaf_bbox[2],
+        "h": leaf_bbox[3],
+    }
 
 
 @pytest.mark.asyncio
@@ -6512,6 +6577,76 @@ def test_try_uia_first_unique_select_hit_and_miss() -> None:
         nearby_hints=normalize_nearby_hints(["在「Docker」文字的下面"]),
         nearby_labels=["Docker"],
         nearby_phrases=["在「Docker」文字的下面"],
+    )
+    assert chosen is None
+    assert reason == "not_unique"
+
+
+def test_try_uia_first_name_findall_recovers_unique_miss() -> None:
+    """Budgeted snapshot miss + Name FindAll unique hit → UIA commit."""
+    from cua_mcp.select_mouse_target import _try_uia_first_unique_select
+    from src.common.nearby_side import normalize_nearby_hints
+
+    # Snapshot only has unrelated text — target truncated from budgeted walk.
+    snapshot = [
+        _detection_from_bbox(
+            (10, 10, 40, 16), YOLO_CLASS_TEXT, text="組織圖", source="uia"
+        ),
+    ]
+    leaf_bbox = (228, 108, 125, 24)
+    calls: list[tuple[str, int | None]] = []
+
+    def fake_name_findall(
+        name: str, control_type_id: int | None
+    ) -> list[tuple[tuple[int, int, int, int], str, str, str]]:
+        calls.append((name, control_type_id))
+        assert name == "龜速的網域 (3)"  # raw Name, not lookalike-folded
+        return [(leaf_bbox, "龜速的網域 (3)", "1", "tree_item")]
+
+    chosen, reason = _try_uia_first_unique_select(
+        snapshot,
+        anchor="龜速的網域 (3)|1",
+        nearby_hints=normalize_nearby_hints([]),
+        nearby_labels=[],
+        nearby_phrases=[],
+        filter_by_control_type=True,
+        control_type_token="text",
+        recorded_anchor=True,
+        name_findall_fn=fake_name_findall,
+    )
+    assert reason == "hit"
+    assert chosen is not None
+    assert chosen.bbox == leaf_bbox
+    assert "龜速的網域 (3)" in str(chosen.text or "")
+    assert calls == [("龜速的網域 (3)", None)]  # text token → no ControlType AND
+
+
+def test_try_uia_first_name_findall_duplicate_stays_not_unique() -> None:
+    """Name FindAll must not silent-pick the first of two same-Name hits."""
+    from cua_mcp.select_mouse_target import _try_uia_first_unique_select
+    from src.common.nearby_side import normalize_nearby_hints
+
+    snapshot = [
+        _detection_from_bbox(
+            (10, 10, 40, 16), YOLO_CLASS_TEXT, text="組織圖", source="uia"
+        ),
+    ]
+
+    def fake_name_findall(
+        name: str, control_type_id: int | None
+    ) -> list[tuple[tuple[int, int, int, int], str, str, str]]:
+        return [
+            ((100, 100, 80, 20), "下載", "", "text"),
+            ((100, 140, 80, 20), "下載", "", "text"),
+        ]
+
+    chosen, reason = _try_uia_first_unique_select(
+        snapshot,
+        anchor="「下載」文字",
+        nearby_hints=normalize_nearby_hints([]),
+        nearby_labels=[],
+        nearby_phrases=[],
+        name_findall_fn=fake_name_findall,
     )
     assert chosen is None
     assert reason == "not_unique"

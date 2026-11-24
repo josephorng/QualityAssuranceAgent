@@ -4869,6 +4869,17 @@ def _order_geometry_efp_candidates(
     return ordered
 
 
+def _index_or_append_detection(
+    detections: list[UiDetection], det: UiDetection
+) -> int:
+    """Return ``det``'s index in ``detections``, appending when leaf-snapped."""
+    try:
+        return detections.index(det)
+    except ValueError:
+        detections.append(det)
+        return len(detections) - 1
+
+
 def _detection_from_efp_leaf_bbox(
     leaf_bbox: tuple[int, int, int, int],
     *,
@@ -5383,6 +5394,7 @@ def _try_uia_first_unique_select(
     hub_source: str | None = None,
     point_probe_fn: Any | None = None,
     data_item_lookup_fn: Any | None = None,
+    name_findall_fn: Any | None = None,
 ) -> tuple[UiDetection | None, str]:
     """Soft UIA-first commit: unique after filter + nearby prefilter, else miss reason.
 
@@ -5391,9 +5403,15 @@ def _try_uia_first_unique_select(
     point and EFP-probe FindAll UIA items nearer-first. Hit commits. Labeled-hub
     EFP miss soft-falls without unique Name commit so YOLO/OCR can take over;
     geometry unavailable continues into the Name shortlist. For ``data_item``,
-    Name FindFirst runs after pool/synth EFP miss and before scan-EFP.
+    Name FindFirst runs after pool/synth EFP miss and before scan-EFP. When the
+    budgeted snapshot Name shortlist is empty, a Name PropertyCondition FindAll
+    (not FindFirst) recovers truncated tree/list hubs.
     """
-    from src.recorder.uia_input_boxes import split_uia_name_value_label
+    from src.recorder.uia_input_boxes import (
+        control_type_id_from_token,
+        split_uia_name_value_label,
+        uia_label_combine_name_value,
+    )
 
     token = (control_type_token or "").strip().lower()
 
@@ -5629,6 +5647,93 @@ def _try_uia_first_unique_select(
     )
     _log_move_mouse_detections("uia_first anchor_matches", anchor_matches)
     _log_move_mouse_detections("uia_first nearby_matches", nearby_matches)
+    if not anchor_matches and token != "data_item" and name_findall_fn is not None:
+        # Budgeted walk truncation: targeted Name FindAll under the click hwnd.
+        # Use the raw Name (no lookalike fold) for the COM PropertyCondition.
+        raw_name = str(split_uia_name_value_label(anchor)[0] or "").strip()
+        if not raw_name and recorded_efp_name:
+            raw_name = str(
+                split_uia_name_value_label(str(recorded_efp_name))[0] or ""
+            ).strip() or str(recorded_efp_name or "").strip()
+        if raw_name:
+            type_id = control_type_id_from_token(token)
+            try:
+                hits = name_findall_fn(raw_name, type_id)
+            except Exception as exc:
+                hits = []
+                _log_info(
+                    "move_mouse uia_first name_findall error "
+                    f"name={raw_name!r} err={exc!r}"
+                )
+            recovered: list[UiDetection] = []
+            if isinstance(hits, list):
+                for hit in hits:
+                    if not (
+                        isinstance(hit, tuple)
+                        and len(hit) >= 3
+                        and isinstance(hit[0], (list, tuple))
+                        and len(hit[0]) == 4
+                    ):
+                        continue
+                    try:
+                        sx, sy, sw, sh = (int(v) for v in hit[0][:4])
+                    except (TypeError, ValueError):
+                        continue
+                    if sw <= 0 or sh <= 0:
+                        continue
+                    live_name = str(hit[1] or "").strip()
+                    live_value = str(hit[2] or "").strip() if len(hit) > 2 else ""
+                    live_ct = (
+                        str(hit[3] or "").strip() if len(hit) > 3 else ""
+                    ) or None
+                    label = uia_label_combine_name_value(
+                        live_name, live_value
+                    ).strip() or live_name or raw_name
+                    recovered.append(
+                        _detection_from_bbox(
+                            (sx, sy, sw, sh),
+                            YOLO_CLASS_TEXT,
+                            text=label,
+                            source="uia",
+                            uia_control_type=live_ct or token or None,
+                        )
+                    )
+            if recovered:
+                detections.extend(recovered)
+                anchor_matches = _filter_uia_anchor_by_name_then_value(
+                    recovered, anchor, recorded_anchor=recorded_anchor
+                )
+                _log_info(
+                    "move_mouse uia_first name_findall "
+                    f"raw_name={raw_name!r} hits={len(recovered)} "
+                    f"name_matches={len(anchor_matches)} "
+                    f"control_type_id={type_id!r}"
+                )
+                _log_move_mouse_detections(
+                    "uia_first name_findall_matches", anchor_matches
+                )
+                # Rebuild nearby from the expanded detections so prefilter works.
+                if filter_by_control_type:
+                    nearby_matches = []
+                    seen = {id(det) for det in anchor_matches}
+                    for phrase in nearby_labels:
+                        for det in _matches_for_phrase(detections, phrase):
+                            if id(det) in seen:
+                                continue
+                            seen.add(id(det))
+                            nearby_matches.append(det)
+                else:
+                    _anchor_exact, nearby_matches = _filter_mouse_candidates_exact(
+                        detections,
+                        anchor,
+                        nearby_labels,
+                        recorded_anchor=recorded_anchor,
+                    )
+                    nearby_matches = [
+                        det
+                        for det in nearby_matches
+                        if id(det) not in {id(a) for a in anchor_matches}
+                    ]
     if not anchor_matches:
         return None, "no_anchor"
 
@@ -6975,6 +7080,22 @@ async def _find_mouse_point_attempt(
                 return None
             return find_uia_data_item_by_name(int(live.hwnd), str(name))
 
+        def _name_findall_by_name(
+            name: str,
+            control_type_id: int | None,
+        ) -> list[tuple[tuple[int, int, int, int], str, str, str]]:
+            from src.recorder.uia_input_boxes import find_uia_elements_by_name
+            from src.recorder.window_snapshot import find_matching_click_window
+
+            live = find_matching_click_window(click_window)
+            if live is None or not int(live.hwnd or 0):
+                return []
+            return find_uia_elements_by_name(
+                int(live.hwnd),
+                str(name),
+                control_type_id=control_type_id,
+            )
+
         def _select_uia_snapshot(
             dets: list[UiDetection],
         ) -> tuple[UiDetection | None, str]:
@@ -6992,6 +7113,7 @@ async def _find_mouse_point_attempt(
                 recorded_efp_value=recorded_efp_value,
                 hub_source=hub_source,
                 data_item_lookup_fn=_data_item_lookup_by_name,
+                name_findall_fn=_name_findall_by_name,
             )
 
         constellation_joint = _should_run_constellation_efp(
@@ -8043,10 +8165,7 @@ async def _find_mouse_point_attempt(
         )
         if text_hit is not None:
             chosen, _geom_point, selection_method = text_hit
-            try:
-                idx = detections.index(chosen)
-            except ValueError:
-                idx = 0
+            idx = _index_or_append_detection(detections, chosen)
             select_phase = selection_method
             used_geometry = True
             _log_info(
@@ -8258,7 +8377,7 @@ async def _find_mouse_point_attempt(
                     )
                     if efp_reason == "hit" and efp_det is not None:
                         chosen = efp_det
-                        idx = detections.index(efp_det)
+                        idx = _index_or_append_detection(detections, efp_det)
                         selection_method = "landmark_geometry_efp_pick"
                         select_phase = selection_method
                         used_geometry = True
@@ -8406,7 +8525,7 @@ async def _find_mouse_point_attempt(
             )
             if efp_reason == "hit" and efp_det is not None:
                 chosen = efp_det
-                idx = detections.index(efp_det)
+                idx = _index_or_append_detection(detections, efp_det)
                 selection_method = "anchor_efp_pick"
                 select_phase = selection_method
                 selection_done = True

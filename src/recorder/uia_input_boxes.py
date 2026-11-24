@@ -3554,6 +3554,210 @@ def find_uia_data_item_by_name(
     return None
 
 
+# Cap Name FindAll hits so a huge duplicate-Name tree cannot blow memory.
+_NAME_FINDALL_MAX_HITS = 64
+
+
+def _find_uia_elements_by_name_impl(
+    hwnd: int,
+    name: str,
+    control_type_id: int | None,
+) -> list[tuple[RectXywh, str, str, str]]:
+    """Worker-thread FindAll: Name=``name`` (optional ControlType AND)."""
+    target = str(name or "").strip()
+    if not int(hwnd or 0) or not target:
+        return []
+
+    ole32, initialized_here = _coinitialize_uia()
+    if ole32 is None:
+        return []
+
+    automation: ctypes.c_void_p | None = None
+    root: ctypes.c_void_p | None = None
+    type_cond: ctypes.c_void_p | None = None
+    name_cond: ctypes.c_void_p | None = None
+    and_cond: ctypes.c_void_p | None = None
+    query_cond: ctypes.c_void_p | None = None
+    found: ctypes.c_void_p | None = None
+    out: list[tuple[RectXywh, str, str, str]] = []
+    try:
+        automation = _create_uia_automation()
+        if automation is None:
+            return []
+        root = _element_from_handle(automation, int(hwnd))
+        if root is None:
+            return []
+        name_cond = _create_name_condition(automation, target)
+        if name_cond is None:
+            return []
+        query_cond = name_cond
+        if control_type_id is not None and int(control_type_id) > 0:
+            type_cond = _create_control_type_condition(
+                automation, int(control_type_id)
+            )
+            if type_cond is None:
+                return []
+            and_cond = _create_and_condition(automation, type_cond, name_cond)
+            if and_cond is None:
+                return []
+            query_cond = and_cond
+
+        root_bounds = _element_bounding_xyxy(root)
+        window_xywh: RectXywh | None = None
+        if root_bounds is not None:
+            rx1, ry1, rx2, ry2 = (int(v) for v in root_bounds)
+            rw, rh = rx2 - rx1, ry2 - ry1
+            if rw > 0 and rh > 0:
+                window_xywh = (rx1, ry1, rw, rh)
+
+        find_all = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        )(_com_vtable(root, _UIA_FIND_ALL + 1)[_UIA_FIND_ALL])
+        found_ptr = ctypes.c_void_p()
+        hr = find_all(
+            root,
+            _TREE_SCOPE_DESCENDANTS,
+            query_cond,
+            ctypes.byref(found_ptr),
+        )
+        if hr != _S_OK or not found_ptr:
+            return []
+        found = found_ptr
+        get_length = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_int),
+        )(_com_vtable(found, _UIA_ARRAY_GET_LENGTH + 1)[_UIA_ARRAY_GET_LENGTH])
+        get_element = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_void_p),
+        )(_com_vtable(found, _UIA_ARRAY_GET_ELEMENT + 1)[_UIA_ARRAY_GET_ELEMENT])
+        length = ctypes.c_int(0)
+        if get_length(found, ctypes.byref(length)) != _S_OK:
+            return []
+        hit_count = min(int(length.value), _NAME_FINDALL_MAX_HITS)
+        for index in range(hit_count):
+            elem_ptr = ctypes.c_void_p()
+            if get_element(found, index, ctypes.byref(elem_ptr)) != _S_OK or not elem_ptr:
+                continue
+            element = elem_ptr
+            try:
+                bounds = _element_bounding_xyxy(element)
+                if bounds is None:
+                    continue
+                x1, y1, x2, y2 = (int(v) for v in bounds)
+                w = x2 - x1
+                h = y2 - y1
+                if w <= 0 or h <= 0:
+                    continue
+                if window_xywh is not None and is_oversized_uia_rect(
+                    (x1, y1, w, h), window_xywh
+                ):
+                    continue
+                _label, live_name, live_value = _element_label_parts(element)
+                ct = control_type_token_from_id(
+                    _element_control_type(element, cached=False)
+                )
+                out.append(
+                    (
+                        (x1, y1, w, h),
+                        str(live_name or ""),
+                        str(live_value or ""),
+                        str(ct or ""),
+                    )
+                )
+            finally:
+                _com_release(element)
+        return out
+    except Exception:
+        return []
+    finally:
+        _com_release(found)
+        _com_release(and_cond)
+        _com_release(name_cond)
+        _com_release(type_cond)
+        _com_release(root)
+        _com_release(automation)
+        if initialized_here:
+            try:
+                ole32.CoUninitialize()
+            except Exception:
+                pass
+
+
+def find_uia_elements_by_name(
+    hwnd: int,
+    name: str,
+    *,
+    control_type_id: int | None = None,
+    timeout_s: float = 2.5,
+) -> list[tuple[RectXywh, str, str, str]]:
+    """FindAll under ``hwnd``: Name=``name`` (optional ControlType AND).
+
+    Returns ``[(screen_xywh, live_name, live_value, control_type_token), ...]``.
+    Zero/oversized rects are dropped. Use the **raw** (pre-lookalike-fold) Name
+    for the COM PropertyCondition. Marshals onto the UIA worker thread.
+    """
+    if os.name != "nt" or not int(hwnd or 0) or not str(name or "").strip():
+        return []
+    from src.recorder.uia_thread import uia_call
+
+    try:
+        result = uia_call(
+            _find_uia_elements_by_name_impl,
+            int(hwnd),
+            str(name),
+            int(control_type_id) if control_type_id is not None else None,
+            timeout_s=float(timeout_s),
+        )
+    except Exception:
+        return []
+    if not isinstance(result, list):
+        return []
+    cleaned: list[tuple[RectXywh, str, str, str]] = []
+    for item in result:
+        if (
+            isinstance(item, tuple)
+            and len(item) == 4
+            and isinstance(item[0], tuple)
+            and len(item[0]) == 4
+        ):
+            cleaned.append(item)  # type: ignore[arg-type]
+    return cleaned
+
+
+def control_type_id_from_token(token: str | None) -> int | None:
+    """Inverse of :func:`control_type_token_from_id` for Name FindAll filters.
+
+    ``\"text\"`` returns ``None`` so TreeItem/ListItem hubs recorded as generic
+    文字 are not excluded by a Text-only PropertyCondition.
+    """
+    key = str(token or "").strip().lower()
+    if not key or key == "text":
+        return None
+    return {
+        "button": _UIA_BUTTON_CONTROL_TYPE_ID,
+        "custom": _UIA_CUSTOM_CONTROL_TYPE_ID,
+        "check_box": _UIA_CHECKBOX_CONTROL_TYPE_ID,
+        "hyperlink": _UIA_HYPERLINK_CONTROL_TYPE_ID,
+        "list_item": _UIA_LISTITEM_CONTROL_TYPE_ID,
+        "menu_item": _UIA_MENUITEM_CONTROL_TYPE_ID,
+        "radio_button": _UIA_RADIOBUTTON_CONTROL_TYPE_ID,
+        "tab_item": _UIA_TABITEM_CONTROL_TYPE_ID,
+        "tree_item": _UIA_TREEITEM_CONTROL_TYPE_ID,
+        "data_item": _UIA_DATAITEM_CONTROL_TYPE_ID,
+        "split_button": _UIA_SPLITBUTTON_CONTROL_TYPE_ID,
+        "header": _UIA_HEADER_CONTROL_TYPE_ID,
+        "header_item": _UIA_HEADERITEM_CONTROL_TYPE_ID,
+    }.get(key)
+
+
 def snapshot_uia_screen(
     hwnd: int,
     *,

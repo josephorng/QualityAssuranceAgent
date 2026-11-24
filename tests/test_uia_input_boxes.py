@@ -22,6 +22,7 @@ from src.recorder.uia_input_boxes import (
     _UIA_SPLITBUTTON_CONTROL_TYPE_ID,
     _UIA_TABITEM_CONTROL_TYPE_ID,
     _UIA_TEXT_CONTROL_TYPE_ID,
+    _UIA_TREEITEM_CONTROL_TYPE_ID,
     attach_findall_timing,
     bind_findall_timing,
     canonicalize_uia_shell_status_label,
@@ -31,7 +32,9 @@ from src.recorder.uia_input_boxes import (
     enrich_uia_snapshot_with_efp_scan,
     filter_uia_input_rects,
     filter_uia_scrollbar_rects,
+    control_type_id_from_token,
     find_uia_data_item_by_name,
+    find_uia_elements_by_name,
     is_oversized_uia_rect,
     is_uia_input_container_rect,
     is_usable_uia_landmark_label,
@@ -129,6 +132,19 @@ def test_find_uia_data_item_by_name_rejects_empty_inputs() -> None:
     assert find_uia_data_item_by_name(0, "N15") is None
     assert find_uia_data_item_by_name(123, "") is None
     assert find_uia_data_item_by_name(123, "   ") is None
+
+
+def test_find_uia_elements_by_name_rejects_empty_inputs() -> None:
+    assert find_uia_elements_by_name(0, "龜速的網域 (3)") == []
+    assert find_uia_elements_by_name(123, "") == []
+    assert find_uia_elements_by_name(123, "   ") == []
+
+
+def test_control_type_id_from_token_skips_generic_text() -> None:
+    assert control_type_id_from_token("text") is None
+    assert control_type_id_from_token("") is None
+    assert control_type_id_from_token("tree_item") == _UIA_TREEITEM_CONTROL_TYPE_ID
+    assert control_type_id_from_token("button") == _UIA_BUTTON_CONTROL_TYPE_ID
 
 
 def test_snapshot_efp_cover_ignores_pane_inputs_requires_agreeing_text() -> None:

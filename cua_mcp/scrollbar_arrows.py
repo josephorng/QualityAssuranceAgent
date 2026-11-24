@@ -1087,3 +1087,129 @@ def point_from_scrollbar_percent(
         return bx + bw // 2, y
     x = bx + int(round(pct / 100 * max(0, bw - 1)))
     return x, by + bh // 2
+
+
+# Pixel-thumb: inset ends by ~cross thickness (arrow caps) and trim cross borders.
+_PIXEL_THUMB_END_INSET_FRAC = 1.0
+_PIXEL_THUMB_CROSS_TRIM_FRAC = 0.2
+_PIXEL_THUMB_MIN_CONTRAST = 12.0
+_PIXEL_THUMB_MIN_RUN_FRAC = 0.04
+
+
+def estimate_scrollbar_thumb_center_from_bgr(
+    bgr: Any,
+    scrollbar_xywh: tuple[int, int, int, int] | list[int],
+    *,
+    screen_origin: tuple[int, int] = (0, 0),
+) -> tuple[int, int] | None:
+    """Estimate the live thumb center from a BGR crop of the scrollbar track.
+
+    ``scrollbar_xywh`` is in screen coords. ``screen_origin`` is the screen
+    position of ``bgr[0, 0]``. Insets both ends by ~cross-axis thickness (arrow
+    caps) and finds the contiguous 1D run that contrasts with the track
+    background. Returns screen ``(x, y)`` or ``None`` on low contrast / empty crop.
+    """
+    import numpy as np
+
+    sx, sy, sw, sh = (int(v) for v in scrollbar_xywh[:4])
+    if sw <= 0 or sh <= 0:
+        return None
+    ox, oy = int(screen_origin[0]), int(screen_origin[1])
+    lx = sx - ox
+    ly = sy - oy
+    arr = np.asarray(bgr)
+    if arr.ndim != 3 or arr.shape[0] <= 0 or arr.shape[1] <= 0:
+        return None
+    img_h, img_w = int(arr.shape[0]), int(arr.shape[1])
+    x0 = max(0, lx)
+    y0 = max(0, ly)
+    x1 = min(img_w, lx + sw)
+    y1 = min(img_h, ly + sh)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    crop = arr[y0:y1, x0:x1]
+    ch, cw = int(crop.shape[0]), int(crop.shape[1])
+    if ch < 4 or cw < 2:
+        return None
+    vertical = ch >= cw
+    thickness = cw if vertical else ch
+    end_inset = max(1, int(round(thickness * _PIXEL_THUMB_END_INSET_FRAC)))
+    cross_trim = max(0, int(round(thickness * _PIXEL_THUMB_CROSS_TRIM_FRAC)))
+    if vertical:
+        y_a = min(end_inset, ch // 3)
+        y_b = max(y_a + 1, ch - end_inset)
+        x_a = min(cross_trim, max(0, cw // 2 - 1))
+        x_b = max(x_a + 1, cw - cross_trim)
+        track = crop[y_a:y_b, x_a:x_b]
+        if track.size == 0 or track.shape[0] < 3:
+            return None
+        # Median BGR per scanline along the main axis.
+        profile = np.median(track.reshape(track.shape[0], -1, 3), axis=1)
+        axis_origin = y_a
+    else:
+        x_a = min(end_inset, cw // 3)
+        x_b = max(x_a + 1, cw - end_inset)
+        y_a = min(cross_trim, max(0, ch // 2 - 1))
+        y_b = max(y_a + 1, ch - cross_trim)
+        track = crop[y_a:y_b, x_a:x_b]
+        if track.size == 0 or track.shape[1] < 3:
+            return None
+        profile = np.median(track.reshape(-1, track.shape[1], 3), axis=0)
+        axis_origin = x_a
+
+    n = int(profile.shape[0])
+    if n < 3:
+        return None
+    # Background ≈ modal-ish: median of all samples (works when thumb < ~50%).
+    # When thumb is majority, the minority run is empty track and we take complement.
+    bg = np.median(profile, axis=0)
+    deltas = np.linalg.norm(profile.astype(np.float32) - bg.astype(np.float32), axis=1)
+    contrast = float(np.max(deltas) - np.min(deltas))
+    if contrast < _PIXEL_THUMB_MIN_CONTRAST:
+        return None
+    threshold = float(np.median(deltas) + 0.35 * contrast)
+    mask = deltas >= threshold
+    if not bool(np.any(mask)):
+        # Thumb is majority color: treat below-threshold as empty track, complement = thumb.
+        mask = deltas < float(np.median(deltas) + 0.15 * contrast)
+        mask = ~mask if bool(np.any(~mask)) else mask
+    if not bool(np.any(mask)):
+        return None
+
+    # Longest contiguous True run.
+    best_start = 0
+    best_len = 0
+    run_start = 0
+    in_run = False
+    for i, flag in enumerate(mask.tolist()):
+        if flag:
+            if not in_run:
+                run_start = i
+                in_run = True
+        elif in_run:
+            run_len = i - run_start
+            if run_len > best_len:
+                best_len = run_len
+                best_start = run_start
+            in_run = False
+    if in_run:
+        run_len = n - run_start
+        if run_len > best_len:
+            best_len = run_len
+            best_start = run_start
+    min_run = max(2, int(round(n * _PIXEL_THUMB_MIN_RUN_FRAC)))
+    if best_len < min_run:
+        return None
+    # If the "thumb" covers nearly everything, midpoint of interior is safer.
+    if best_len > int(0.85 * n):
+        mid = axis_origin + n // 2
+    else:
+        mid = axis_origin + best_start + best_len // 2
+
+    if vertical:
+        screen_x = sx + cw // 2
+        screen_y = sy + int(mid)
+    else:
+        screen_x = sx + int(mid)
+        screen_y = sy + ch // 2
+    return screen_x, screen_y

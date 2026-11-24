@@ -8,7 +8,10 @@ from typing import Any
 
 from cua_mcp import hand_tools
 from cua_mcp.instruction_offset import extract_track_percent
-from cua_mcp.scrollbar_arrows import point_from_scrollbar_percent
+from cua_mcp.scrollbar_arrows import (
+    estimate_scrollbar_thumb_center_from_bgr,
+    point_from_scrollbar_percent,
+)
 from cua_mcp.select_mouse_target import find_mouse_point, resolve_mouse_point
 from cua_mcp.visual_mouse import resolve_visual_mouse_point
 from cua_mcp.storage import store_clipboard_text, store_image, store_text, _current_run_paths
@@ -307,6 +310,144 @@ def _consume_pinned_scrollbar_end_repair(
             pass
 
 
+def _hwnd_for_scrollbar_drag_start(
+    start_click_window: dict | None,
+    x: int,
+    y: int,
+) -> int | None:
+    """Resolve a live hwnd for thumb lookup from click_window or cursor point."""
+    try:
+        from src.recorder.window_snapshot import (
+            find_matching_click_window,
+            window_at_point,
+        )
+    except Exception:
+        find_matching_click_window = None  # type: ignore[assignment]
+        window_at_point = None  # type: ignore[assignment]
+    if find_matching_click_window is not None and start_click_window is not None:
+        try:
+            live = find_matching_click_window(start_click_window)
+            if live is not None and int(live.hwnd or 0):
+                return int(live.hwnd)
+        except Exception:
+            pass
+        try:
+            hwnd = int(start_click_window.get("hwnd") or 0)
+            if hwnd:
+                return hwnd
+        except Exception:
+            pass
+    if window_at_point is not None:
+        try:
+            win = window_at_point(int(x), int(y))
+            if win is not None and int(win.hwnd or 0):
+                return int(win.hwnd)
+        except Exception:
+            pass
+    return None
+
+
+def _grab_scrollbar_region_bgr(
+    scrollbar_xywh: tuple[int, int, int, int],
+) -> tuple[Any, tuple[int, int]] | None:
+    """Grab a padded screen crop covering ``scrollbar_xywh`` as BGR + origin."""
+    try:
+        import mss
+        import numpy as np
+    except Exception:
+        return None
+    sx, sy, sw, sh = (int(v) for v in scrollbar_xywh[:4])
+    if sw <= 0 or sh <= 0:
+        return None
+    pad = 2
+    left = sx - pad
+    top = sy - pad
+    width = sw + 2 * pad
+    height = sh + 2 * pad
+    try:
+        with mss.mss() as sct:
+            shot = sct.grab(
+                {"left": left, "top": top, "width": width, "height": height}
+            )
+            # mss BGRA → BGR
+            bgra = np.asarray(shot, dtype=np.uint8)
+            if bgra.ndim != 3 or bgra.shape[2] < 3:
+                return None
+            bgr = bgra[:, :, :3].copy()
+            return bgr, (left, top)
+    except Exception:
+        return None
+
+
+def _override_scrollbar_drag_start_to_live_thumb(
+    x1: int,
+    y1: int,
+    start_meta: dict[str, Any],
+    *,
+    start_instruction: str,
+    start_click_window: dict | None,
+) -> tuple[int, int, dict[str, Any]]:
+    """Prefer live thumb center over recorded start track percent for drag press.
+
+    Falls back to UIA thumb → pixel estimate → existing ``(x1, y1)``. Keeps
+    ``target_bbox`` as the full scrollbar track. Click/move_mouse paths are
+    unchanged (this runs only from ``_drag``).
+    """
+    meta = dict(start_meta)
+    if meta.get("class_name") != "scrollbar":
+        return x1, y1, meta
+    if extract_track_percent(start_instruction) is None:
+        return x1, y1, meta
+    pinned_bbox = _bbox_tuple_from_meta(meta)
+    if pinned_bbox is None:
+        return x1, y1, meta
+
+    source = "track_percent"
+    thumb_xy: tuple[int, int] | None = None
+    hwnd = _hwnd_for_scrollbar_drag_start(start_click_window, x1, y1)
+    if hwnd is not None:
+        try:
+            from src.recorder.uia_input_boxes import find_uia_scrollbar_thumb_center
+
+            thumb_xy = find_uia_scrollbar_thumb_center(hwnd, pinned_bbox)
+            if thumb_xy is not None:
+                source = "uia_thumb"
+        except Exception:
+            thumb_xy = None
+
+    if thumb_xy is None:
+        grabbed = _grab_scrollbar_region_bgr(pinned_bbox)
+        if grabbed is not None:
+            bgr, origin = grabbed
+            try:
+                thumb_xy = estimate_scrollbar_thumb_center_from_bgr(
+                    bgr, pinned_bbox, screen_origin=origin
+                )
+                if thumb_xy is not None:
+                    source = "pixel_thumb"
+            except Exception:
+                thumb_xy = None
+
+    if thumb_xy is None:
+        meta["start_point_source"] = source
+        return x1, y1, meta
+
+    nx, ny = int(thumb_xy[0]), int(thumb_xy[1])
+    meta["resolved_center"] = {"x": nx, "y": ny}
+    meta["start_point_source"] = source
+    try:
+        from cua_mcp.select_mouse_target import _log_info
+
+        _log_info(
+            "drag scrollbar start overridden to live thumb "
+            f"source={source} from=[{x1},{y1}] to=[{nx},{ny}] "
+            f"bbox={list(pinned_bbox)}"
+        )
+    except Exception:
+        pass
+    return nx, ny, meta
+
+
 async def _drag(
     start_instruction: str,
     destination_instruction: str,
@@ -341,6 +482,13 @@ async def _drag(
             )
         else:
             x2, y2, end_meta = await resolve_visual_mouse_point(destination_instruction)
+        x1, y1, start_meta = _override_scrollbar_drag_start_to_live_thumb(
+            x1,
+            y1,
+            start_meta,
+            start_instruction=start_instruction,
+            start_click_window=start_click_window,
+        )
         default_kind = "visual_mouse_target"
     else:
         x1, y1, start_meta = await resolve_mouse_point(
@@ -373,6 +521,13 @@ async def _drag(
                 nearby_objects=destination_nearby_objects,
                 click_window=destination_click_window,
             )
+        x1, y1, start_meta = _override_scrollbar_drag_start_to_live_thumb(
+            x1,
+            y1,
+            start_meta,
+            start_instruction=start_instruction,
+            start_click_window=start_click_window,
+        )
         default_kind = "mouse_target"
     result = _drag_at_points(x1, y1, x2, y2, duration=duration, button=button)
     merged: dict[str, Any] = dict(result)

@@ -2172,6 +2172,67 @@ def _on_same_scrollbar_line(thumb: ScreenXyxy, button: ScreenXyxy) -> bool:
     return _cross_axis_overlap_frac(thumb, button) >= _SCROLLBAR_LINE_OVERLAP_FRAC
 
 
+def _xywh_to_xyxy_screen(box: RectXywh) -> ScreenXyxy:
+    x, y, w, h = (int(v) for v in box[:4])
+    return (x, y, x + w, y + h)
+
+
+def _xyxy_center(box: ScreenXyxy) -> tuple[int, int]:
+    x1, y1, x2, y2 = (int(v) for v in box[:4])
+    return (x1 + x2) // 2, (y1 + y2) // 2
+
+
+def match_scrollbar_thumb_center(
+    scrollbar_xywh: RectXywh,
+    thumb_rects_xyxy: list[ScreenXyxy],
+) -> tuple[int, int] | None:
+    """Pick the live thumb center aligned with ``scrollbar_xywh``, or ``None``.
+
+    Accepts any Thumb rect on the same line that is strictly shorter than the
+    full track on the main axis (name gates are not applied — inside a known
+    scrollbar bbox empty-named Win32/Chromium thumbs are valid).
+    """
+    sx, sy, sw, sh = (int(v) for v in scrollbar_xywh[:4])
+    if sw <= 0 or sh <= 0:
+        return None
+    bar = _xywh_to_xyxy_screen((sx, sy, sw, sh))
+    vertical = sh >= sw
+    bar_main = sh if vertical else sw
+    best: ScreenXyxy | None = None
+    best_key: tuple[float, float, int] | None = None
+    for raw in thumb_rects_xyxy:
+        thumb = (
+            int(raw[0]),
+            int(raw[1]),
+            int(raw[2]),
+            int(raw[3]),
+        )
+        tw = int(thumb[2]) - int(thumb[0])
+        th = int(thumb[3]) - int(thumb[1])
+        if tw <= 0 or th <= 0:
+            continue
+        thumb_main = th if vertical else tw
+        if thumb_main >= bar_main:
+            continue
+        if not _on_same_scrollbar_line(bar, thumb):
+            continue
+        inter = _xyxy_intersection_area(bar, thumb)
+        thumb_area = float(tw * th)
+        if thumb_area <= 0 or inter / thumb_area < 0.5:
+            continue
+        key = (
+            _cross_axis_overlap_frac(bar, thumb),
+            inter / thumb_area,
+            thumb_main,
+        )
+        if best_key is None or key > best_key:
+            best_key = key
+            best = thumb
+    if best is None:
+        return None
+    return _xyxy_center(best)
+
+
 def _scrollbar_control_already_covers(control: ScreenXyxy, part: ScreenXyxy) -> bool:
     """True when ``part`` is the thumb inside an already-found ScrollBar control."""
     part_area = _xyxy_area(part)
@@ -3756,6 +3817,137 @@ def control_type_id_from_token(token: str | None) -> int | None:
         "header": _UIA_HEADER_CONTROL_TYPE_ID,
         "header_item": _UIA_HEADERITEM_CONTROL_TYPE_ID,
     }.get(key)
+
+
+# Cap Thumb FindAll hits so a huge tree cannot blow memory during drag start.
+_THUMB_FINDALL_MAX_HITS = 64
+
+
+def _find_uia_scrollbar_thumb_rects_impl(hwnd: int) -> list[ScreenXyxy]:
+    """Worker-thread FindAll: ControlType=Thumb under ``hwnd``."""
+    if not int(hwnd or 0):
+        return []
+
+    ole32, initialized_here = _coinitialize_uia()
+    if ole32 is None:
+        return []
+
+    automation: ctypes.c_void_p | None = None
+    root: ctypes.c_void_p | None = None
+    type_cond: ctypes.c_void_p | None = None
+    found: ctypes.c_void_p | None = None
+    out: list[ScreenXyxy] = []
+    try:
+        automation = _create_uia_automation()
+        if automation is None:
+            return []
+        root = _element_from_handle(automation, int(hwnd))
+        if root is None:
+            return []
+        type_cond = _create_control_type_condition(
+            automation, _UIA_THUMB_CONTROL_TYPE_ID
+        )
+        if type_cond is None:
+            return []
+
+        find_all = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        )(_com_vtable(root, _UIA_FIND_ALL + 1)[_UIA_FIND_ALL])
+        found_ptr = ctypes.c_void_p()
+        hr = find_all(
+            root,
+            _TREE_SCOPE_DESCENDANTS,
+            type_cond,
+            ctypes.byref(found_ptr),
+        )
+        if hr != _S_OK or not found_ptr:
+            return []
+        found = found_ptr
+        get_length = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_int),
+        )(_com_vtable(found, _UIA_ARRAY_GET_LENGTH + 1)[_UIA_ARRAY_GET_LENGTH])
+        get_element = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_void_p),
+        )(_com_vtable(found, _UIA_ARRAY_GET_ELEMENT + 1)[_UIA_ARRAY_GET_ELEMENT])
+        length = ctypes.c_int(0)
+        if get_length(found, ctypes.byref(length)) != _S_OK:
+            return []
+        hit_count = min(int(length.value), _THUMB_FINDALL_MAX_HITS)
+        for index in range(hit_count):
+            elem_ptr = ctypes.c_void_p()
+            if get_element(found, index, ctypes.byref(elem_ptr)) != _S_OK or not elem_ptr:
+                continue
+            element = elem_ptr
+            try:
+                bounds = _element_bounding_xyxy(element)
+                if bounds is None:
+                    continue
+                x1, y1, x2, y2 = (int(v) for v in bounds)
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                out.append((x1, y1, x2, y2))
+            finally:
+                _com_release(element)
+        return out
+    except Exception:
+        return []
+    finally:
+        _com_release(found)
+        _com_release(type_cond)
+        _com_release(root)
+        _com_release(automation)
+        if initialized_here:
+            try:
+                ole32.CoUninitialize()
+            except Exception:
+                pass
+
+
+def find_uia_scrollbar_thumb_center(
+    hwnd: int,
+    scrollbar_xywh: RectXywh,
+    *,
+    timeout_s: float = 2.5,
+) -> tuple[int, int] | None:
+    """Return the live Thumb center for ``scrollbar_xywh`` under ``hwnd``.
+
+    Finds ControlType=Thumb descendants and picks the one aligned with the
+    scrollbar track (any Thumb inside a known bar — no name/AutomationId gate).
+    Marshals onto the UIA worker thread. Returns ``None`` when no thumb matches.
+    """
+    sx, sy, sw, sh = (int(v) for v in scrollbar_xywh[:4])
+    if os.name != "nt" or not int(hwnd or 0) or sw <= 0 or sh <= 0:
+        return None
+    from src.recorder.uia_thread import uia_call
+
+    try:
+        result = uia_call(
+            _find_uia_scrollbar_thumb_rects_impl,
+            int(hwnd),
+            timeout_s=float(timeout_s),
+        )
+    except Exception:
+        return None
+    if not isinstance(result, list):
+        return None
+    thumbs: list[ScreenXyxy] = []
+    for item in result:
+        if (
+            isinstance(item, tuple)
+            and len(item) == 4
+            and all(isinstance(v, (int, float)) for v in item)
+        ):
+            thumbs.append((int(item[0]), int(item[1]), int(item[2]), int(item[3])))
+    return match_scrollbar_thumb_center((sx, sy, sw, sh), thumbs)
 
 
 def snapshot_uia_screen(

@@ -652,6 +652,27 @@ def test_uia_snapshot_image_local_strips_shell_status_from_old_texts() -> None:
     assert texts == [((10, 10, 70, 20), "Google Chrome", "button")]
 
 
+def test_match_scrollbar_thumb_center_picks_aligned_shorter_thumb() -> None:
+    from src.recorder.uia_input_boxes import match_scrollbar_thumb_center
+
+    # Vertical bar at x=900; live thumb mid-track.
+    bar = (900, 160, 16, 840)
+    thumb = (900, 400, 916, 520)
+    wrong_column = (200, 400, 216, 520)
+    too_tall = (900, 160, 916, 1000)
+    center = match_scrollbar_thumb_center(bar, [wrong_column, too_tall, thumb])
+    assert center == (908, 460)
+
+
+def test_match_scrollbar_thumb_center_rejects_edge_clip_only() -> None:
+    from src.recorder.uia_input_boxes import match_scrollbar_thumb_center
+
+    bar = (900, 160, 16, 840)
+    # Only clips the right edge of the bar column.
+    clipped = (910, 400, 940, 520)
+    assert match_scrollbar_thumb_center(bar, [clipped]) is None
+
+
 def test_scrollbar_thumb_unions_same_line_arrow_buttons() -> None:
     from src.recorder.uia_input_boxes import compose_scrollbar_screen_rects
 

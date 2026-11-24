@@ -262,6 +262,10 @@ sequenceDiagram
 
 Name FindAll recovery of the same unique hub still returns `hit` and still runs this subtarget path. Excel `uia_data_item_name_hit` does **not** — it commits the Name leaf and skips the twin.
 
+### Soft EFP after empty UIA + icon twin
+
+When UIA-first returns an empty snapshot and the twin rewrites the anchor to e.g. `「展開節點」圖示`, geometry EFP may still Name/Value-match the tree row under the glyph. Commit **keeps the ELEMENT/icon pool box** (click the glyph); leaf-bbox snap remains only for coarse TEXT/INPUT/DataItem hubs (Excel Value cells / wide rows).
+
 ---
 
 ## Same-run UIA replay repair (YOLO → UIA)

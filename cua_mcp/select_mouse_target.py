@@ -4911,6 +4911,41 @@ def _detection_from_efp_leaf_bbox(
     )
 
 
+def _leaf_bbox_contains_point(
+    leaf_bbox: tuple[int, int, int, int],
+    x: int,
+    y: int,
+) -> bool:
+    """True when ``(x, y)`` lies inside leaf ``(x, y, w, h)`` (inclusive edges)."""
+    lx, ly, lw, lh = (int(v) for v in leaf_bbox)
+    if lw <= 0 or lh <= 0:
+        return False
+    return lx <= int(x) <= lx + lw and ly <= int(y) <= ly + lh
+
+
+def _prefer_pool_over_efp_leaf(
+    pool_det: UiDetection | None,
+    leaf_bbox: tuple[int, int, int, int] | None,
+) -> bool:
+    """Keep a visual glyph pool box instead of snapping to the EFP leaf.
+
+    Name/Value EFP on a tree-row chrome icon (``展開節點`` etc.) still reports
+    the row leaf; snapping would click the label instead of the glyph. Prefer
+    the pool det when it is an ELEMENT/icon whose center sits inside the leaf.
+    Coarse TEXT/INPUT/DataItem hubs keep leaf snap.
+    """
+    if pool_det is None or leaf_bbox is None:
+        return False
+    is_element = (
+        int(pool_det.class_id) == YOLO_CLASS_ELEMENT
+        or str(pool_det.class_name or "").strip().lower() == "element"
+    )
+    has_icons = bool(pool_det.icons)
+    if not is_element and not has_icons:
+        return False
+    return _leaf_bbox_contains_point(leaf_bbox, int(pool_det.cx), int(pool_det.cy))
+
+
 def _commit_geometry_efp_hit(
     *,
     pool_det: UiDetection | None,
@@ -4922,9 +4957,25 @@ def _commit_geometry_efp_hit(
     recorded_value: str,
     via: str,
 ) -> tuple[UiDetection | None, tuple[int, int] | None, str]:
-    """Commit a Name/Value EFP match, preferring live leaf bbox over pool geometry."""
+    """Commit a Name/Value EFP match.
+
+    Prefer live EFP leaf bbox over coarse pool geometry (Excel Value cells /
+    wide tree rows). Keep an ELEMENT/icon pool box when its center sits inside
+    the leaf — EFP only verified the row; the glyph is the click target.
+    """
     rn = str(recorded_name or "").strip()
     rv = str(recorded_value or "").strip()
+    if leaf_bbox is not None and _prefer_pool_over_efp_leaf(pool_det, leaf_bbox):
+        assert pool_det is not None
+        keep_via = f"{via}_keep_pool"
+        _log_info(
+            "move_mouse landmark_geometry_efp hit "
+            f"center=[{pool_det.cx},{pool_det.cy}] "
+            f"name={live_name!r} value={live_value!r} "
+            f"recorded_name={rn!r} recorded_value={rv!r} "
+            f"leaf_bbox={list(leaf_bbox)!r} via={keep_via}"
+        )
+        return pool_det, (int(pool_det.cx), int(pool_det.cy)), "hit"
     if leaf_bbox is not None:
         snapped = _detection_from_efp_leaf_bbox(
             leaf_bbox,

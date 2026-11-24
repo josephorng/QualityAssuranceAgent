@@ -11,6 +11,7 @@ from cua_mcp.select_mouse_target import (
     _DATA_ITEM_EFP_STEP_X,
     _DATA_ITEM_EFP_STEP_Y,
     _chebyshev_ring_offsets,
+    _commit_geometry_efp_hit,
     _distance_synth_to_det_bbox,
     _efp_gate_required_for_hub,
     _efp_name_value_matches,
@@ -18,9 +19,11 @@ from cua_mcp.select_mouse_target import (
     _findall_pool_near_synth,
     _keep_uia_first_on_subtarget_efp_soft_miss,
     _label_similarity,
+    _leaf_bbox_contains_point,
     _mouse_select_fields_from_ocr_fallback_instruction,
     _order_geometry_efp_candidates,
     _phrase_match_pool,
+    _prefer_pool_over_efp_leaf,
     _preferred_yolo_class_for_near_synth,
     _recorded_efp_agrees_with_hub,
     _recorded_efp_present,
@@ -1573,6 +1576,110 @@ def test_uia_first_oversize_overlay_does_not_win_efp_even_if_name_matches() -> N
     assert reason == "landmark_efp_hit"
     assert chosen is hub
     assert chosen is not overlay
+
+
+def test_prefer_pool_over_efp_leaf_helpers() -> None:
+    leaf = (228, 108, 125, 24)
+    assert _leaf_bbox_contains_point(leaf, 238, 119) is True
+    assert _leaf_bbox_contains_point(leaf, 290, 120) is True
+    assert _leaf_bbox_contains_point(leaf, 100, 119) is False
+
+    glyph = UiDetection(
+        bbox=(233, 113, 10, 11),
+        cx=238,
+        cy=119,
+        class_id=YOLO_CLASS_ELEMENT,
+        class_name="element",
+        icons=[{"chinese_id": "展開節點"}],
+        source="yolo",
+    )
+    text_hub = UiDetection(
+        bbox=(228, 108, 125, 24),
+        cx=290,
+        cy=120,
+        class_id=YOLO_CLASS_TEXT,
+        class_name="text",
+        text="龜速的網域 (3)|1",
+        source="uia",
+    )
+    assert _prefer_pool_over_efp_leaf(glyph, leaf) is True
+    assert _prefer_pool_over_efp_leaf(text_hub, leaf) is False
+    # Glyph center outside leaf → still snap (not row-chrome-on-leaf).
+    outside = UiDetection(
+        bbox=(50, 50, 10, 10),
+        cx=55,
+        cy=55,
+        class_id=YOLO_CLASS_ELEMENT,
+        class_name="element",
+        icons=[{"chinese_id": "展開節點"}],
+        source="yolo",
+    )
+    assert _prefer_pool_over_efp_leaf(outside, leaf) is False
+
+
+def test_commit_keeps_icon_pool_inside_efp_leaf() -> None:
+    """Tree-row chrome icon: Name/Value verifies row; click stays on glyph."""
+    glyph = UiDetection(
+        bbox=(233, 113, 10, 11),
+        cx=238,
+        cy=119,
+        class_id=YOLO_CLASS_ELEMENT,
+        class_name="element",
+        icons=[{"chinese_id": "展開節點"}],
+        source="yolo",
+    )
+    leaf_bbox = (228, 108, 125, 24)
+    det, point, reason = _commit_geometry_efp_hit(
+        pool_det=glyph,
+        leaf_bbox=leaf_bbox,
+        live_name="龜速的網域 (3)",
+        live_value="1",
+        probe_xy=(238, 119),
+        recorded_name="龜速的網域 (3)",
+        recorded_value="1",
+        via="pool",
+    )
+    assert reason == "hit"
+    assert det is glyph
+    assert point == (238, 119)
+
+
+def test_verify_keeps_expand_node_icon_instead_of_leaf_snap() -> None:
+    """Soft-EFP twin path: probe 展開節點 → match row Name/Value → keep icon."""
+    glyph = UiDetection(
+        bbox=(233, 113, 10, 11),
+        cx=238,
+        cy=119,
+        class_id=YOLO_CLASS_ELEMENT,
+        class_name="element",
+        icons=[{"chinese_id": "展開節點"}],
+        source="yolo",
+    )
+    leaf_bbox = (228, 108, 125, 24)
+
+    def probe(x: int, y: int):
+        if (x, y) == (238, 119):
+            return (
+                "龜速的網域 (3)",
+                leaf_bbox,
+                "tree_item",
+                "龜速的網域 (3)",
+                "1",
+            )
+        return ("other", None, "text", "other", "")
+
+    det, point, reason = _verify_geometry_candidates_with_efp(
+        [glyph],
+        synth=(238, 119),
+        geom_det=None,
+        recorded_name="龜速的網域 (3)",
+        recorded_value="1",
+        point_probe_fn=probe,
+    )
+    assert reason == "hit"
+    assert det is glyph
+    assert point == (238, 119)
+    assert det.bbox != leaf_bbox
 
 
 def test_verify_snaps_hit_to_efp_leaf_bbox() -> None:

@@ -8444,6 +8444,25 @@ def _time_profile_duration_by_kind(
     return round(total, 3) if found else None
 
 
+def _findall_s_from_analysis_or_event(
+    profile: list[Any] | None,
+    event: dict[str, Any] | None,
+) -> float | None:
+    """Recording-time FindAll elapsed: analysis vision entry, else event snapshot."""
+    if isinstance(profile, list):
+        for entry in profile:
+            if not isinstance(entry, dict) or entry.get("kind") != "vision":
+                continue
+            findall_s = _recording_float_seconds(entry.get("findall_s"))
+            if findall_s is not None:
+                return findall_s
+    if isinstance(event, dict):
+        snap = event.get("uia_snapshot")
+        if isinstance(snap, dict):
+            return _recording_float_seconds(snap.get("findall_s"))
+    return None
+
+
 def _render_recording_analysis_timing_html(
     run_root: Path,
     events: list[dict[str, Any]],
@@ -8462,6 +8481,8 @@ def _render_recording_analysis_timing_html(
     instruction_count = 0
     text_choice_sum = 0.0
     text_choice_count = 0
+    findall_sum = 0.0
+    findall_count = 0
     for index, event in enumerate(events):
         event_index = event.get("index")
         if not isinstance(event_index, int):
@@ -8477,6 +8498,7 @@ def _render_recording_analysis_timing_html(
         vision_s = _time_profile_duration_by_kind(profile, "vision")
         text_s = _time_profile_duration_by_kind(profile, "text_choice_llm")
         instruction_s = _time_profile_duration_by_kind(profile, "instruction")
+        findall_s = _findall_s_from_analysis_or_event(profile, event)
         if vision_s is not None:
             vision_sum += vision_s
             vision_count += 1
@@ -8486,11 +8508,15 @@ def _render_recording_analysis_timing_html(
         if instruction_s is not None:
             instruction_sum += instruction_s
             instruction_count += 1
+        if findall_s is not None:
+            findall_sum += findall_s
+            findall_count += 1
         event_rows.append(
             {
                 "index": event_index,
                 "instruction": instruction or "—",
                 "vision": vision_s,
+                "findall": findall_s,
                 "text_choice": text_s,
                 "instruction_s": instruction_s,
             }
@@ -8501,6 +8527,7 @@ def _render_recording_analysis_timing_html(
     )
     has_event_timing = any(
         row["vision"] is not None
+        or row["findall"] is not None
         or row["text_choice"] is not None
         or row["instruction_s"] is not None
         for row in event_rows
@@ -8548,6 +8575,8 @@ def _render_recording_analysis_timing_html(
                     continue
                 category_rows.append((str(label), duration))
 
+    if findall_count:
+        cards.append(("FindAll 合計 (錄製)", _format_seconds_precise(findall_sum)))
     if vision_count:
         cards.append(("視覺合計 (事件)", _format_seconds_precise(vision_sum)))
     if instruction_count:
@@ -8568,6 +8597,7 @@ def _render_recording_analysis_timing_html(
             "<tr>"
             f'<td class="num">{row["index"]}</td>'
             f"<td>{escape(instruction)}</td>"
+            f'<td class="num">{escape(_format_seconds_precise(row["findall"]))}</td>'
             f'<td class="num">{escape(_format_seconds_precise(row["vision"]))}</td>'
             f'<td class="num">{escape(_format_seconds_precise(row["text_choice"]))}</td>'
             f'<td class="num">{escape(_format_seconds_precise(row["instruction_s"]))}</td>'
@@ -8576,7 +8606,8 @@ def _render_recording_analysis_timing_html(
 
     note = (
         '<p class="time-profile-note">'
-        "以下是「錄製分析」過程的耗時：視覺階段（含 UIA / YOLO+OCR 或快取命中）、"
+        "以下是「錄製分析」過程的耗時：FindAll 為錄製當下的 UIA 列舉耗時（寫在 "
+        "uia_snapshot），視覺階段（含 UIA / YOLO+OCR 或快取命中）、"
         "文字選擇 LLM、以及指令生成（決定性規則或 LLM）。"
         "階段時間是 wall-clock；各事件合計在平行執行時可能大於階段時間。"
         "</p>"
@@ -8601,8 +8632,8 @@ def _render_recording_analysis_timing_html(
             '<table class="time-profile-table">'
             "<thead><tr>"
             '<th class="num">#</th><th>指令</th>'
-            '<th class="num">視覺</th><th class="num">文字選擇</th>'
-            '<th class="num">指令</th>'
+            '<th class="num">FindAll</th><th class="num">視覺</th>'
+            '<th class="num">文字選擇</th><th class="num">指令</th>'
             "</tr></thead>"
             f"<tbody>{''.join(table_rows)}</tbody>"
             "</table>"

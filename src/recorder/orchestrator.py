@@ -398,6 +398,18 @@ class _PreparedEvent:
     time_profile: list[dict[str, Any]] = field(default_factory=list)
 
 
+def _findall_s_from_snapshot(snapshot: dict[str, Any] | None) -> float | None:
+    """Recording-time FindAll elapsed from a persisted ``uia_snapshot``."""
+    if not isinstance(snapshot, dict):
+        return None
+    raw = snapshot.get("findall_s")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    if float(raw) < 0:
+        return None
+    return round(float(raw), 3)
+
+
 def _build_event_analysis_time_profile(prepared: _PreparedEvent) -> list[dict[str, Any]]:
     """Per-event analysis phases for ``analysis/event_NNN.json``."""
     profile: list[dict[str, Any]] = []
@@ -412,6 +424,12 @@ def _build_event_analysis_time_profile(prepared: _PreparedEvent) -> list[dict[st
         path = prepared.vision.get("vision_path")
         if isinstance(path, str) and path.strip():
             vision_entry["vision_path"] = path.strip()
+        findall_s = _findall_s_from_snapshot(prepared.event.uia_snapshot)
+        if findall_s is not None:
+            vision_entry["findall_s"] = findall_s
+        end_findall_s = _findall_s_from_snapshot(prepared.event.end_uia_snapshot)
+        if end_findall_s is not None:
+            vision_entry["end_findall_s"] = end_findall_s
         profile.append(vision_entry)
     if prepared.text_choice_seconds is not None:
         profile.append(

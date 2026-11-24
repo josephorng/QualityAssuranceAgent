@@ -2485,24 +2485,12 @@ class RecordingSession:
         # LED yellow only; keep the just-probed EFP Name/Value visible.
         self._emit_uia_status(state="yellow", efp_pending=False)
 
-        from src.recorder.uia_input_boxes import (
-            bind_findall_timing,
-            snapshot_uia_hover_subtree,
-            summarize_findall_timing,
-        )
+        from src.recorder.uia_input_boxes import snapshot_uia_hover_subtree
 
         try:
-            with bind_findall_timing() as findall_samples:
-                value = snapshot_uia_hover_subtree(hwnd, int(x), int(y))
-            total_s, calls, hits = summarize_findall_timing(findall_samples)
-            if calls > 0:
-                run_dir = self._run_dir
-                if run_dir is not None:
-                    self._log(
-                        run_dir,
-                        f"hover FindAll hwnd={hwnd} findall_s={total_s:.3f} "
-                        f"hits={hits}",
-                    )
+            value = snapshot_uia_hover_subtree(hwnd, int(x), int(y))
+            if isinstance(value, dict):
+                self._log_findall_snapshot("hover", hwnd, value)
         except Exception:
             self._release_hover_uia_led_to_readiness(
                 claim_token,
@@ -3956,6 +3944,8 @@ class RecordingSession:
             value = snapshot_uia_screen(host, cursor_xy=cursor_xy)
         except Exception:
             value = None
+        if isinstance(value, dict):
+            self._log_findall_snapshot("typing", host, value)
         paint_red = False
         with self._lock:
             if int(typing_uia_generation) != int(self._typing_uia_generation):
@@ -5353,12 +5343,59 @@ class RecordingSession:
             merged["hwnd"] = incoming.get("hwnd")
         if incoming.get("class_name") and not merged.get("class_name"):
             merged["class_name"] = incoming.get("class_name")
+        # Prefer the newest walk's timing (incoming hover/settle).
+        for key in (
+            "findall_s",
+            "findall_count",
+            "walk_truncated",
+            "walk_stop_reason",
+        ):
+            if key in incoming:
+                merged[key] = incoming.get(key)
+            elif key in ("walk_truncated", "walk_stop_reason"):
+                merged.pop(key, None)
         existing_kind = str(merged.get("cache_kind") or "").strip()
         if existing_kind and existing_kind != "hover":
             merged["cache_kind"] = existing_kind
         else:
             merged["cache_kind"] = "hover"
         return merged
+
+    def _log_findall_snapshot(
+        self,
+        kind: str,
+        hwnd: int,
+        snapshot: dict[str, Any] | None,
+    ) -> None:
+        """Append ``{kind} FindAll … findall_s=…`` to ``record.log`` when stamped."""
+        if not isinstance(snapshot, dict):
+            return
+        raw = snapshot.get("findall_s")
+        if raw is None:
+            return
+        try:
+            findall_s = float(raw)
+        except (TypeError, ValueError):
+            return
+        try:
+            hits = int(snapshot.get("findall_count") or 0)
+        except (TypeError, ValueError):
+            hits = 0
+        extra = ""
+        if snapshot.get("walk_truncated"):
+            reason = str(snapshot.get("walk_stop_reason") or "").strip()
+            extra = (
+                f" truncated=1 stop={reason}" if reason else " truncated=1"
+            )
+        with self._lock:
+            run_dir = self._run_dir
+        if run_dir is None:
+            return
+        self._log(
+            run_dir,
+            f"{kind} FindAll hwnd={int(hwnd)} findall_s={findall_s:.3f} "
+            f"hits={hits}{extra}",
+        )
 
     def _uia_snapshot_matches_click(
         self,
@@ -5651,6 +5688,7 @@ class RecordingSession:
                 continue
             if not isinstance(value, dict):
                 continue
+            self._log_findall_snapshot("seed", hwnd, value)
             snapshot = dict(value)
             snapshot["hwnd"] = hwnd
             class_name = str(win.class_name or "").strip()
@@ -5737,6 +5775,7 @@ class RecordingSession:
             self._emit_uia_status(state="red", after_index=int(after_event_index))
             self._reschedule_idle_efp_from_last_pointer()
             return None
+        self._log_findall_snapshot("settle", hwnd, value)
         snapshot = dict(value)
         snapshot["hwnd"] = hwnd
         class_name = str(_window_class_name(hwnd) or "").strip()
@@ -5955,6 +5994,7 @@ class RecordingSession:
             return None
         if not isinstance(value, dict):
             return None
+        self._log_findall_snapshot("press_miss", hwnd, value)
         snapshot = dict(value)
         snapshot["hwnd"] = hwnd
         return snapshot

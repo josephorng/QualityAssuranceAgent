@@ -22,6 +22,7 @@ from src.recorder.uia_input_boxes import (
     _UIA_SPLITBUTTON_CONTROL_TYPE_ID,
     _UIA_TABITEM_CONTROL_TYPE_ID,
     _UIA_TEXT_CONTROL_TYPE_ID,
+    attach_findall_timing,
     bind_findall_timing,
     canonicalize_uia_shell_status_label,
     compose_uia_input_landmark_label,
@@ -102,6 +103,21 @@ def test_findall_build_cache_slot_and_timing_helpers() -> None:
     assert calls == 2
     assert hits == 15
     assert abs(total_s - 0.175) < 1e-6
+    stamped = attach_findall_timing(
+        {"texts": [{"bbox": [1, 2, 3, 4], "text": "A"}], "inputs": [], "scrollbars": []},
+        samples,
+    )
+    assert stamped is not None
+    assert stamped["findall_s"] == 0.175
+    assert stamped["findall_count"] == 15
+    wall_only = attach_findall_timing(
+        {"texts": [{"bbox": [1, 2, 3, 4], "text": "A"}], "inputs": [1], "scrollbars": []},
+        [],
+        wall_s=0.42,
+    )
+    assert wall_only is not None
+    assert wall_only["findall_s"] == 0.42
+    assert wall_only["findall_count"] == 2
 
 
 def test_find_uia_data_item_by_name_rejects_empty_inputs() -> None:
@@ -147,6 +163,9 @@ def test_snapshot_uia_screen_keeps_expanded_labeled_control_types(monkeypatch) -
             "control_type": "custom",
         },
     ]
+    assert isinstance(snap.get("findall_s"), float)
+    assert snap["findall_s"] >= 0.0
+    assert isinstance(snap.get("findall_count"), int)
 
 
 def test_element_from_point_name_value_extracts_raw_strings(monkeypatch) -> None:

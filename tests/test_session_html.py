@@ -4112,6 +4112,7 @@ def test_write_recording_html_includes_time_profile_tab(tmp_path: Path) -> None:
                         "label": "Vision prep",
                         "duration_seconds": 1.25,
                         "vision_path": "yolo_ocr",
+                        "findall_s": 0.312,
                     },
                     {
                         "kind": "instruction",
@@ -4177,9 +4178,12 @@ def test_write_recording_html_includes_time_profile_tab(tmp_path: Path) -> None:
     assert "各事件時間" in html
     assert "各事件分析耗時" in html
     assert '<th class="num">等待</th>' in html
+    assert '<th class="num">FindAll</th>' in html
     assert '<th class="num">視覺</th>' in html
     assert "平均等待" in html
     assert "等待合計" in html
+    assert "FindAll 合計 (錄製)" in html
+    assert "0.31s" in html
     assert "2.50s" in html
     assert "1.25s" in html
     assert "0.80s" in html

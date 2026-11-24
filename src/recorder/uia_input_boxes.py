@@ -1168,6 +1168,54 @@ def summarize_findall_timing(
     return float(total_s), int(len(samples)), int(total_hits)
 
 
+def attach_findall_timing(
+    snapshot: dict[str, Any] | None,
+    samples: list[dict[str, Any]] | None,
+    *,
+    wall_s: float | None = None,
+) -> dict[str, Any] | None:
+    """Stamp ``findall_s`` / hit counters onto a UIA snapshot dict.
+
+    Prefers summed walk samples when present; otherwise falls back to ``wall_s``
+    so seed/settle/hover always persist an elapsed time even when the enumerate
+    path did not emit samples.
+    """
+    if not isinstance(snapshot, dict):
+        return snapshot
+    total_s, calls, hits = summarize_findall_timing(samples)
+    if calls <= 0:
+        if wall_s is None:
+            return snapshot
+        try:
+            total_s = float(wall_s)
+        except (TypeError, ValueError):
+            return snapshot
+        hits = 0
+        for key in ("texts", "inputs", "scrollbars"):
+            raw = snapshot.get(key)
+            if isinstance(raw, list):
+                hits += len(raw)
+    out = dict(snapshot)
+    out["findall_s"] = round(float(total_s), 3)
+    out["findall_count"] = int(hits)
+    truncated = any(
+        bool(row.get("walk_truncated"))
+        for row in (samples or ())
+        if isinstance(row, dict)
+    )
+    if truncated:
+        out["walk_truncated"] = True
+        reasons = [
+            str(row.get("walk_stop_reason") or "").strip()
+            for row in (samples or ())
+            if isinstance(row, dict)
+        ]
+        reasons = [reason for reason in reasons if reason]
+        if reasons:
+            out["walk_stop_reason"] = reasons[-1]
+    return out
+
+
 _element_from_point_samples: ContextVar[list[float] | None] = ContextVar(
     "element_from_point_samples",
     default=None,
@@ -3158,28 +3206,40 @@ def snapshot_uia_screen(
     Returns ``None`` when the hwnd cannot be queried. An empty tree is still a
     snapshot (analysis must not FindAll again). Marshals onto the UIA worker
     thread when not already running there.
+
+    Successful snapshots include ``findall_s`` (and usually ``findall_count``);
+    truncated walks also stamp ``walk_truncated`` / ``walk_stop_reason``.
     """
     if os.name != "nt" or not int(hwnd or 0):
         return None
     from src.recorder.uia_thread import uia_call
 
     def _run() -> dict[str, object] | None:
-        if cursor_xy is not None:
-            return _snapshot_uia_screen_impl(
-                int(hwnd), cursor_xy=cursor_xy, budgets=budgets
-            )
-        try:
-            inputs, scrollbars, labeled, input_labels = (
-                enumerate_edit_document_scrollbar_screen(
-                    int(hwnd),
-                    cursor_xy=None,
-                    budgets=budgets,
+        started = time.perf_counter()
+        with bind_findall_timing() as samples:
+            if cursor_xy is not None:
+                snap = _snapshot_uia_screen_impl(
+                    int(hwnd), cursor_xy=cursor_xy, budgets=budgets
                 )
-            )
-        except Exception:
-            return None
-        return _snapshot_dict_from_lists(
-            int(hwnd), inputs, scrollbars, labeled, input_labels
+            else:
+                try:
+                    inputs, scrollbars, labeled, input_labels = (
+                        enumerate_edit_document_scrollbar_screen(
+                            int(hwnd),
+                            cursor_xy=None,
+                            budgets=budgets,
+                        )
+                    )
+                except Exception:
+                    snap = None
+                else:
+                    snap = _snapshot_dict_from_lists(
+                        int(hwnd), inputs, scrollbars, labeled, input_labels
+                    )
+        return attach_findall_timing(
+            snap if isinstance(snap, dict) else None,
+            samples,
+            wall_s=time.perf_counter() - started,
         )
 
     try:

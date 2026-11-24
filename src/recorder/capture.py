@@ -824,6 +824,13 @@ _WH_KEYBOARD_LL = 13
 _WH_MOUSE_LL = 14
 _KEYBOARD_RESTART_COOLDOWN_S = 2.0
 
+# Stable HOOKPROC class for probe installs. pynput binds SetWindowsHookExW.argtypes
+# to *its* WINFUNCTYPE subclass; a one-off WINFUNCTYPE() here is rejected as
+# "expected WinFunctionType instance instead of WinFunctionType".
+_LL_HOOKPROC = ctypes.WINFUNCTYPE(
+    ctypes.c_long, ctypes.c_int, ctypes.c_uint, ctypes.c_void_p
+)
+
 
 def _probe_low_level_hook(hook_id: int = _WH_MOUSE_LL) -> tuple[bool, int | None]:
     """Install and remove a low-level hook to detect hook blocking.
@@ -834,10 +841,24 @@ def _probe_low_level_hook(hook_id: int = _WH_MOUSE_LL) -> tuple[bool, int | None
         return True, None
     user32 = ctypes.windll.user32
     kernel32 = ctypes.windll.kernel32
-    hook_proc = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_int, ctypes.c_uint, ctypes.c_void_p)(
-        lambda *_args: 0
-    )
-    hook = user32.SetWindowsHookExW(int(hook_id), hook_proc, None, 0)
+    hook_proc = _LL_HOOKPROC(lambda *_args: 0)
+    set_hook = user32.SetWindowsHookExW
+    prev_argtypes = getattr(set_hook, "argtypes", None)
+    prev_restype = getattr(set_hook, "restype", None)
+    try:
+        # Temporarily own argtypes so our HOOKPROC instance type-checks even
+        # after pynput has bound SetWindowsHookExW to a different HOOKPROC.
+        set_hook.argtypes = (
+            ctypes.c_int,
+            _LL_HOOKPROC,
+            ctypes.c_void_p,
+            ctypes.c_uint,
+        )
+        set_hook.restype = ctypes.c_void_p
+        hook = set_hook(int(hook_id), hook_proc, None, 0)
+    finally:
+        set_hook.argtypes = prev_argtypes
+        set_hook.restype = prev_restype
     if not hook:
         return False, int(kernel32.GetLastError())
     user32.UnhookWindowsHookEx(hook)

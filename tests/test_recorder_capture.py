@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import json
 import threading
 import time
@@ -12,7 +13,10 @@ from src.recorder.capture import (
     _DOUBLE_CLICK_INTERVAL_S,
     _HOLD_THRESHOLD_S,
     _IME_COMMIT_SETTLE_S,
+    _LL_HOOKPROC,
+    _WH_MOUSE_LL,
     _finalize_drag_end_screenshot,
+    _probe_low_level_hook,
 )
 from src.recorder.focus_point import TypingFocus
 from src.recorder.models import hydrate_window_snapshot_debug
@@ -4107,4 +4111,61 @@ def test_uia_miss_password_skips_text_but_restarts_keyboard(tmp_path) -> None:
     assert "uia_focus_value_miss" in restarts
     log_text = (run_dir / "record.log").read_text(encoding="utf-8")
     assert "key_hook_miss_password_unrecoverable" in log_text
+
+
+def test_probe_low_level_hook_tolerates_foreign_hookproc_argtypes() -> None:
+    """pynput binds SetWindowsHookExW.argtypes to its own HOOKPROC class.
+
+    Probing with a different WINFUNCTYPE must not raise
+    ``expected WinFunctionType instance instead of WinFunctionType``.
+    """
+    import os
+
+    if os.name != "nt":
+        return
+
+    # pynput's HOOKPROC signature (different ctypes aliases → different type).
+    wintypes = ctypes.wintypes
+    foreign_hookproc = ctypes.WINFUNCTYPE(
+        wintypes.LPARAM, ctypes.c_int32, wintypes.WPARAM, wintypes.LPARAM
+    )
+    assert foreign_hookproc is not _LL_HOOKPROC
+
+    installed: list[object] = []
+
+    class _SetHook:
+        argtypes = (
+            ctypes.c_int,
+            foreign_hookproc,
+            ctypes.c_void_p,
+            ctypes.c_uint,
+        )
+        restype = ctypes.c_void_p
+
+        def __call__(self, hook_id, proc, hmod, thread_id):
+            # Mimic ctypes type-check against the *current* argtypes binding.
+            expected = self.argtypes[1] if self.argtypes else None
+            if expected is not None and not isinstance(proc, expected):
+                raise TypeError(
+                    "argument 2: TypeError: expected WinFunctionType instance "
+                    "instead of WinFunctionType"
+                )
+            installed.append((hook_id, proc, hmod, thread_id))
+            return 0x1234
+
+    stub = _SetHook()
+
+    def fake_unhook(_hook):
+        return True
+
+    with patch.object(ctypes.windll.user32, "SetWindowsHookExW", stub), patch.object(
+        ctypes.windll.user32, "UnhookWindowsHookEx", fake_unhook
+    ):
+        ok, err = _probe_low_level_hook(_WH_MOUSE_LL)
+
+    assert ok is True
+    assert err is None
+    assert installed and installed[0][0] == _WH_MOUSE_LL
+    # Probe must restore the foreign argtypes it found on entry.
+    assert stub.argtypes[1] is foreign_hookproc
 

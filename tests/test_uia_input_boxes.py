@@ -28,6 +28,7 @@ from src.recorder.uia_input_boxes import (
     compose_uia_input_landmark_label,
     control_type_token_from_id,
     element_from_point_name_value,
+    enrich_uia_snapshot_with_efp_scan,
     filter_uia_input_rects,
     filter_uia_scrollbar_rects,
     find_uia_data_item_by_name,
@@ -35,12 +36,16 @@ from src.recorder.uia_input_boxes import (
     is_uia_input_container_rect,
     is_usable_uia_landmark_label,
     merge_nested_element_boxes,
+    snapshot_efp_label_covered,
     snapshot_uia_screen,
     split_uia_name_value_label,
     summarize_findall_timing,
     uia_label_combine_name_value,
     uia_label_prefer_value,
+    uia_snapshot_covers_efp_at_point,
+    uia_snapshot_has_rich_labels,
     uia_snapshot_image_local,
+    usable_covering_snapshot_text_labels,
 )
 
 
@@ -124,6 +129,148 @@ def test_find_uia_data_item_by_name_rejects_empty_inputs() -> None:
     assert find_uia_data_item_by_name(0, "N15") is None
     assert find_uia_data_item_by_name(123, "") is None
     assert find_uia_data_item_by_name(123, "   ") is None
+
+
+def test_snapshot_efp_cover_ignores_pane_inputs_requires_agreeing_text() -> None:
+    snap = {
+        "window": [0, 0, 400, 300],
+        "inputs": [[0, 0, 400, 300]],
+        "scrollbars": [],
+        "texts": [
+            {"bbox": [350, 280, 390, 295], "text": "遠方分頁"},
+            {"bbox": [100, 100, 220, 124], "text": "龜速的網域 (3)|1"},
+        ],
+    }
+    # Pane covers (150,110) but only the tree label agrees with EFP.
+    assert usable_covering_snapshot_text_labels(snap, (150, 110)) == [
+        "龜速的網域 (3)|1"
+    ]
+    assert snapshot_efp_label_covered(snap, (150, 110), "龜速的網域 (3)|1")
+    assert not snapshot_efp_label_covered(snap, (150, 110), "完全不同的標籤")
+    # Far tab does not cover cursor; panes alone never cover.
+    sparse = {
+        "window": [0, 0, 400, 300],
+        "inputs": [[0, 0, 400, 300]],
+        "texts": [{"bbox": [350, 280, 390, 295], "text": "遠方分頁"}],
+    }
+    assert usable_covering_snapshot_text_labels(sparse, (150, 110)) == []
+    assert not uia_snapshot_covers_efp_at_point(
+        sparse,
+        (150, 110),
+        efp_payload={"name": "龜速的網域 (3)", "value": "1", "bbox": [100, 100, 120, 24]},
+    )
+    assert not uia_snapshot_has_rich_labels(sparse)
+
+
+def test_enrich_uia_snapshot_with_efp_scan_merges_unique_leaves(monkeypatch) -> None:
+    calls: list[tuple[int, int]] = []
+
+    def _probe(x: int, y: int) -> dict:
+        calls.append((int(x), int(y)))
+        if int(x) == 150 and int(y) == 110:
+            return {
+                "element_from_point_s": 0.01,
+                "name": "龜速的網域 (3)",
+                "value": "1",
+                "bbox": [100, 100, 120, 24],
+                "control_type": "tree_item",
+            }
+        if 160 <= int(x) <= 200 and 140 <= int(y) <= 180:
+            return {
+                "element_from_point_s": 0.01,
+                "name": "新竹公司 (17)",
+                "value": "1",
+                "bbox": [100, 140, 110, 24],
+                "control_type": "tree_item",
+            }
+        return {"element_from_point_s": 0.01}
+
+    monkeypatch.setattr(
+        "src.recorder.uia_input_boxes._element_from_point_name_value_impl",
+        _probe,
+    )
+    snap = {
+        "window": [0, 0, 400, 300],
+        "inputs": [[0, 0, 400, 300]],
+        "scrollbars": [],
+        "texts": [{"bbox": [350, 280, 390, 295], "text": "遠方分頁"}],
+    }
+    out = enrich_uia_snapshot_with_efp_scan(
+        snap,
+        cursor_xy=(150, 110),
+        max_probes=20,
+        max_seconds=1.0,
+        step_px=40,
+        roi_half_px=80,
+    )
+    assert out is not None
+    labels = {str(row.get("text") or "") for row in out["texts"]}
+    assert "龜速的網域 (3)|1" in labels
+    assert "新竹公司 (17)|1" in labels
+    assert out.get("efp_scan_added", 0) >= 1
+    assert isinstance(out.get("efp_scan_s"), float)
+    assert calls[0] == (150, 110)
+
+
+def test_snapshot_uia_screen_refetch_on_efp_cover_miss(monkeypatch) -> None:
+    walks: list[tuple[int, tuple[int, int] | None]] = []
+
+    def _impl(hwnd: int, *, cursor_xy=None, budgets=None):
+        walks.append((int(hwnd), cursor_xy))
+        if len(walks) == 1:
+            return {
+                "window": [0, 0, 400, 300],
+                "inputs": [[0, 0, 400, 300]],
+                "scrollbars": [],
+                "texts": [{"bbox": [350, 280, 390, 295], "text": "遠方分頁"}],
+            }
+        return {
+            "window": [0, 0, 400, 300],
+            "inputs": [[0, 0, 400, 300]],
+            "scrollbars": [],
+            "texts": [
+                {"bbox": [350, 280, 390, 295], "text": "遠方分頁"},
+                {
+                    "bbox": [100, 100, 220, 124],
+                    "text": "龜速的網域 (3)|1",
+                    "control_type": "tree_item",
+                },
+            ],
+        }
+
+    monkeypatch.setattr(
+        "src.recorder.uia_input_boxes._snapshot_uia_screen_impl",
+        _impl,
+    )
+    monkeypatch.setattr(
+        "src.recorder.uia_input_boxes._element_from_point_name_value_impl",
+        lambda x, y: {
+            "element_from_point_s": 0.01,
+            "name": "龜速的網域 (3)",
+            "value": "1",
+            "bbox": [100, 100, 120, 24],
+            "control_type": "tree_item",
+        },
+    )
+    monkeypatch.setattr(
+        "src.recorder.uia_input_boxes.enrich_uia_snapshot_with_efp_scan",
+        lambda snap, **_kwargs: snap,
+    )
+
+    class _OsStub:
+        name = "nt"
+
+    monkeypatch.setattr("src.recorder.uia_input_boxes.os", _OsStub())
+    snap = snapshot_uia_screen(99, cursor_xy=(150, 110))
+    assert snap is not None
+    assert snap.get("findall_refetch") == 1
+    assert len(walks) == 2
+    assert walks[0][1] == (150, 110)
+    assert walks[1][1] == (150, 110)
+    assert any(
+        str(row.get("text") or "") == "龜速的網域 (3)|1"
+        for row in snap.get("texts") or []
+    )
 
 
 def test_snapshot_uia_screen_keeps_expanded_labeled_control_types(monkeypatch) -> None:

@@ -153,6 +153,14 @@ _DEFAULT_WALK_MAX_CHILDREN_PER_PARENT = 80
 _WALK_OFFSCREEN_SCORE_BASE = 1_000_000_000.0
 _WALK_MISSING_BBOX_SCORE = 1_000_000_000_000.0
 
+# Sparse FindAll → cursor refetch / EFP ROI enrich (recording).
+_SPARSE_LABELED_TEXT_FLOOR = 8
+_EFP_SCAN_ROI_HALF_PX = 300
+_EFP_SCAN_STEP_PX = 28
+_EFP_SCAN_MAX_PROBES = 80
+_EFP_SCAN_MAX_SECONDS = 1.0
+_SNAPSHOT_UIA_ENRICH_TIMEOUT_S = 5.5
+
 
 @dataclass(frozen=True)
 class WalkBudgets:
@@ -1213,6 +1221,358 @@ def attach_findall_timing(
         reasons = [reason for reason in reasons if reason]
         if reasons:
             out["walk_stop_reason"] = reasons[-1]
+    return out
+
+
+def _snapshot_window_xywh(snapshot: dict[str, Any] | None) -> RectXywh | None:
+    if not isinstance(snapshot, dict):
+        return None
+    raw = snapshot.get("window")
+    if not (isinstance(raw, (list, tuple)) and len(raw) == 4):
+        return None
+    try:
+        return (int(raw[0]), int(raw[1]), int(raw[2]), int(raw[3]))
+    except (TypeError, ValueError):
+        return None
+
+
+def _point_in_screen_xyxy(x: int, y: int, box: ScreenXyxy) -> bool:
+    return int(box[0]) <= int(x) < int(box[2]) and int(box[1]) <= int(y) < int(box[3])
+
+
+def _text_row_screen_xyxy(row: object) -> ScreenXyxy | None:
+    if not isinstance(row, dict):
+        return None
+    box = row.get("bbox")
+    if not (isinstance(box, (list, tuple)) and len(box) == 4):
+        return None
+    try:
+        x1, y1, x2, y2 = (int(v) for v in box[:4])
+    except (TypeError, ValueError):
+        return None
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return (x1, y1, x2, y2)
+
+
+def usable_covering_snapshot_text_labels(
+    snapshot: dict[str, Any] | None,
+    screen_xy: tuple[int, int] | None,
+) -> list[str]:
+    """Usable non-oversized ``texts`` labels whose bbox covers ``screen_xy``.
+
+    Ignores pane ``inputs`` — huge WinForms panels must not count as cover.
+    """
+    if not isinstance(snapshot, dict) or screen_xy is None:
+        return []
+    texts = snapshot.get("texts")
+    if not isinstance(texts, list):
+        return []
+    try:
+        px, py = int(screen_xy[0]), int(screen_xy[1])
+    except (TypeError, ValueError, IndexError):
+        return []
+    window = _snapshot_window_xywh(snapshot)
+    labels: list[str] = []
+    for row in texts:
+        if not isinstance(row, dict):
+            continue
+        label = str(row.get("text") or "").strip()
+        if not is_usable_uia_landmark_label(label) or is_weak_efp_hub_label(label):
+            continue
+        xyxy = _text_row_screen_xyxy(row)
+        if xyxy is None:
+            continue
+        x1, y1, x2, y2 = xyxy
+        xywh = (x1, y1, x2 - x1, y2 - y1)
+        if window is not None and is_oversized_uia_rect(xywh, window):
+            continue
+        if _point_in_screen_xyxy(px, py, xyxy):
+            labels.append(label)
+    return labels
+
+
+def count_usable_snapshot_text_labels(snapshot: dict[str, Any] | None) -> int:
+    """Count unique usable non-weak labeled ``texts`` rows (not pane inputs)."""
+    if not isinstance(snapshot, dict):
+        return 0
+    texts = snapshot.get("texts")
+    if not isinstance(texts, list):
+        return 0
+    seen: set[str] = set()
+    for row in texts:
+        if not isinstance(row, dict):
+            continue
+        label = str(row.get("text") or "").strip()
+        if not is_usable_uia_landmark_label(label) or is_weak_efp_hub_label(label):
+            continue
+        key = canonicalize_uia_shell_status_label(label).casefold()
+        if key:
+            seen.add(key)
+    return len(seen)
+
+
+def uia_snapshot_has_rich_labels(
+    snapshot: dict[str, Any] | None,
+    *,
+    min_labels: int = _SPARSE_LABELED_TEXT_FLOOR,
+) -> bool:
+    """True when FindAll ``texts`` alone can supply nearby landmarks."""
+    return count_usable_snapshot_text_labels(snapshot) >= int(min_labels)
+
+
+def efp_cover_label_from_payload(payload: dict[str, Any] | None) -> str:
+    """Usable EFP landmark label for the cover gate, or ``\"\"`` when unusable."""
+    if not isinstance(payload, dict):
+        return ""
+    label = resolve_usable_uia_probe_label(
+        name=str(payload.get("name") or "").strip(),
+        value=str(payload.get("value") or "").strip(),
+    )
+    if (
+        not label
+        or not is_usable_uia_landmark_label(label)
+        or is_weak_efp_hub_label(label)
+    ):
+        return ""
+    return label
+
+
+def snapshot_efp_label_covered(
+    snapshot: dict[str, Any] | None,
+    screen_xy: tuple[int, int] | None,
+    efp_label: str,
+) -> bool:
+    """True when a usable FindAll text under ``screen_xy`` soft-agrees with EFP."""
+    needle = str(efp_label or "").strip()
+    if not needle:
+        return False
+    covering = usable_covering_snapshot_text_labels(snapshot, screen_xy)
+    if not covering:
+        return False
+    return any(ocr_uia_labels_soft_agree(label, needle) for label in covering)
+
+
+def uia_snapshot_covers_efp_at_point(
+    snapshot: dict[str, Any] | None,
+    screen_xy: tuple[int, int] | None,
+    *,
+    efp_payload: dict[str, Any] | None = None,
+    efp_label: str = "",
+) -> bool:
+    """Hover/settle cover: agreeing labeled text under the cursor (not panes).
+
+    When ``efp_label`` / payload yields a usable EFP label, require soft-agree.
+    When no EFP label is available, any usable covering text counts.
+    """
+    label = str(efp_label or "").strip() or efp_cover_label_from_payload(efp_payload)
+    if label:
+        return snapshot_efp_label_covered(snapshot, screen_xy, label)
+    return bool(usable_covering_snapshot_text_labels(snapshot, screen_xy))
+
+
+def _merge_findall_timing_fields(
+    base: dict[str, Any],
+    extra: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Sum ``findall_s`` / counts when replacing a snapshot after refetch."""
+    out = dict(base)
+    if not isinstance(extra, dict):
+        return out
+    try:
+        base_s = float(out.get("findall_s") or 0.0)
+    except (TypeError, ValueError):
+        base_s = 0.0
+    try:
+        extra_s = float(extra.get("findall_s") or 0.0)
+    except (TypeError, ValueError):
+        extra_s = 0.0
+    out["findall_s"] = round(base_s + extra_s, 3)
+    try:
+        base_n = int(out.get("findall_count") or 0)
+    except (TypeError, ValueError):
+        base_n = 0
+    try:
+        extra_n = int(extra.get("findall_count") or 0)
+    except (TypeError, ValueError):
+        extra_n = 0
+    # Prefer the replacement walk's leaf count when it found more labels.
+    out["findall_count"] = max(base_n, extra_n)
+    if extra.get("walk_truncated"):
+        out["walk_truncated"] = True
+        reason = str(extra.get("walk_stop_reason") or "").strip()
+        if reason:
+            out["walk_stop_reason"] = reason
+    return out
+
+
+def enrich_uia_snapshot_with_efp_scan(
+    snapshot: dict[str, Any] | None,
+    *,
+    cursor_xy: tuple[int, int],
+    max_probes: int = _EFP_SCAN_MAX_PROBES,
+    max_seconds: float = _EFP_SCAN_MAX_SECONDS,
+    step_px: int = _EFP_SCAN_STEP_PX,
+    roi_half_px: int = _EFP_SCAN_ROI_HALF_PX,
+) -> dict[str, Any] | None:
+    """Merge unique EFP leaves from a cursor-centered grid into ``texts``.
+
+    Must run on the UIA worker thread (uses ``uia_text_element_at_point``).
+    """
+    if not isinstance(snapshot, dict):
+        return snapshot
+    try:
+        cx, cy = int(cursor_xy[0]), int(cursor_xy[1])
+    except (TypeError, ValueError, IndexError):
+        return snapshot
+    window = _snapshot_window_xywh(snapshot)
+    if window is None:
+        return snapshot
+    wx, wy, ww, wh = window
+    if ww <= 0 or wh <= 0:
+        return snapshot
+    half = max(1, int(roi_half_px))
+    step = max(8, int(step_px))
+    x0 = max(wx, cx - half)
+    y0 = max(wy, cy - half)
+    x1 = min(wx + ww - 1, cx + half)
+    y1 = min(wy + wh - 1, cy + half)
+    if x1 < x0 or y1 < y0:
+        return snapshot
+
+    out = dict(snapshot)
+    texts = list(out.get("texts") or []) if isinstance(out.get("texts"), list) else []
+    occupied: list[tuple[int, int, int, int]] = []
+    seen_keys: set[tuple[str, int, int, int, int]] = set()
+
+    def _occupy_xywh(box: tuple[int, int, int, int] | None) -> None:
+        if box is None:
+            return
+        occupied.append(box)
+
+    def _is_occupied(x: int, y: int) -> bool:
+        return any(point_in_rect_xywh(int(x), int(y), box) for box in occupied)
+
+    for row in texts:
+        xyxy = _text_row_screen_xyxy(row)
+        if xyxy is None or not isinstance(row, dict):
+            continue
+        x1b, y1b, x2b, y2b = xyxy
+        _occupy_xywh((x1b, y1b, x2b - x1b, y2b - y1b))
+        label = str(row.get("text") or "").strip()
+        if label:
+            seen_keys.add((label.casefold(), x1b, y1b, x2b, y2b))
+
+    started = time.perf_counter()
+    added = 0
+    probes = 0
+    # Cursor first, then grid.
+    points: list[tuple[int, int]] = [(cx, cy)]
+    for gy in range(y0, y1 + 1, step):
+        for gx in range(x0, x1 + 1, step):
+            if gx == cx and gy == cy:
+                continue
+            points.append((gx, gy))
+
+    for px, py in points:
+        if probes >= int(max_probes):
+            break
+        if time.perf_counter() - started >= float(max_seconds):
+            break
+        if _is_occupied(px, py):
+            continue
+        probes += 1
+        payload = _element_from_point_name_value_impl(int(px), int(py))
+        label = efp_cover_label_from_payload(payload)
+        if not label:
+            bbox = efp_payload_screen_bbox_xywh(payload)
+            _occupy_xywh(bbox)
+            continue
+        bbox = efp_payload_screen_bbox_xywh(payload)
+        if bbox is None:
+            continue
+        bx, by, bw, bh = bbox
+        xyxy = (bx, by, bx + bw, by + bh)
+        key = (label.casefold(), xyxy[0], xyxy[1], xyxy[2], xyxy[3])
+        if key in seen_keys:
+            _occupy_xywh(bbox)
+            continue
+        if window is not None and is_oversized_uia_rect(bbox, window):
+            _occupy_xywh(bbox)
+            continue
+        entry: dict[str, object] = {
+            "bbox": [int(v) for v in xyxy],
+            "text": label,
+        }
+        control_type = str(payload.get("control_type") or "").strip()
+        if control_type:
+            entry["control_type"] = control_type
+        texts.append(entry)
+        seen_keys.add(key)
+        _occupy_xywh(bbox)
+        added += 1
+
+    out["texts"] = texts
+    out["efp_scan_s"] = round(time.perf_counter() - started, 3)
+    out["efp_scan_added"] = int(added)
+    out["efp_scan_probes"] = int(probes)
+    return out
+
+
+def _refetch_and_enrich_uia_snapshot(
+    hwnd: int,
+    snapshot: dict[str, Any] | None,
+    *,
+    cursor_xy: tuple[int, int],
+    budgets: WalkBudgets | None,
+) -> dict[str, Any] | None:
+    """One cursor-climbed FindAll refetch on EFP miss, then optional EFP ROI scan.
+
+    Runs on the UIA worker thread only.
+    """
+    if not isinstance(snapshot, dict):
+        return snapshot
+    try:
+        cx, cy = int(cursor_xy[0]), int(cursor_xy[1])
+    except (TypeError, ValueError, IndexError):
+        return snapshot
+
+    efp = _element_from_point_name_value_impl(cx, cy)
+    efp_label = efp_cover_label_from_payload(efp)
+    out: dict[str, Any] = dict(snapshot)
+
+    if efp_label:
+        covered = snapshot_efp_label_covered(out, (cx, cy), efp_label)
+        if not covered:
+            started = time.perf_counter()
+            with bind_findall_timing() as samples:
+                refetched = _snapshot_uia_screen_impl(
+                    int(hwnd),
+                    cursor_xy=(cx, cy),
+                    budgets=budgets,
+                )
+            timed = attach_findall_timing(
+                refetched if isinstance(refetched, dict) else None,
+                samples,
+                wall_s=time.perf_counter() - started,
+            )
+            if isinstance(timed, dict):
+                merged = _merge_findall_timing_fields(out, timed)
+                # Prefer refetch leaf lists; keep summed timing on merged.
+                for key in ("texts", "inputs", "scrollbars", "input_labels", "window"):
+                    if key in timed:
+                        merged[key] = timed[key]
+                merged["findall_refetch"] = 1
+                out = merged
+            covered = snapshot_efp_label_covered(out, (cx, cy), efp_label)
+
+        need_scan = (not covered) or (
+            not uia_snapshot_has_rich_labels(out)
+        )
+        if need_scan:
+            enriched = enrich_uia_snapshot_with_efp_scan(out, cursor_xy=(cx, cy))
+            if isinstance(enriched, dict):
+                out = enriched
     return out
 
 
@@ -3199,6 +3559,7 @@ def snapshot_uia_screen(
     *,
     cursor_xy: tuple[int, int] | None = None,
     budgets: WalkBudgets | None = None,
+    enrich: bool = True,
 ) -> dict[str, object] | None:
     """Budgeted UIA walk under ``hwnd`` (optional cursor climb) for analysis.
 
@@ -3209,6 +3570,10 @@ def snapshot_uia_screen(
 
     Successful snapshots include ``findall_s`` (and usually ``findall_count``);
     truncated walks also stamp ``walk_truncated`` / ``walk_stop_reason``.
+
+    When ``cursor_xy`` is set and ``enrich`` is true, an EFP cover miss triggers
+    one cursor-climbed FindAll refetch, then a bounded EFP ROI scan when still
+    uncovered or sparse (``findall_refetch`` / ``efp_scan_*`` fields).
     """
     if os.name != "nt" or not int(hwnd or 0):
         return None
@@ -3236,14 +3601,31 @@ def snapshot_uia_screen(
                     snap = _snapshot_dict_from_lists(
                         int(hwnd), inputs, scrollbars, labeled, input_labels
                     )
-        return attach_findall_timing(
+        timed = attach_findall_timing(
             snap if isinstance(snap, dict) else None,
             samples,
             wall_s=time.perf_counter() - started,
         )
+        if (
+            enrich
+            and cursor_xy is not None
+            and isinstance(timed, dict)
+        ):
+            return _refetch_and_enrich_uia_snapshot(
+                int(hwnd),
+                timed,
+                cursor_xy=(int(cursor_xy[0]), int(cursor_xy[1])),
+                budgets=budgets,
+            )
+        return timed
 
+    timeout_s = (
+        float(_SNAPSHOT_UIA_ENRICH_TIMEOUT_S)
+        if enrich and cursor_xy is not None
+        else 2.5
+    )
     try:
-        return uia_call(_run, timeout_s=2.5)
+        return uia_call(_run, timeout_s=timeout_s)
     except Exception:
         return None
 

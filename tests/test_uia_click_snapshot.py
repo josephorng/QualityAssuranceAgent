@@ -1191,7 +1191,7 @@ def test_hover_findall_skips_when_already_cached_or_yellow_or_mismatch(
             )
         return calls
 
-    # Already ready at cursor (covering bbox) — skip hover FindAll
+    # Already ready at cursor (agreeing labeled text) — skip hover FindAll
     session = RecordingSession(runs_root=tmp_path)
     session._accepting_input = True
     session._idle_efp_generation = 1
@@ -1206,10 +1206,25 @@ def test_hover_findall_skips_when_already_cached_or_yellow_or_mismatch(
             "window": [0, 0, 400, 300],
             "inputs": [],
             "scrollbars": [],
-            "texts": [{"bbox": [50, 50, 200, 200], "text": "cached"}],
+            # Idle EFP mock is Name=N Value=V → cover must soft-agree.
+            "texts": [{"bbox": [50, 50, 200, 200], "text": "N|V"}],
         }
     }
     assert _run(session) == []
+
+    # Pane-only cover under cursor must NOT skip hover (WinMaster sparse seed).
+    session._last_settle_uia_by_hwnd = {
+        55: {
+            "hwnd": 55,
+            "cache_kind": "settle",
+            "class_name": "Chrome_WidgetWin_1",
+            "window": [0, 0, 400, 300],
+            "inputs": [[0, 0, 400, 300]],
+            "scrollbars": [],
+            "texts": [{"bbox": [350, 280, 390, 295], "text": "遠方分頁"}],
+        }
+    }
+    assert _run(session) == [55]
 
     # Unique far hub is empty-synth ready but does not cover the cursor —
     # still warm hover so ribbon/chrome under the pointer can attach.
@@ -1271,7 +1286,7 @@ def test_hover_findall_skips_when_already_cached_or_yellow_or_mismatch(
         "window": [0, 0, 400, 300],
         "inputs": [],
         "scrollbars": [],
-        "texts": [{"bbox": [50, 50, 200, 200], "text": "primary"}],
+        "texts": [{"bbox": [50, 50, 200, 200], "text": "N|V"}],
     }
     assert _run(session) == []
 

@@ -2160,13 +2160,19 @@ class RecordingSession:
         *,
         efp_payload: dict[str, Any] | None | object = _EFP_UNSET,
     ) -> bool:
-        """Skip idle hover walk when a walk leaf covers the point or EFP is a cell.
+        """Skip idle hover walk when a labeled FindAll text covers EFP, or cell.
 
-        Empty-synth readiness alone (unique far hub) does not skip hover — a
-        File-tab hover must still warm a ribbon walk after a grid settle.
-        Labeled chrome EFP may green the LED without a walk; hover still runs.
+        Pane-only / oversized input boxes under the cursor do **not** skip —
+        WinMaster-style sparse seeds must still allow hover warm-up + enrich.
+        Empty-synth readiness alone (unique far hub) does not skip hover.
+        Labeled chrome EFP may green the LED without a walk; hover still runs
+        unless an agreeing labeled ``texts`` row already covers the point.
         Usable ``data_item`` EFP alone skips hover (cells stay FindAll-excluded).
         """
+        if efp_payload is _EFP_UNSET:
+            with self._lock:
+                efp_payload = self._idle_efp_payload
+        efp_dict = efp_payload if isinstance(efp_payload, dict) else None
         if cursor_xy is not None:
             try:
                 x, y = int(cursor_xy[0]), int(cursor_xy[1])
@@ -2175,18 +2181,20 @@ class RecordingSession:
             else:
                 click_window = self._click_window_payload_at(x, y)
                 cached = self._cached_uia_before(click_window, cursor_xy=(x, y))
-                if isinstance(cached, dict) and self._uia_snapshot_covers_screen_point(
-                    cached, (x, y)
-                ):
-                    return True
-        if efp_payload is _EFP_UNSET:
-            with self._lock:
-                efp_payload = self._idle_efp_payload
+                if isinstance(cached, dict):
+                    from src.recorder.uia_input_boxes import (
+                        uia_snapshot_covers_efp_at_point,
+                    )
+
+                    if uia_snapshot_covers_efp_at_point(
+                        cached,
+                        (x, y),
+                        efp_payload=efp_dict,
+                    ):
+                        return True
         from src.recorder.uia_input_boxes import efp_payload_is_usable_data_item
 
-        return efp_payload_is_usable_data_item(
-            efp_payload if isinstance(efp_payload, dict) else None
-        )
+        return efp_payload_is_usable_data_item(efp_dict)
 
     def _emit_uia_path_readiness(
         self,
@@ -5387,6 +5395,20 @@ class RecordingSession:
             extra = (
                 f" truncated=1 stop={reason}" if reason else " truncated=1"
             )
+        if snapshot.get("findall_refetch"):
+            extra += " refetch=1"
+        raw_scan = snapshot.get("efp_scan_s")
+        if raw_scan is not None:
+            try:
+                scan_s = float(raw_scan)
+            except (TypeError, ValueError):
+                scan_s = None
+            if scan_s is not None:
+                try:
+                    added = int(snapshot.get("efp_scan_added") or 0)
+                except (TypeError, ValueError):
+                    added = 0
+                extra += f" efp_scan_s={scan_s:.3f} efp_scan_added={added}"
         with self._lock:
             run_dir = self._run_dir
         if run_dir is None:

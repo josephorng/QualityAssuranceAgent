@@ -71,6 +71,8 @@ from src.recorder.verify_signals import (
     capture_replay_after_signals,
     predicate_has_ready_assertions,
     predicate_has_signal_assertions,
+    recorded_scroll_axis_targets,
+    set_scroll_percents,
     signal_assertions_satisfied,
     split_window_verify_ready,
 )
@@ -105,6 +107,10 @@ _DISAPPEARED_CLOSE_RETRY_INTERVAL_SECONDS = 0.5
 
 def _reason_is_disappeared_miss(reason: str) -> bool:
     return reason.startswith("window verify missed disappeared")
+
+
+def _reason_is_scroll_miss(reason: str | None) -> bool:
+    return isinstance(reason, str) and reason.startswith("window verify missed scroll")
 
 
 def _predicate_has_disappeared(recorded: dict[str, Any]) -> bool:
@@ -1663,6 +1669,19 @@ class BrainModule:
             deferred.recorded,
             log_result=True,
         )
+        if miss is not None and _reason_is_scroll_miss(miss.reason):
+            # Mouse already ran; one UIA SetScrollPercent/SetValue before a
+            # full cached-tool re-drag.
+            set_ok = await self._retry_set_recorded_scroll(deferred.recorded)
+            self.manager.log_info(
+                f"Script step {script_step_index + 1} deferred scroll UIA set "
+                f"{'ok' if set_ok else 'failed'}; re-checking verify"
+            )
+            miss, _windows_after = await self._window_verify_observation(
+                deferred.windows_before,
+                deferred.recorded,
+                log_result=True,
+            )
         if miss is not None:
             self.manager.log_info(
                 f"Script step {script_step_index + 1} deferred verify still unmet "
@@ -2005,6 +2024,23 @@ class BrainModule:
             rows.append(row)
         self._record_disappeared_close_retry(rows)
 
+    async def _retry_set_recorded_scroll(self, recorded: dict[str, Any]) -> bool:
+        """Set UIA scroll percents to the recorded after-values under the cursor."""
+        targets = recorded_scroll_axis_targets(recorded.get("scroll"))
+        if not targets:
+            return False
+        try:
+            return bool(
+                await asyncio.to_thread(
+                    set_scroll_percents,
+                    vertical=targets.get("vertical"),
+                    horizontal=targets.get("horizontal"),
+                )
+            )
+        except Exception as exc:
+            self.manager.log_info(f"scroll UIA set failed: {exc}")
+            return False
+
     async def _poll_window_verify(
         self,
         windows_before: list[WindowInfo] | None,
@@ -2060,6 +2096,7 @@ class BrainModule:
         elapsed = 0.0
         last_close_elapsed: float | None = None
         last_miss: ScriptStepVerifyResult | None = None
+        scroll_set_attempted = False
         while True:
             miss, windows_after = await self._window_verify_observation(
                 windows_before,
@@ -2091,6 +2128,19 @@ class BrainModule:
                 if targets:
                     await self._retry_close_disappeared_windows(targets)
                     last_close_elapsed = elapsed
+            elif (
+                not scroll_set_attempted
+                and _reason_is_scroll_miss(miss.reason)
+            ):
+                # One SetScrollPercent/SetValue to the recorded after %, then
+                # keep polling — do not extend the settle deadline.
+                scroll_set_attempted = True
+                set_ok = await self._retry_set_recorded_scroll(recorded)
+                self.manager.log_info(
+                    f"Script step {script_step_index + 1} scroll UIA set "
+                    f"{'ok' if set_ok else 'failed'} after verify miss; "
+                    "continuing poll"
+                )
             delay = min(interval, max(0.0, deadline - elapsed))
             if delay > 0:
                 await asyncio.sleep(delay)

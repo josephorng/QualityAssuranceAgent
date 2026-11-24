@@ -70,10 +70,12 @@ _UIA_TOGGLE_GET_STATE = 4
 _UIA_SELECTION_GET_IS_SELECTED = 6
 _UIA_EXPAND_GET_STATE = 5
 _UIA_VALUE_GET_CURRENT = 4
+_UIA_RANGE_SET_VALUE = 3
 _UIA_RANGE_GET_VALUE = 4
 _UIA_RANGE_GET_MAX = 6
 _UIA_RANGE_GET_MIN = 7
 # IUIAutomationScrollPattern: Scroll, SetScrollPercent, then getters.
+_UIA_SCROLL_SET_SCROLL_PERCENT = 4
 _UIA_SCROLL_GET_HORIZONTAL_PERCENT = 5
 _UIA_SCROLL_GET_VERTICAL_PERCENT = 6
 # UIA_ScrollPatternNoScroll — axis is not scrollable.
@@ -716,6 +718,35 @@ def _has_scroll_assertion(value: Any) -> bool:
     )
 
 
+def recorded_scroll_axis_targets(value: Any) -> dict[str, float]:
+    """Normalize a recorded ``scroll`` assertion to ``vertical`` / ``horizontal`` targets.
+
+    A legacy float is treated as vertical only (same as read/verify).
+    """
+    if _is_scroll_percent_number(value):
+        return {"vertical": float(value)}
+    if not isinstance(value, dict) or not value:
+        return {}
+    out: dict[str, float] = {}
+    for axis in ("vertical", "horizontal"):
+        raw = value.get(axis)
+        if _is_scroll_percent_number(raw):
+            out[axis] = float(raw)
+    return out
+
+
+def _range_value_absolute_from_percent(
+    percent: float,
+    minimum: float,
+    maximum: float,
+) -> float | None:
+    """Map 0–100 percent onto a RangeValue ``[minimum, maximum]`` span."""
+    span = maximum - minimum
+    if span == 0:
+        return None
+    return minimum + span * (float(percent) / 100.0)
+
+
 def _scroll_percent(sample: dict[str, Any] | None) -> float | None:
     """Legacy single-axis scroll percent (RangeValue fallback)."""
     if not isinstance(sample, dict) or "scroll" not in sample:
@@ -1058,6 +1089,42 @@ def _uia_scroll_pattern_percents(element: ctypes.c_void_p) -> dict[str, float] |
         _com_release(pattern)
 
 
+def _uia_scroll_pattern_set_percents(
+    element: ctypes.c_void_p,
+    *,
+    horizontal: float | None,
+    vertical: float | None,
+) -> bool:
+    """Call ScrollPattern.SetScrollPercent; ``None`` axes use NoScroll (-1)."""
+    pattern = _uia_get_pattern(element, _UIA_SCROLL_PATTERN)
+    if not pattern:
+        return False
+    try:
+        setter = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+            ctypes.c_double,
+            ctypes.c_double,
+        )(
+            _com_vtable(pattern, _UIA_SCROLL_SET_SCROLL_PERCENT + 1)[
+                _UIA_SCROLL_SET_SCROLL_PERCENT
+            ]
+        )
+        h_arg = (
+            float(horizontal)
+            if horizontal is not None
+            else float(_UIA_SCROLL_NO_SCROLL)
+        )
+        v_arg = (
+            float(vertical)
+            if vertical is not None
+            else float(_UIA_SCROLL_NO_SCROLL)
+        )
+        return setter(pattern, h_arg, v_arg) == _S_OK
+    finally:
+        _com_release(pattern)
+
+
 def _uia_scroll_percent(element: ctypes.c_void_p) -> float | None:
     pattern = _uia_get_pattern(element, _UIA_RANGE_VALUE_PATTERN)
     if not pattern:
@@ -1072,6 +1139,29 @@ def _uia_scroll_percent(element: ctypes.c_void_p) -> float | None:
         if span == 0:
             return None
         return (value - minimum) / span * 100.0
+    finally:
+        _com_release(pattern)
+
+
+def _uia_range_value_set_percent(element: ctypes.c_void_p, percent: float) -> bool:
+    """Set a RangeValue control from a 0–100 percent of its min/max span."""
+    pattern = _uia_get_pattern(element, _UIA_RANGE_VALUE_PATTERN)
+    if not pattern:
+        return False
+    try:
+        maximum = _uia_pattern_double(pattern, _UIA_RANGE_GET_MAX)
+        minimum = _uia_pattern_double(pattern, _UIA_RANGE_GET_MIN)
+        if maximum is None or minimum is None:
+            return False
+        absolute = _range_value_absolute_from_percent(percent, minimum, maximum)
+        if absolute is None:
+            return False
+        setter = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+            ctypes.c_double,
+        )(_com_vtable(pattern, _UIA_RANGE_SET_VALUE + 1)[_UIA_RANGE_SET_VALUE])
+        return setter(pattern, float(absolute)) == _S_OK
     finally:
         _com_release(pattern)
 
@@ -1159,6 +1249,97 @@ def _collect_scroll_position(
         if axes:
             return axes
         return legacy
+    finally:
+        if owned and current is not None:
+            _com_release(current)
+
+
+def _apply_scroll_percents(
+    element: ctypes.c_void_p,
+    walker: ctypes.c_void_p | None,
+    *,
+    vertical: float | None = None,
+    horizontal: float | None = None,
+    limit: int = _UIA_PARENT_WALK_SCROLL,
+) -> bool:
+    """Set requested scroll axes under ``element`` using the same walk as read.
+
+    Prefers ScrollPattern.SetScrollPercent on the first scrollable ancestor.
+    Otherwise sets oriented RangeValue bars (legacy unoriented → vertical).
+    Returns True only when every requested axis was set.
+    """
+    requested: dict[str, float] = {}
+    if vertical is not None:
+        requested["vertical"] = float(vertical)
+    if horizontal is not None:
+        requested["horizontal"] = float(horizontal)
+    if not requested:
+        return False
+
+    current: ctypes.c_void_p | None = element
+    owned = False
+    set_axes: set[str] = set()
+    try:
+        for _index in range(max(1, limit)):
+            if current is None:
+                break
+            remaining = {
+                axis: value
+                for axis, value in requested.items()
+                if axis not in set_axes
+            }
+            if not remaining:
+                return True
+
+            pattern_axes = _uia_scroll_pattern_percents(current)
+            if isinstance(pattern_axes, dict) and pattern_axes:
+                h_arg = (
+                    remaining["horizontal"]
+                    if "horizontal" in remaining and "horizontal" in pattern_axes
+                    else None
+                )
+                v_arg = (
+                    remaining["vertical"]
+                    if "vertical" in remaining and "vertical" in pattern_axes
+                    else None
+                )
+                if h_arg is not None or v_arg is not None:
+                    if _uia_scroll_pattern_set_percents(
+                        current,
+                        horizontal=h_arg,
+                        vertical=v_arg,
+                    ):
+                        if h_arg is not None:
+                            set_axes.add("horizontal")
+                        if v_arg is not None:
+                            set_axes.add("vertical")
+                # ScrollPattern owns this scrollable; do not keep walking for
+                # sibling RangeValue bars once a pattern is present.
+                return set_axes.issuperset(requested.keys())
+
+            oriented = _uia_range_value_axis_percent(current)
+            if oriented is not None:
+                axis, _percent = oriented
+                if axis in remaining and axis not in set_axes:
+                    if _uia_range_value_set_percent(current, remaining[axis]):
+                        set_axes.add(axis)
+            elif "vertical" in remaining and "vertical" not in set_axes:
+                # Unoriented RangeValue matches the legacy float read path.
+                raw = _uia_scroll_percent(current)
+                if raw is not None:
+                    if _uia_range_value_set_percent(current, remaining["vertical"]):
+                        set_axes.add("vertical")
+
+            if set_axes.issuperset(requested.keys()):
+                return True
+            if walker is None:
+                break
+            parent = _uia_parent(walker, current)
+            if owned:
+                _com_release(current)
+            current = parent
+            owned = parent is not None
+        return set_axes.issuperset(requested.keys())
     finally:
         if owned and current is not None:
             _com_release(current)
@@ -1360,3 +1541,120 @@ def read_uia_fields(
     except Exception:
         return {}
     return result if isinstance(result, dict) else {}
+
+
+def _set_scroll_percents_impl(
+    *,
+    cursor_xy: tuple[int, int],
+    vertical: float | None,
+    horizontal: float | None,
+) -> bool:
+    """ElementFromPoint + parent walk, then SetScrollPercent / RangeValue SetValue."""
+    if os.name != "nt":
+        return False
+    if vertical is None and horizontal is None:
+        return False
+    ole32 = ctypes.windll.ole32
+    initialized_here = False
+    hr = ole32.CoInitializeEx(None, _COINIT_MULTITHREADED)
+    if hr == _S_OK:
+        initialized_here = True
+    elif hr not in (_S_OK, _S_FALSE) and (hr & 0xFFFFFFFF) != 0x80010106:
+        return False
+
+    automation: ctypes.c_void_p | None = None
+    walker: ctypes.c_void_p | None = None
+    point_element: ctypes.c_void_p | None = None
+    try:
+        clsid = _guid_from_string(_CLSID_CUIAutomation)
+        iid = _guid_from_string(_IID_IUIAutomation)
+        automation_ptr = ctypes.c_void_p()
+        hr = ole32.CoCreateInstance(
+            ctypes.byref(clsid),
+            None,
+            _CLSCTX_INPROC_SERVER,
+            ctypes.byref(iid),
+            ctypes.byref(automation_ptr),
+        )
+        if hr != _S_OK or not automation_ptr:
+            return False
+        automation = automation_ptr
+
+        class _POINT(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+        element_from_point = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+            _POINT,
+            ctypes.POINTER(ctypes.c_void_p),
+        )(_com_vtable(automation, _UIA_ELEMENT_FROM_POINT + 1)[_UIA_ELEMENT_FROM_POINT])
+        point_ptr = ctypes.c_void_p()
+        hr = element_from_point(
+            automation,
+            _POINT(int(cursor_xy[0]), int(cursor_xy[1])),
+            ctypes.byref(point_ptr),
+        )
+        if hr != _S_OK or not point_ptr:
+            return False
+        point_element = point_ptr
+
+        get_walker = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        )(_com_vtable(automation, _UIA_GET_RAW_VIEW_WALKER + 1)[_UIA_GET_RAW_VIEW_WALKER])
+        walker_ptr = ctypes.c_void_p()
+        hr = get_walker(automation, ctypes.byref(walker_ptr))
+        if hr == _S_OK and walker_ptr:
+            walker = walker_ptr
+
+        return _apply_scroll_percents(
+            point_element,
+            walker,
+            vertical=vertical,
+            horizontal=horizontal,
+            limit=_UIA_PARENT_WALK_SCROLL,
+        )
+    except Exception:
+        return False
+    finally:
+        _com_release(point_element)
+        _com_release(walker)
+        _com_release(automation)
+        if initialized_here:
+            try:
+                ole32.CoUninitialize()
+            except Exception:
+                pass
+
+
+def set_scroll_percents(
+    *,
+    cursor_xy: tuple[int, int] | None = None,
+    vertical: float | None = None,
+    horizontal: float | None = None,
+) -> bool:
+    """Set V/H scroll percents on the scrollable under the cursor (same find as read).
+
+    ``cursor_xy`` defaults to the current pointer. Returns True only when every
+    requested axis was set via ScrollPattern or RangeValue.
+    """
+    if vertical is None and horizontal is None:
+        return False
+    point = cursor_xy if cursor_xy is not None else _cursor_xy()
+    if point is None:
+        return False
+    from src.recorder.uia_thread import uia_call
+
+    try:
+        result = uia_call(
+            _set_scroll_percents_impl,
+            cursor_xy=point,
+            vertical=vertical,
+            horizontal=horizontal,
+            timeout_s=2.5,
+        )
+    except Exception:
+        return False
+    return bool(result)

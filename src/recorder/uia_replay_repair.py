@@ -76,6 +76,7 @@ class YoloOcrMoveFallback:
     instruction: str
     nearby_objects: tuple[str, ...] = ()
     landmark_geometry: dict[str, Any] | None = None
+    hub_source: str | None = None
 
 
 _repair_slots: ContextVar[list[UiaReplayRepairRequest | None] | None] = ContextVar(
@@ -165,10 +166,17 @@ def _move_fallback_from_args(
     if not instruction:
         return None
     geometry = args.get("landmark_geometry")
+    raw_hub = args.get("hub_source")
+    hub_source = (
+        str(raw_hub).strip()
+        if isinstance(raw_hub, str) and str(raw_hub).strip() in ("findall", "uia_efp")
+        else None
+    )
     return YoloOcrMoveFallback(
         instruction=instruction,
         nearby_objects=_phrase_tuple(args.get(nearby_key)),
         landmark_geometry=geometry if isinstance(geometry, dict) else None,
+        hub_source=hub_source,
     )
 
 

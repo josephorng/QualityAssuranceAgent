@@ -115,6 +115,7 @@ Cache `move_mouse` keeps two separate identities:
 
 - **FindAll / hub:** `instruction` + `anchor_text` (+ `control_type`) — Name shortlist and OCR/similarity.
 - **EFP:** press-time `name` / `value` — live ElementFromPoint verify only.
+- **`hub_source`:** `"findall"` or `"uia_efp"` from analysis primary provenance (`candidates[0].source`). Gates **hard constellation-EFP** on UIA-first: only `"uia_efp"` runs it. `"findall"` uses Name shortlist / geometry instead. Old caches without `hub_source` keep the legacy EFP↔hub soft-agree fallback (so overlay poison like NVIDIA vs WinMaster7 still skips).
 
 They often disagree (e.g. FindAll `Launch 檔案總管` vs EFP `CoreInput`). Compile never rewrites the hub from EFP. Replay never scores FindAll/OCR text against recorded EFP Name, and never requires EFP Name to equal FindAll Name.
 

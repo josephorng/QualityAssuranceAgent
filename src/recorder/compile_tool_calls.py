@@ -282,6 +282,27 @@ def _element_from_point_args(
     return out
 
 
+def _hub_source_from_vision(vision: dict[str, Any] | None) -> str | None:
+    """Map analysis primary ``candidates[0].source`` to replay ``hub_source``.
+
+    ``uia`` → ``findall``, ``uia_efp`` → ``uia_efp``. YOLO/OCR/other omitted.
+    """
+    if not isinstance(vision, dict):
+        return None
+    candidates = vision.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        return None
+    primary = candidates[0]
+    if not isinstance(primary, dict):
+        return None
+    source = str(primary.get("source") or "").strip().lower()
+    if source == "uia":
+        return "findall"
+    if source == "uia_efp":
+        return "uia_efp"
+    return None
+
+
 def _move_mouse_call(
     instruction: str,
     *,
@@ -295,7 +316,8 @@ def _move_mouse_call(
     FindAll / hub identity stays on ``instruction`` + ``anchor_text`` (from
     ``resolved``). Press-time EFP is appended as ``name``/``value`` only and must
     not replace the hub when the two differ (e.g. ``Launch 檔案總管`` vs
-    ``CoreInput``).
+    ``CoreInput``). ``hub_source`` records whether the primary was FindAll or
+    an injected EFP peer so replay can gate hard constellation-EFP.
     """
     resolved = (target if target is not None else _short_move_target(instruction)).strip()
     if not resolved:
@@ -308,6 +330,9 @@ def _move_mouse_call(
         args["anchor_text"] = anchor_text
     if control_type:
         args["control_type"] = control_type
+    hub_source = _hub_source_from_vision(vision)
+    if hub_source is not None:
+        args["hub_source"] = hub_source
     nearby = _nearby_object_phrases(instruction)
     if nearby:
         args["nearby_objects"] = nearby

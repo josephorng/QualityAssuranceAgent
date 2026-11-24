@@ -146,6 +146,65 @@ def test_compile_click_copies_element_from_point_name_value() -> None:
     assert calls[0]["arguments"]["value"] == "1"
 
 
+def test_compile_hub_source_findall_from_uia_primary() -> None:
+    event = _event(kind="click", click_count=1)
+    instruction = "（UIA）將滑鼠移到「WinMaster7 Console」清單項目，並點擊滑鼠一下。"
+    vision = {
+        "candidates": [
+            {
+                "bbox": [167, 62, 10, 10],
+                "class_name": "text",
+                "text": "WinMaster7 Console",
+                "uia_control_type": "list_item",
+                "source": "uia",
+            }
+        ],
+        "local_cursor": [172, 67],
+    }
+    calls = compile_tool_calls(event, instruction, vision=vision)
+    assert calls is not None
+    assert calls[0]["arguments"]["hub_source"] == "findall"
+
+
+def test_compile_hub_source_uia_efp_from_efp_primary() -> None:
+    event = _event(kind="click", click_count=1)
+    instruction = "（UIA）將滑鼠移到「K11」資料項目，並點擊滑鼠一下。"
+    vision = {
+        "candidates": [
+            {
+                "bbox": [190, 190, 20, 20],
+                "class_name": "text",
+                "text": "K11",
+                "uia_control_type": "data_item",
+                "source": "uia_efp",
+            }
+        ],
+        "local_cursor": [200, 200],
+    }
+    calls = compile_tool_calls(event, instruction, vision=vision)
+    assert calls is not None
+    assert calls[0]["arguments"]["hub_source"] == "uia_efp"
+
+
+def test_compile_hub_source_omitted_for_yolo_primary() -> None:
+    event = _event(kind="click", click_count=1)
+    instruction = "將滑鼠移到「影片」文字，並點擊滑鼠一下。"
+    vision = {
+        "candidates": [
+            {
+                "bbox": [10, 10, 40, 16],
+                "class_name": "text",
+                "text": "影片",
+                "source": "ocr",
+            }
+        ],
+        "local_cursor": [30, 18],
+    }
+    calls = compile_tool_calls(event, instruction, vision=vision)
+    assert calls is not None
+    assert "hub_source" not in calls[0]["arguments"]
+
+
 def test_compile_click_office_bracket_tab_structured_fields() -> None:
     event = _event(kind="click", click_count=1)
     instruction = (

@@ -198,6 +198,7 @@ async def move_mouse(
     vision_mode: str | None = None,
     name: str | None = None,
     value: str | None = None,
+    hub_source: str | None = None,
 ):
     '''
     Take a screenshot, detect UI targets (text, element, input, scrollbar), and move
@@ -227,6 +228,8 @@ async def move_mouse(
     vision_mode: optional "uia" or "yolo_ocr"; overrides a （UIA）/（YOLO+OCR） prefix.
     name: optional recorded ElementFromPoint UIA Name (feasibility; not used for match).
     value: optional recorded ElementFromPoint UIA Value (feasibility; not used for match).
+    hub_source: optional "findall" or "uia_efp" — recorded primary provenance; gates
+    hard constellation-EFP (only ``uia_efp``). Missing falls back to EFP↔hub agree.
     '''
     duration: float = 0.0
     result = await _move_mouse(
@@ -240,6 +243,7 @@ async def move_mouse(
         vision_mode=vision_mode,
         name=name,
         value=value,
+        hub_source=hub_source,
     )
     result["instruction"] = instruction
     return result

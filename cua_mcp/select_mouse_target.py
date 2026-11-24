@@ -4578,10 +4578,45 @@ def _recorded_efp_present(name: str | None, value: str | None) -> bool:
     return bool(str(name or "").strip() or str(value or "").strip())
 
 
+def _normalize_hub_source(hub_source: str | None) -> str | None:
+    """Return ``findall`` / ``uia_efp`` or ``None`` for missing/unknown."""
+    text = str(hub_source or "").strip().lower()
+    if text in ("findall", "uia_efp"):
+        return text
+    return None
+
+
 # Stricter than OCR↔UIA soft-agree (0.25): constellation-EFP must not treat
 # unrelated overlay Names (NVIDIA GeForce Overlay ↔ WinMaster7 Console ≈ 0.25)
-# as hub agreement.
+# as hub agreement. Used only when ``hub_source`` is missing (legacy caches).
 _CONSTELLATION_EFP_HUB_AGREE_THRESHOLD = 0.5
+
+
+def _should_run_constellation_efp(
+    *,
+    hub_source: str | None,
+    landmark_geometry: dict[str, Any] | None,
+    recorded_efp_name: str | None,
+    recorded_efp_value: str | None,
+    anchor: str,
+) -> bool:
+    """True when UIA-first should hard-run constellation-EFP verify.
+
+    New recordings: only ``hub_source=uia_efp``. ``findall`` uses Name shortlist
+    / geometry instead. Missing ``hub_source`` keeps legacy EFP↔hub soft-agree.
+    """
+    if landmark_geometry is None or not _recorded_efp_present(
+        recorded_efp_name, recorded_efp_value
+    ):
+        return False
+    source = _normalize_hub_source(hub_source)
+    if source == "uia_efp":
+        return True
+    if source == "findall":
+        return False
+    return _recorded_efp_agrees_with_hub(
+        anchor, recorded_efp_name, recorded_efp_value
+    )
 
 
 def _recorded_efp_agrees_with_hub(
@@ -4591,10 +4626,10 @@ def _recorded_efp_agrees_with_hub(
 ) -> bool:
     """True when press-time EFP soft-agrees with the FindAll hub anchor.
 
-    Constellation-EFP must not commit on a poisoned overlay Name (e.g. NVIDIA
-    GeForce Overlay) when the hub is a different leaf (WinMaster7 Console).
-    Weak EFP chrome names (``CoreInput``) are treated as agreeing so the
-    classic FindAll-over-EFP constellation path still runs.
+    Legacy constellation-EFP gate when ``hub_source`` is absent. Must not treat
+    a poisoned overlay Name (e.g. NVIDIA GeForce Overlay) as agreeing with a
+    different FindAll leaf (WinMaster7 Console). Weak EFP chrome names
+    (``CoreInput``) are treated as agreeing so FindAll-over-EFP still runs.
     """
     hub = str(anchor or "").strip()
     if not hub or not _recorded_efp_present(recorded_efp_name, recorded_efp_value):
@@ -5345,17 +5380,18 @@ def _try_uia_first_unique_select(
     landmark_geometry: dict[str, Any] | None = None,
     recorded_efp_name: str | None = None,
     recorded_efp_value: str | None = None,
+    hub_source: str | None = None,
     point_probe_fn: Any | None = None,
     data_item_lookup_fn: Any | None = None,
 ) -> tuple[UiDetection | None, str]:
     """Soft UIA-first commit: unique after filter + nearby prefilter, else miss reason.
 
-    When ``landmark_geometry`` and recorded EFP Name/Value are present, synthesize
-    the constellation point and EFP-probe FindAll UIA items nearer-first (not only
-    Name-matched anchors). Hit commits. Labeled-hub EFP miss soft-falls without
-    unique Name commit so YOLO/OCR can take over; geometry unavailable continues
-    into the Name shortlist. For ``data_item``, Name FindFirst runs after
-    pool/synth EFP miss and before scan-EFP (cells are omitted from FindAll).
+    Hard constellation-EFP runs when :func:`_should_run_constellation_efp` is true
+    (``hub_source=uia_efp``, or legacy EFP↔hub agree). Synthesize the constellation
+    point and EFP-probe FindAll UIA items nearer-first. Hit commits. Labeled-hub
+    EFP miss soft-falls without unique Name commit so YOLO/OCR can take over;
+    geometry unavailable continues into the Name shortlist. For ``data_item``,
+    Name FindFirst runs after pool/synth EFP miss and before scan-EFP.
     """
     from src.recorder.uia_input_boxes import split_uia_name_value_label
 
@@ -5432,22 +5468,14 @@ def _try_uia_first_unique_select(
     )
 
     constellation_ran = False
-    # Constellation-first: FindAll near synth + live EFP (skip Name shortlist).
-    # Skip when press-time EFP disagrees with the FindAll hub (overlay poison).
-    if (
-        landmark_geometry is not None
-        and _recorded_efp_present(recorded_efp_name, recorded_efp_value)
-        and not _recorded_efp_agrees_with_hub(
-            anchor, recorded_efp_name, recorded_efp_value
-        )
-    ):
-        _log_info(
-            "move_mouse uia_first landmark_efp_skip_hub_disagree "
-            f"anchor={anchor!r} recorded_name={recorded_efp_name!r} "
-            f"recorded_value={recorded_efp_value!r}; continue Name shortlist"
-        )
-    elif landmark_geometry is not None and _recorded_efp_present(
-        recorded_efp_name, recorded_efp_value
+    # Constellation-first: FindAll near synth + live EFP (skip Name shortlist)
+    # when hub_source is uia_efp (or legacy EFP↔hub agree).
+    if _should_run_constellation_efp(
+        hub_source=hub_source,
+        landmark_geometry=landmark_geometry,
+        recorded_efp_name=recorded_efp_name,
+        recorded_efp_value=recorded_efp_value,
+        anchor=anchor,
     ):
         constellation_ran = True
         geom_hit = _resolve_with_landmark_geometry(
@@ -6557,6 +6585,7 @@ async def find_mouse_point(
     vision_mode: str | None = None,
     recorded_efp_name: str | None = None,
     recorded_efp_value: str | None = None,
+    hub_source: str | None = None,
 ) -> tuple[int, int, dict[str, Any]] | None:
     """
     Capture selected monitor(s), build YOLO+OCR candidates, filter and pick via LLM.
@@ -6638,6 +6667,7 @@ async def find_mouse_point(
         vision_mode=vision_mode,
         recorded_efp_name=recorded_efp_name,
         recorded_efp_value=recorded_efp_value,
+        hub_source=hub_source,
         ocr_fallback=ocr_fallback,
     )
     if result is not None:
@@ -6680,6 +6710,7 @@ async def find_mouse_point(
         vision_mode=vision_mode,
         recorded_efp_name=recorded_efp_name,
         recorded_efp_value=recorded_efp_value,
+        hub_source=hub_source,
         ocr_fallback=ocr_fallback,
     )
     if result2 is None:
@@ -6708,6 +6739,7 @@ async def _find_mouse_point_attempt(
     vision_mode: str | None = None,
     recorded_efp_name: str | None = None,
     recorded_efp_value: str | None = None,
+    hub_source: str | None = None,
     ocr_fallback: Any | None = None,
 ) -> tuple[
     tuple[int, int, dict[str, Any]] | None,
@@ -6761,6 +6793,7 @@ async def _find_mouse_point_attempt(
     recorded_efp_value = (
         str(recorded_efp_value).strip() if isinstance(recorded_efp_value, str) else ""
     )
+    hub_source = _normalize_hub_source(hub_source)
     recorded_anchor_match = structured_anchor_text is not None
 
     total_started = time.perf_counter()
@@ -6957,12 +6990,16 @@ async def _find_mouse_point_attempt(
                 landmark_geometry=landmark_geometry,
                 recorded_efp_name=recorded_efp_name,
                 recorded_efp_value=recorded_efp_value,
+                hub_source=hub_source,
                 data_item_lookup_fn=_data_item_lookup_by_name,
             )
 
-        constellation_joint = (
-            landmark_geometry is not None
-            and _recorded_efp_present(recorded_efp_name, recorded_efp_value)
+        constellation_joint = _should_run_constellation_efp(
+            hub_source=hub_source,
+            landmark_geometry=landmark_geometry,
+            recorded_efp_name=recorded_efp_name,
+            recorded_efp_value=recorded_efp_value,
+            anchor=match_anchor,
         )
         constellation_yolo_dets: list[UiDetection] = []
         constellation_yolo_timing: dict[str, Any] = {}
@@ -7074,6 +7111,10 @@ async def _find_mouse_point_attempt(
                     instruction_text = str(fb_fields["instruction_text"])
                     nearby_objects = fb_fields["nearby_objects"]
                     landmark_geometry = ocr_fallback.landmark_geometry
+                    if hub_source is None:
+                        hub_source = _normalize_hub_source(
+                            getattr(ocr_fallback, "hub_source", None)
+                        )
                     recorded_anchor_match = bool(fb_fields["recorded_anchor_match"])
                     control_type_token = fb_fields["control_type_token"]
                     vision_mode = str(fb_fields["vision_mode"] or "")
@@ -7441,6 +7482,10 @@ async def _find_mouse_point_attempt(
                     instruction_text = str(fb_fields["instruction_text"])
                     nearby_objects = fb_fields["nearby_objects"]
                     landmark_geometry = ocr_fallback.landmark_geometry
+                    if hub_source is None:
+                        hub_source = _normalize_hub_source(
+                            getattr(ocr_fallback, "hub_source", None)
+                        )
                     recorded_anchor_match = bool(fb_fields["recorded_anchor_match"])
                     control_type_token = fb_fields["control_type_token"]
                     vision_mode = str(fb_fields["vision_mode"] or "")
@@ -8521,6 +8566,7 @@ async def resolve_mouse_point(
     vision_mode: str | None = None,
     recorded_efp_name: str | None = None,
     recorded_efp_value: str | None = None,
+    hub_source: str | None = None,
 ) -> tuple[int, int, dict[str, Any]]:
     """
     Capture selected monitor(s), build YOLO+OCR candidates, filter and pick via LLM.
@@ -8544,6 +8590,7 @@ async def resolve_mouse_point(
         vision_mode=vision_mode,
         recorded_efp_name=recorded_efp_name,
         recorded_efp_value=recorded_efp_value,
+        hub_source=hub_source,
     )
     if found is None:
         raise ValueError(RECORDED_ANCHOR_MISS_MESSAGE)

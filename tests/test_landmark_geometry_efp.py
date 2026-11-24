@@ -25,6 +25,7 @@ from cua_mcp.select_mouse_target import (
     _recorded_efp_agrees_with_hub,
     _recorded_efp_present,
     _scan_efp_neighbors_for_name,
+    _should_run_constellation_efp,
     _try_uia_first_unique_select,
     _verify_geometry_candidates_with_efp,
 )
@@ -1266,6 +1267,39 @@ def test_recorded_efp_agrees_with_hub_rejects_overlay_poison() -> None:
     )
 
 
+def test_should_run_constellation_efp_hub_source_gate() -> None:
+    geom = _simple_landmark_geometry()
+    assert _should_run_constellation_efp(
+        hub_source="uia_efp",
+        landmark_geometry=geom,
+        recorded_efp_name="K11",
+        recorded_efp_value="",
+        anchor="K11",
+    )
+    assert not _should_run_constellation_efp(
+        hub_source="findall",
+        landmark_geometry=geom,
+        recorded_efp_name="下載 (已釘選)",
+        recorded_efp_value="下載 (已釘選)",
+        anchor="下載",
+    )
+    # Legacy: missing hub_source uses EFP↔hub agree.
+    assert _should_run_constellation_efp(
+        hub_source=None,
+        landmark_geometry=geom,
+        recorded_efp_name="下載 (已釘選)",
+        recorded_efp_value="下載 (已釘選)",
+        anchor="下載",
+    )
+    assert not _should_run_constellation_efp(
+        hub_source=None,
+        landmark_geometry=geom,
+        recorded_efp_name="NVIDIA GeForce Overlay",
+        recorded_efp_value="",
+        anchor="WinMaster7 Console",
+    )
+
+
 def test_uia_first_skips_constellation_efp_when_hub_disagrees() -> None:
     """Poisoned overlay EFP must not false-hit; fall through to Name shortlist."""
     geom = _simple_landmark_geometry(
@@ -1333,6 +1367,147 @@ def test_uia_first_skips_constellation_efp_when_hub_disagrees() -> None:
     assert reason != "landmark_efp_synth_hit"
     assert chosen is not overlay
     assert chosen is hub
+
+
+def test_uia_first_findall_hub_source_skips_constellation_efp() -> None:
+    """Explicit findall hub_source skips hard constellation-EFP even if EFP agrees."""
+    geom = _simple_landmark_geometry(
+        landmark_label="側欄地標",
+        landmark_xy=(50.0, 50.0),
+        target_xy=(172.0, 67.0),
+        scale=100.0,
+    )
+    landmark = _det(50, 50, text="側欄地標", class_name="text")
+    hub = UiDetection(
+        bbox=(167, 62, 10, 10),
+        cx=172,
+        cy=67,
+        class_id=YOLO_CLASS_TEXT,
+        class_name="text",
+        text="WinMaster7 Console",
+        source="uia",
+        uia_control_type="list_item",
+    )
+    overlay = UiDetection(
+        bbox=(0, 0, 2560, 1600),
+        cx=1280,
+        cy=800,
+        class_id=YOLO_CLASS_INPUT,
+        class_name="input",
+        text="NVIDIA GeForce Overlay",
+        source="uia",
+    )
+
+    def probe(x: int, y: int):
+        return ("label", None, "text", "NVIDIA GeForce Overlay", "")
+
+    chosen, reason = _try_uia_first_unique_select(
+        [landmark, hub, overlay],
+        anchor="WinMaster7 Console",
+        nearby_hints=[],
+        nearby_labels=[],
+        nearby_phrases=[],
+        filter_by_control_type=True,
+        control_type_token="list_item",
+        recorded_anchor=True,
+        landmark_geometry=geom,
+        recorded_efp_name="NVIDIA GeForce Overlay",
+        recorded_efp_value="",
+        hub_source="findall",
+        point_probe_fn=probe,
+    )
+    assert reason == "hit"
+    assert chosen is hub
+
+
+def test_uia_first_findall_input_hub_source_no_hard_constellation_efp() -> None:
+    """findall input hub must not hard-commit via poisoned constellation-EFP."""
+    geom = _simple_landmark_geometry(
+        landmark_label="側欄地標",
+        landmark_xy=(50.0, 50.0),
+        target_xy=(100.0, 100.0),
+        scale=100.0,
+    )
+    landmark = _det(50, 50, text="側欄地標", class_name="text")
+    hub = UiDetection(
+        bbox=(90, 90, 20, 20),
+        cx=100,
+        cy=100,
+        class_id=YOLO_CLASS_INPUT,
+        class_name="input",
+        text="",
+        source="uia",
+        uia_control_type="input",
+    )
+
+    def probe(x: int, y: int):
+        return ("label", None, "input", "NVIDIA GeForce Overlay", "")
+
+    chosen, reason = _try_uia_first_unique_select(
+        [landmark, hub],
+        anchor="輸入欄",
+        nearby_hints=[],
+        nearby_labels=[],
+        nearby_phrases=[],
+        filter_by_control_type=True,
+        control_type_token="input",
+        recorded_anchor=True,
+        landmark_geometry=geom,
+        recorded_efp_name="NVIDIA GeForce Overlay",
+        recorded_efp_value="",
+        hub_source="findall",
+        point_probe_fn=probe,
+    )
+    assert reason != "landmark_efp_hit"
+    assert reason != "landmark_efp_synth_hit"
+    assert reason == "hit"
+    assert chosen is hub
+
+
+def test_uia_first_uia_efp_hub_source_runs_constellation_efp() -> None:
+    """uia_efp hub_source enables hard constellation-EFP (Excel-style cell)."""
+    geom = _simple_landmark_geometry(
+        landmark_label="側欄地標",
+        landmark_xy=(50.0, 50.0),
+        target_xy=(200.0, 200.0),
+        scale=100.0,
+    )
+    landmark = _det(50, 50, text="側欄地標", class_name="text")
+    cell = UiDetection(
+        bbox=(190, 190, 20, 20),
+        cx=200,
+        cy=200,
+        class_id=YOLO_CLASS_TEXT,
+        class_name="text",
+        text="K11",
+        source="uia_efp",
+        uia_control_type="data_item",
+    )
+
+    def probe(x: int, y: int):
+        if abs(x - 200) <= 5 and abs(y - 200) <= 5:
+            return ("K11", (190, 190, 20, 20), "data_item", "K11", "")
+        return ("", None, None, "", "")
+
+    chosen, reason = _try_uia_first_unique_select(
+        [landmark, cell],
+        anchor="K11",
+        nearby_hints=[],
+        nearby_labels=[],
+        nearby_phrases=[],
+        filter_by_control_type=True,
+        control_type_token="data_item",
+        recorded_anchor=True,
+        landmark_geometry=geom,
+        recorded_efp_name="K11",
+        recorded_efp_value="",
+        hub_source="uia_efp",
+        point_probe_fn=probe,
+    )
+    assert reason == "landmark_efp_hit"
+    assert chosen is not None
+    assert (chosen.cx, chosen.cy) == (200, 200)
+    assert chosen.text == "K11"
 
 
 def test_findall_pool_near_synth_drops_oversize_overlay() -> None:

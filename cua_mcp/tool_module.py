@@ -84,6 +84,7 @@ async def _move_mouse(
     vision_mode: str | None = None,
     name: str | None = None,
     value: str | None = None,
+    hub_source: str | None = None,
 ) -> dict[str, Any]:
     gx, gy, meta = await resolve_mouse_point(
         instruction,
@@ -95,6 +96,7 @@ async def _move_mouse(
         vision_mode=vision_mode,
         recorded_efp_name=name,
         recorded_efp_value=value,
+        hub_source=hub_source,
     )
     move_started = time.perf_counter()
     result = hand_tools.move(x=gx, y=gy, duration=duration)
@@ -119,6 +121,8 @@ async def _move_mouse(
         merged["name"] = name
     if value is not None:
         merged["value"] = value
+    if hub_source is not None:
+        merged["hub_source"] = hub_source
     return _with_unified_target_metadata(
         merged,
         target_kind=str(meta.get("target_kind", "mouse_target")),

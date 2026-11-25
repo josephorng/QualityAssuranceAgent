@@ -180,6 +180,31 @@ def test_run_control_step_error_persists_across_retry_until_success() -> None:
     assert events == [(1, "ok"), (1, "ok"), (1, "ok"), (1, "fail"), (1, "fail"), (2, "fail")]
 
 
+def test_run_control_step_progress_callback() -> None:
+    run_control.reset_run_control()
+    phases: list[str] = []
+    run_control.notify_step_progress("選取 · FindAll")
+    assert run_control.step_progress_phase() == "選取 · FindAll"
+    assert phases == []
+    run_control.set_step_progress_callback(phases.append)
+    run_control.notify_step_progress("選取 · OCR")
+    assert run_control.step_progress_phase() == "選取 · OCR"
+    assert phases == ["選取 · OCR"]
+    run_control.notify_step_progress("  ")
+    assert run_control.step_progress_phase() == ""
+    assert phases == ["選取 · OCR", ""]
+    run_control.notify_active_step(0)
+    run_control.notify_step_progress("執行中")
+    run_control.notify_active_step(None)
+    assert run_control.step_progress_phase() == ""
+    run_control.reset_run_control()
+    run_control.notify_step_progress("驗證中")
+    assert phases == ["選取 · OCR", "", "執行中"]
+    assert run_control.step_progress_phase() == "驗證中"
+    run_control.reset_run_control()
+    assert run_control.step_progress_phase() == ""
+
+
 def test_run_control_active_step_reset() -> None:
     run_control.reset_run_control()
     seen: list[int | None] = []

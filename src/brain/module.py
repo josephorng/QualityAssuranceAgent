@@ -43,6 +43,7 @@ from src.common.nearby_side import enrich_tool_arguments_from_goal
 from src.common.prompting import get_prompt
 from src.common.run_control import (
     notify_active_step,
+    notify_step_progress,
     publish_script_steps,
     take_recording_replay_dirty,
 )
@@ -1664,6 +1665,7 @@ class BrainModule:
             return None
         self._replay_press_point_window = deferred.replay_press_point_window
         self._step_close_windows_ok = deferred.step_close_windows_ok
+        notify_step_progress("驗證中")
         miss, _windows_after = await self._window_verify_observation(
             deferred.windows_before,
             deferred.recorded,
@@ -2210,6 +2212,7 @@ class BrainModule:
             instruction=instruction,
             event_index=event_index,
         )
+        notify_step_progress("執行中")
         started_iso = datetime.now(timezone.utc).isoformat()
         started_at = perf_counter()
         # Attribute rare dirty reloads to this step's duration (not the inter-step gap).
@@ -2248,6 +2251,7 @@ class BrainModule:
                 not skip_verification
                 and predicate_has_ready_assertions({"ready": ready_verify})
             ):
+                notify_step_progress("驗證中")
                 ready_miss = await self._poll_ready_verify(
                     ready_verify,
                     script_step_index=script_step_index,
@@ -2266,6 +2270,7 @@ class BrainModule:
                 if window_verify_has_assertions(window_verify):
                     windows_before = await self._snapshot_top_level_windows()
 
+                notify_step_progress("執行中")
                 step_succeeded = await self.loop()
                 # Window verify polls continuously when present (floors only).
                 # Otherwise sleep a fixed short gap before finished_at is stamped.
@@ -2279,6 +2284,7 @@ class BrainModule:
                 )
                 window_miss: ScriptStepVerifyResult | None = None
                 if run_window_verify:
+                    notify_step_progress("驗證中")
                     if window_poll_settle is not None:
                         window_miss = await self._poll_window_verify(
                             windows_before,

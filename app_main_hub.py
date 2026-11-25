@@ -41,7 +41,9 @@ from src.common.run_control import (
     request_step_jump,
     set_pause_at_step,
     set_pause_at_step_callback,
+    set_step_progress_callback,
     step_is_busy,
+    step_progress_phase,
     take_pending_step_jump,
     reset_run_control,
     resume_run,
@@ -333,6 +335,12 @@ class MainHub(ctk.CTk):
         self._retry_countdown_left = 0
         self._track_script_step_status = False
         self._active_replay_event_index: int | None = None
+        self._replay_progress_phase = ""
+        self._replay_progress_phase_before_pause = ""
+        self._replay_elapsed_base_s = 0.0
+        self._replay_elapsed_segment_started_at: float | None = None
+        self._replay_elapsed_after_id: str | None = None
+        self._replay_progress_step_index: int | None = None
         self._recording_analysis_thread: threading.Thread | None = None
         self._recording_finalize_thread: threading.Thread | None = None
         # Live capture must stay serial: parallel YOLO+OCR twins during scroll
@@ -1074,7 +1082,12 @@ class MainHub(ctk.CTk):
                     self._replay_step_errors.pop(step_index, None)
                 self._show_replay_step(self._replay_display_index())
                 if retry_pause:
+                    self._freeze_replay_progress_for_pause()
                     self._start_retry_countdown()
+                elif status == "ok" and not reason:
+                    self._stop_replay_elapsed_timer(clear_badge=True)
+                elif status == "fail":
+                    self._freeze_replay_progress_for_pause()
             self._commit_pending_replay_delete(
                 keep_in_session=not (status == "ok" and bool(reason))
             )
@@ -2659,6 +2672,7 @@ class MainHub(ctk.CTk):
         overlay = self._replay_overlay
         if overlay is not None:
             overlay.set_paused(True)
+        self._freeze_replay_progress_for_pause()
         self._status.configure(text="已暫停（點繼續以恢復）")
 
     def _on_resume_run(self) -> None:
@@ -2672,6 +2686,7 @@ class MainHub(ctk.CTk):
         overlay = self._replay_overlay
         if overlay is not None:
             overlay.set_paused(False)
+        self._unfreeze_replay_progress_after_resume()
         self._status.configure(text="執行中…")
 
     def _hold_retry_pause(self) -> None:
@@ -2683,6 +2698,7 @@ class MainHub(ctk.CTk):
         overlay = self._replay_overlay
         if overlay is not None:
             overlay.set_paused(True)
+        self._freeze_replay_progress_for_pause()
         self._status.configure(text="已暫停（點繼續以恢復）")
 
     def _start_retry_countdown(self) -> None:
@@ -2973,6 +2989,7 @@ class MainHub(ctk.CTk):
         """Refresh the replay overlay label from the coordinator thread."""
         instruction = active_step_instruction()
         event_index = active_step_event_index()
+        phase = step_progress_phase()
 
         def apply() -> None:
             if self._replay_hold_for_error:
@@ -2990,11 +3007,162 @@ class MainHub(ctk.CTk):
             if step_index is not None:
                 self._replay_nav_index = step_index
             self._show_replay_step(self._replay_display_index())
+            self._on_replay_active_step_progress(step_index, phase=phase)
 
         try:
             self.after(0, apply)
         except Exception:
             return
+
+    @staticmethod
+    def _format_replay_elapsed(elapsed_seconds: float) -> str:
+        total = max(0, int(elapsed_seconds))
+        minutes, seconds = divmod(total, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours > 0:
+            return f"{hours:d}:{minutes:02d}:{seconds:02d}"
+        return f"{minutes:02d}:{seconds:02d}"
+
+    def _replay_badge_step_text(self, step_index: int | None = None) -> str:
+        index = step_index if step_index is not None else self._replay_progress_step_index
+        total = len(self._replay_step_instructions)
+        if index is None:
+            return "重播中"
+        if total > 0:
+            return f"重播中 · 步驟 {index + 1}/{total}"
+        return f"重播中 · 步驟 {index + 1}"
+
+    def _replay_elapsed_seconds(self) -> float:
+        elapsed = max(0.0, float(self._replay_elapsed_base_s))
+        started = self._replay_elapsed_segment_started_at
+        if started is not None:
+            elapsed += max(0.0, time.monotonic() - started)
+        return elapsed
+
+    def _refresh_replay_monitor_progress(self) -> None:
+        frames = self._replay_monitor_frames
+        if frames is None:
+            return
+        phase = self._replay_progress_phase
+        elapsed_text = ""
+        if self._replay_progress_step_index is not None or phase or self._replay_elapsed_segment_started_at is not None or self._replay_elapsed_base_s > 0:
+            elapsed_text = self._format_replay_elapsed(self._replay_elapsed_seconds())
+        frames.set_progress(
+            step_text=self._replay_badge_step_text(),
+            phase=phase,
+            elapsed_text=elapsed_text,
+        )
+
+    def _stop_replay_elapsed_timer(self, *, clear_badge: bool = False) -> None:
+        after_id = self._replay_elapsed_after_id
+        self._replay_elapsed_after_id = None
+        if after_id is not None:
+            try:
+                self.after_cancel(after_id)
+            except Exception:
+                pass
+        self._replay_elapsed_segment_started_at = None
+        self._replay_elapsed_base_s = 0.0
+        self._replay_progress_phase = ""
+        self._replay_progress_phase_before_pause = ""
+        self._replay_progress_step_index = None
+        if clear_badge:
+            frames = self._replay_monitor_frames
+            if frames is not None:
+                frames.clear_progress()
+
+    def _schedule_replay_elapsed_tick(self) -> None:
+        if self._replay_elapsed_after_id is not None:
+            return
+        if self._replay_monitor_frames is None:
+            return
+        self._replay_elapsed_after_id = self.after(1000, self._tick_replay_elapsed)
+
+    def _tick_replay_elapsed(self) -> None:
+        self._replay_elapsed_after_id = None
+        if self._replay_monitor_frames is None:
+            return
+        if self._replay_progress_step_index is None and not self._replay_progress_phase:
+            return
+        self._refresh_replay_monitor_progress()
+        self._schedule_replay_elapsed_tick()
+
+    def _start_replay_step_elapsed(self, step_index: int, *, phase: str = "") -> None:
+        self._replay_progress_step_index = step_index
+        self._replay_elapsed_base_s = 0.0
+        self._replay_elapsed_segment_started_at = None if is_paused() else time.monotonic()
+        cleaned = str(phase or "").strip()
+        if is_paused():
+            self._replay_progress_phase_before_pause = cleaned or "執行中"
+            self._replay_progress_phase = "暫停"
+        else:
+            self._replay_progress_phase = cleaned or "執行中"
+            self._replay_progress_phase_before_pause = self._replay_progress_phase
+        self._refresh_replay_monitor_progress()
+        self._schedule_replay_elapsed_tick()
+
+    def _on_replay_active_step_progress(
+        self,
+        step_index: int | None,
+        *,
+        phase: str = "",
+    ) -> None:
+        if step_index is None:
+            self._stop_replay_elapsed_timer(clear_badge=True)
+            return
+        if self._replay_progress_step_index != step_index:
+            self._start_replay_step_elapsed(step_index, phase=phase)
+            return
+        cleaned = str(phase or "").strip()
+        if cleaned:
+            self._set_replay_progress_phase(cleaned)
+        else:
+            self._refresh_replay_monitor_progress()
+
+    def _set_replay_progress_phase(self, phase: str) -> None:
+        cleaned = str(phase or "").strip()
+        if is_paused():
+            if cleaned and cleaned != "暫停":
+                self._replay_progress_phase_before_pause = cleaned
+            self._replay_progress_phase = "暫停"
+        else:
+            self._replay_progress_phase = cleaned or self._replay_progress_phase or "執行中"
+            if cleaned:
+                self._replay_progress_phase_before_pause = cleaned
+        self._refresh_replay_monitor_progress()
+        self._schedule_replay_elapsed_tick()
+
+    def _on_step_progress_from_worker(self, phase: str) -> None:
+        """Update the「重播中」badge phase from a worker/tool thread."""
+
+        def apply() -> None:
+            self._set_replay_progress_phase(phase)
+
+        try:
+            self.after(0, apply)
+        except Exception:
+            return
+
+    def _freeze_replay_progress_for_pause(self) -> None:
+        started = self._replay_elapsed_segment_started_at
+        if started is not None:
+            self._replay_elapsed_base_s += max(0.0, time.monotonic() - started)
+            self._replay_elapsed_segment_started_at = None
+        if self._replay_progress_phase and self._replay_progress_phase != "暫停":
+            self._replay_progress_phase_before_pause = self._replay_progress_phase
+        if self._replay_progress_step_index is not None or self._replay_progress_phase:
+            self._replay_progress_phase = "暫停"
+            self._refresh_replay_monitor_progress()
+
+    def _unfreeze_replay_progress_after_resume(self) -> None:
+        if self._replay_progress_step_index is None and not self._replay_progress_phase:
+            return
+        restored = self._replay_progress_phase_before_pause.strip() or "執行中"
+        self._replay_progress_phase = restored
+        if self._replay_elapsed_segment_started_at is None:
+            self._replay_elapsed_segment_started_at = time.monotonic()
+        self._refresh_replay_monitor_progress()
+        self._schedule_replay_elapsed_tick()
 
     def _sync_replay_steps_from_worker(self, raw: str, script_path: Path) -> None:
         """Publish the queue item's steps on the Tk thread before that script starts."""
@@ -3040,14 +3208,21 @@ class MainHub(ctk.CTk):
             self,
             monitor_indices=self._selected_monitor_indices(),
         )
+        set_step_progress_callback(self._on_step_progress_from_worker)
+        existing_phase = step_progress_phase()
+        active = active_step_index()
+        if active is not None:
+            self._on_replay_active_step_progress(active, phase=existing_phase)
 
     def _destroy_replay_monitor_frames(self) -> None:
+        self._stop_replay_elapsed_timer(clear_badge=False)
         frames = self._replay_monitor_frames
         self._replay_monitor_frames = None
         if frames is not None:
             frames.destroy()
 
     def _destroy_replay_overlay(self) -> None:
+        set_step_progress_callback(None)
         self._destroy_replay_monitor_frames()
         self._cancel_retry_countdown()
         self._cancel_replay_rerecord()
@@ -4417,6 +4592,7 @@ class MainHub(ctk.CTk):
         set_active_step_callback(self._on_active_step_from_worker)
         set_script_steps_callback(self._on_script_steps_from_worker)
         set_pause_at_step_callback(self._on_paused_at_step_from_worker)
+        set_step_progress_callback(self._on_step_progress_from_worker)
         self._track_script_step_status = args.run_mode in ("script", "runtime")
         set_step_status_callback(self._on_step_status_from_worker)
         self._set_run_button_running()

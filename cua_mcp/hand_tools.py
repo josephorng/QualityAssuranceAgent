@@ -16,8 +16,17 @@ from cua_mcp.llm_json import parse_json_object
 from src.common.llm_factory import get_llm_client
 from src.common.llm_text import strip_llm_quote_wrappers
 from src.common.prompting import get_prompt
+from src.common.run_control import notify_step_progress
 from src.common.settings import load_settings
 from src.eye.capture import capture_active_monitor_to_file
+
+
+def _notify_click_phase() -> None:
+    """Mark the replay badge as acting (click / drag / move-to-target)."""
+    try:
+        notify_step_progress("點擊")
+    except Exception:
+        pass
 
 
 def _normalize_hotkey_token(key: str) -> str:
@@ -151,6 +160,7 @@ def click(
     keyDown for the duration of the click, then released in reverse order.
     The root window under the click point is read before the button goes down.
     """
+    _notify_click_phase()
     button = _normalize_button(button)
     held = [_canonicalize_key(m) for m in (modifiers or []) if str(m).strip()]
     if x is not None and y is not None:
@@ -278,6 +288,7 @@ def move(x: int, y: int, duration: float = 0.0) -> dict[str, Any]:
     Refuses primary-monitor fail-safe corners. If FAILSAFE trips because the
     cursor was already in a corner, nudge inward and retry once.
     """
+    _notify_click_phase()
     tx, ty = int(x), int(y)
     if _is_pyautogui_failsafe_corner(tx, ty):
         raise ValueError(
@@ -336,6 +347,7 @@ def drag(
     button: str = "left",
 ) -> dict[str, Any]:
     """Drag from (x1,y1) to (x2,y2)."""
+    _notify_click_phase()
     button = _normalize_button(button)
     pyautogui.moveTo(x1, y1)
     pyautogui.dragTo(x2, y2, duration=duration, button=button)

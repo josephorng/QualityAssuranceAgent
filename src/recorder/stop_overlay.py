@@ -70,6 +70,8 @@ _REPLAY_FRAME_BADGE_TEXT = "重播中"
 _REPLAY_FRAME_BADGE_MARGIN = 12
 _REPLAY_FRAME_BADGE_FG = "#1a1a1a"
 _REPLAY_FRAME_HARDEN_MS = 50
+_REPLAY_FRAME_BADGE_MIN_WIDTH = 120
+_REPLAY_FRAME_BADGE_MIN_HEIGHT = 28
 
 _monitors_cache: list[dict[str, int]] = []
 _monitors_cache_at = 0.0
@@ -976,6 +978,10 @@ class ReplayMonitorFrameOverlay:
         self._master = master
         self._destroyed = False
         self._windows: list[Any] = []
+        self._badges: list[dict[str, Any]] = []
+        self._step_text = _REPLAY_FRAME_BADGE_TEXT
+        self._phase_text = ""
+        self._elapsed_text = ""
         mons = resolve_replay_frame_monitors(monitor_indices)
         if not mons:
             mons = [_fallback_monitor(master)]
@@ -1052,8 +1058,12 @@ class ReplayMonitorFrameOverlay:
 
     def _spawn_badge(self, master: Any, mon: dict[str, int]) -> None:
         ox, oy = replay_frame_badge_origin(mon)
+        title_label: ctk.CTkLabel | None = None
+        phase_label: ctk.CTkLabel | None = None
+        elapsed_label: ctk.CTkLabel | None = None
 
         def _content(win: Any) -> None:
+            nonlocal title_label, phase_label, elapsed_label
             frame = ctk.CTkFrame(
                 win,
                 corner_radius=6,
@@ -1061,17 +1071,36 @@ class ReplayMonitorFrameOverlay:
                 border_width=0,
             )
             frame.pack(fill="both", expand=True, padx=1, pady=1)
-            ctk.CTkLabel(
+            title_label = ctk.CTkLabel(
                 frame,
                 text=_REPLAY_FRAME_BADGE_TEXT,
                 font=ctk.CTkFont(size=12, weight="bold"),
                 text_color=(_REPLAY_FRAME_BADGE_FG, _REPLAY_FRAME_BADGE_FG),
-            ).pack(padx=10, pady=4)
+                anchor="w",
+                justify="left",
+            )
+            title_label.pack(anchor="w", padx=10, pady=(4, 0))
+            phase_label = ctk.CTkLabel(
+                frame,
+                text="",
+                font=ctk.CTkFont(size=11),
+                text_color=(_REPLAY_FRAME_BADGE_FG, _REPLAY_FRAME_BADGE_FG),
+                anchor="w",
+                justify="left",
+            )
+            elapsed_label = ctk.CTkLabel(
+                frame,
+                text="",
+                font=ctk.CTkFont(size=11),
+                text_color=(_REPLAY_FRAME_BADGE_FG, _REPLAY_FRAME_BADGE_FG),
+                anchor="w",
+                justify="left",
+            )
 
         win = self._spawn_colored_window(
             master,
-            width=72,
-            height=28,
+            width=_REPLAY_FRAME_BADGE_MIN_WIDTH,
+            height=_REPLAY_FRAME_BADGE_MIN_HEIGHT,
             ox=ox,
             oy=oy,
             title="replay-badge",
@@ -1079,13 +1108,104 @@ class ReplayMonitorFrameOverlay:
         )
         if win is None:
             return
+        self._badges.append(
+            {
+                "win": win,
+                "mon": dict(mon),
+                "title": title_label,
+                "phase": phase_label,
+                "elapsed": elapsed_label,
+            }
+        )
+        self._resize_badge(self._badges[-1])
+
+    def _pack_optional_label(
+        self,
+        label: ctk.CTkLabel | None,
+        *,
+        text: str,
+        after: Any | None = None,
+    ) -> None:
+        if label is None:
+            return
+        cleaned = str(text or "").strip()
+        try:
+            if cleaned:
+                label.configure(text=cleaned)
+                if not label.winfo_ismapped():
+                    pack_kwargs: dict[str, Any] = {
+                        "anchor": "w",
+                        "padx": 10,
+                        "pady": (0, 0),
+                    }
+                    if after is not None:
+                        pack_kwargs["after"] = after
+                    label.pack(**pack_kwargs)
+            else:
+                label.configure(text="")
+                if label.winfo_ismapped():
+                    label.pack_forget()
+        except Exception:
+            pass
+
+    def _resize_badge(self, badge: dict[str, Any]) -> None:
+        win = badge.get("win")
+        mon = badge.get("mon")
+        if win is None or not isinstance(mon, dict):
+            return
+        ox, oy = replay_frame_badge_origin(mon)
         try:
             win.update_idletasks()
-            width = max(int(win.winfo_reqwidth()), 72)
-            height = max(int(win.winfo_reqheight()), 28)
+            width = max(int(win.winfo_reqwidth()), _REPLAY_FRAME_BADGE_MIN_WIDTH)
+            height = max(int(win.winfo_reqheight()), _REPLAY_FRAME_BADGE_MIN_HEIGHT)
             win.geometry(f"{width}x{height}+{ox}+{oy}")
         except Exception:
             pass
+
+    def set_progress(
+        self,
+        *,
+        step_text: str | None = None,
+        phase: str | None = None,
+        elapsed_text: str | None = None,
+    ) -> None:
+        """Update every monitor badge with step title, coarse phase, and elapsed."""
+        if self._destroyed:
+            return
+        if step_text is not None:
+            cleaned = str(step_text).strip() or _REPLAY_FRAME_BADGE_TEXT
+            self._step_text = cleaned
+        if phase is not None:
+            self._phase_text = str(phase).strip()
+        if elapsed_text is not None:
+            self._elapsed_text = str(elapsed_text).strip()
+        for badge in list(self._badges):
+            title = badge.get("title")
+            phase_label = badge.get("phase")
+            elapsed_label = badge.get("elapsed")
+            try:
+                if title is not None:
+                    title.configure(text=self._step_text)
+            except Exception:
+                pass
+            self._pack_optional_label(phase_label, text=self._phase_text, after=title)
+            after_for_elapsed = phase_label if self._phase_text else title
+            self._pack_optional_label(
+                elapsed_label,
+                text=self._elapsed_text,
+                after=after_for_elapsed,
+            )
+            self._resize_badge(badge)
+        if self._phase_text or self._elapsed_text:
+            self._harden_all()
+
+    def clear_progress(self) -> None:
+        """Reset badges to the plain「重播中」title."""
+        self.set_progress(
+            step_text=_REPLAY_FRAME_BADGE_TEXT,
+            phase="",
+            elapsed_text="",
+        )
 
     def _harden_all(self) -> None:
         if self._destroyed:
@@ -1113,6 +1233,7 @@ class ReplayMonitorFrameOverlay:
         if self._destroyed:
             return
         self._destroyed = True
+        self._badges = []
         windows = list(self._windows)
         self._windows = []
         for win in windows:

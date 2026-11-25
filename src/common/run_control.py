@@ -35,6 +35,10 @@ _script_step_lines: list[str] = []
 _script_step_event_indices: list[int | None] = []
 _ScriptStepsCallback = Callable[[list[str], list[int | None]], None]
 _script_steps_callback: _ScriptStepsCallback | None = None
+# Coarse live phase for the replay「重播中」badge (FindAll / YOLO / 驗證…).
+_StepProgressCallback = Callable[[str], None]
+_step_progress_phase: str = ""
+_step_progress_callback: _StepProgressCallback | None = None
 _active_step_lock = threading.Lock()
 
 # Recording replay script on disk may have changed (hub edits). Cleared when brain reloads.
@@ -135,6 +139,7 @@ def clear_active_step() -> None:
     global _active_step_callback, _pending_step_jump, _script_steps_callback
     global _script_step_lines, _script_step_event_indices
     global _pause_at_step, _pause_at_step_callback
+    global _step_progress_phase, _step_progress_callback
     with _active_step_lock:
         _active_step_index = None
         _active_step_instruction = None
@@ -146,6 +151,36 @@ def clear_active_step() -> None:
         _script_steps_callback = None
         _script_step_lines = []
         _script_step_event_indices = []
+        _step_progress_phase = ""
+        _step_progress_callback = None
+
+
+def set_step_progress_callback(callback: _StepProgressCallback | None) -> None:
+    """Register or clear the coarse live-phase callback for the replay badge."""
+    global _step_progress_callback
+    with _active_step_lock:
+        _step_progress_callback = callback
+
+
+def notify_step_progress(phase: str) -> None:
+    """Publish a coarse live phase for the in-progress script step.
+
+    Empty ``phase`` clears the stored label. Late UI attach can read the last
+    value via :func:`step_progress_phase`.
+    """
+    global _step_progress_phase
+    cleaned = str(phase or "").strip()
+    with _active_step_lock:
+        _step_progress_phase = cleaned
+        callback = _step_progress_callback
+    if callback is not None:
+        callback(cleaned)
+
+
+def step_progress_phase() -> str:
+    """Return the latest coarse live phase, or ``\"\"`` when none is set."""
+    with _active_step_lock:
+        return _step_progress_phase
 
 
 def notify_active_step(
@@ -156,10 +191,13 @@ def notify_active_step(
 ) -> None:
     """Publish the script step the agent is currently running."""
     global _active_step_index, _active_step_instruction, _active_step_event_index
+    global _step_progress_phase
     with _active_step_lock:
         _active_step_index = step_index
         _active_step_instruction = instruction
         _active_step_event_index = event_index if isinstance(event_index, int) else None
+        if step_index is None:
+            _step_progress_phase = ""
         callback = _active_step_callback
     if callback is not None:
         callback(step_index)

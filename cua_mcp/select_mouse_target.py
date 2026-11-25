@@ -75,6 +75,7 @@ from cua_mcp.select_ui_element import (
     _sort_detections_reading_order,
 )
 from src.common.io_utils import imread_bgr, imwrite_bgr, write_json
+from src.common.run_control import notify_step_progress
 from src.common.nearby_side import (
     NearbyHint,
     anchor_satisfies_side,
@@ -730,6 +731,14 @@ def _timing_payload_with_roi(
     if uia_text_ocr_skipped is not None:
         payload["uia_text_ocr_skipped"] = int(uia_text_ocr_skipped)
     return payload
+
+
+def _notify_replay_phase(phase: str) -> None:
+    """Publish a coarse live phase for the replay「重播中」badge (best-effort)."""
+    try:
+        notify_step_progress(phase)
+    except Exception:
+        pass
 
 
 def _add_vision_phase_timing(dst: dict[str, Any], src: dict[str, Any]) -> None:
@@ -4458,6 +4467,8 @@ def _finish_deferred_ocr_pendings(
     Finish-pass timings replace the deferred pre-OCR vision phase values
     (they already include YOLO/UIA from the pending snapshot).
     """
+    if pendings:
+        _notify_replay_phase("選取 · OCR")
     all_detections: list[UiDetection] = []
     merged_vision: dict[str, Any] = {
         "yolo_s": 0.0,
@@ -7279,6 +7290,7 @@ async def _find_mouse_point_attempt(
     total_started = time.perf_counter()
     caption_role = caption_role_from_instruction(instruction_text)
     if caption_role is not None and click_window:
+        _notify_replay_phase("選取 · 標題列")
         caption_hit = await asyncio.to_thread(
             resolve_caption_button_mouse_point,
             instruction_text,
@@ -7522,6 +7534,7 @@ async def _find_mouse_point_attempt(
             if constellation_yolo_dets and allow_reuse:
                 yolo_boxes = constellation_yolo_dets
             else:
+                _notify_replay_phase("選取 · YOLO")
                 vision = await asyncio.to_thread(
                     _finish_captured_mouse_candidates,
                     monitor_indices,
@@ -7557,6 +7570,7 @@ async def _find_mouse_point_attempt(
                     )
                 )
                 yolo_boxes = constellation_yolo_dets
+                _notify_replay_phase("選取 · FindAll")
                 _log_info(
                     "move_mouse uia_first constellation_yolo "
                     f"deferred n={len(yolo_boxes)} "
@@ -7564,6 +7578,7 @@ async def _find_mouse_point_attempt(
                 )
             return _sort_detections_reading_order([*uia_list, *yolo_boxes])
 
+        _notify_replay_phase("選取 · FindAll")
         uia_first_started = time.perf_counter()
         uia_dets = await asyncio.to_thread(
             _uia_only_detections_for_click_window, captured, click_window
@@ -7787,6 +7802,7 @@ async def _find_mouse_point_attempt(
                 _fb_occ,
                 _fb_track,
             ) = parse_mouse_target_instruction(ocr_fallback.instruction)
+            _notify_replay_phase("選取 · 子目標")
             vision = await asyncio.to_thread(
                 _finish_captured_mouse_candidates,
                 monitor_indices,
@@ -8329,6 +8345,7 @@ async def _find_mouse_point_attempt(
         # （YOLO+OCR）never commits via UIA, so OCR must run during capture
         # (and overlaps the parallel UIA replay-repair walk when present).
         defer_ocr = bool(allow_uia_select)
+        _notify_replay_phase("選取 · YOLO" if defer_ocr else "選取 · OCR")
         if grabbed_frames:
             vision = await asyncio.to_thread(
                 _finish_captured_mouse_candidates,

@@ -229,13 +229,104 @@ def test_replay_monitor_frame_overlay_destroy_is_idempotent() -> None:
     wins = [_FakeWin(), _FakeWin()]
     overlay._destroyed = False
     overlay._windows = wins
+    overlay._badges = [{"win": wins[0]}]
 
     overlay.destroy()
     overlay.destroy()
 
     assert overlay._destroyed is True
     assert overlay._windows == []
+    assert overlay._badges == []
     assert all(win.destroyed for win in wins)
+
+
+def test_replay_monitor_frame_overlay_set_progress_updates_labels() -> None:
+    class _Label:
+        def __init__(self) -> None:
+            self.text = ""
+            self.mapped = False
+            self.after_widget = None
+
+        def configure(self, **kwargs: object) -> None:
+            if "text" in kwargs:
+                self.text = str(kwargs["text"])
+
+        def winfo_ismapped(self) -> bool:
+            return self.mapped
+
+        def pack(self, **kwargs: object) -> None:
+            self.mapped = True
+            self.after_widget = kwargs.get("after")
+
+        def pack_forget(self) -> None:
+            self.mapped = False
+            self.after_widget = None
+
+    class _FakeWin:
+        def __init__(self) -> None:
+            self.geometry_calls: list[str] = []
+
+        def update_idletasks(self) -> None:
+            return None
+
+        def winfo_reqwidth(self) -> int:
+            return 140
+
+        def winfo_reqheight(self) -> int:
+            return 64
+
+        def geometry(self, value: str) -> None:
+            self.geometry_calls.append(value)
+
+        def winfo_exists(self) -> bool:
+            return True
+
+        def attributes(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def lift(self) -> None:
+            return None
+
+    overlay = ReplayMonitorFrameOverlay.__new__(ReplayMonitorFrameOverlay)
+    overlay._destroyed = False
+    win = _FakeWin()
+    title = _Label()
+    phase = _Label()
+    elapsed = _Label()
+    overlay._windows = [win]
+    overlay._badges = [
+        {
+            "win": win,
+            "mon": {"left": 100, "top": 50, "width": 200, "height": 100},
+            "title": title,
+            "phase": phase,
+            "elapsed": elapsed,
+        }
+    ]
+    overlay._step_text = "重播中"
+    overlay._phase_text = ""
+    overlay._elapsed_text = ""
+    overlay._harden_all = lambda: None  # type: ignore[method-assign]
+
+    overlay.set_progress(
+        step_text="重播中 · 步驟 4/12",
+        phase="選取 · FindAll",
+        elapsed_text="00:07",
+    )
+    assert title.text == "重播中 · 步驟 4/12"
+    assert phase.text == "選取 · FindAll"
+    assert phase.mapped is True
+    assert elapsed.text == "00:07"
+    assert elapsed.mapped is True
+    assert win.geometry_calls
+    assert win.geometry_calls[-1].endswith("+112+62")
+
+    overlay.clear_progress()
+    assert title.text == "重播中"
+    assert phase.text == ""
+    assert phase.mapped is False
+    assert elapsed.text == ""
+    assert elapsed.mapped is False
 
 
 def test_fill_verify_checks_does_not_stack_scroll_shells() -> None:

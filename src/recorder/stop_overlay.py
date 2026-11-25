@@ -671,7 +671,7 @@ def _apply_click_through(win: Any) -> None:
 
 
 class RecordingUiaStatusOverlay:
-    """Always-on-top settle-UIA LED + idle ElementFromPoint Name/Value label."""
+    """Always-on-top settle-UIA LED + idle ElementFromPoint control_type/Name/Value."""
 
     def __init__(self, master: Any) -> None:
         self._master = master
@@ -891,12 +891,14 @@ class RecordingUiaStatusOverlay:
         name: str | None,
         value: str | None,
         *,
+        control_type: str | None = None,
         pending: bool = False,
     ) -> None:
         if self._destroyed or self._label is None:
             return
         name_s = str(name or "").strip()
         value_s = str(value or "").strip()
+        type_s = str(control_type or "").strip()
         if pending and not name_s and not value_s:
             text = "…"
         elif name_s and value_s:
@@ -905,8 +907,12 @@ class RecordingUiaStatusOverlay:
             text = name_s
         elif value_s:
             text = value_s
+        elif type_s:
+            text = type_s
         else:
             text = "—"
+        if type_s and text not in ("…", type_s):
+            text = f"{type_s} · {text}"
         if len(text) > _UIA_EFP_LABEL_WIDTH:
             text = text[: _UIA_EFP_LABEL_WIDTH - 1] + "…"
         try:
@@ -927,6 +933,7 @@ class RecordingUiaStatusOverlay:
         self.set_efp_label(
             str(payload.get("efp_name") or ""),
             str(payload.get("efp_value") or ""),
+            control_type=str(payload.get("efp_control_type") or ""),
             pending=bool(payload.get("efp_pending")),
         )
 

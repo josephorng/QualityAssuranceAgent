@@ -1214,6 +1214,7 @@ class RecordingSession:
         self._uia_status_after_index: int | None = None
         self._uia_status_efp_name: str = ""
         self._uia_status_efp_value: str = ""
+        self._uia_status_efp_control_type: str = ""
         self._uia_status_efp_pending: bool = False
         # Idle hover FindAll LED claim; settle/seed yellow bumps the token.
         self._hover_uia_led_active: bool = False
@@ -1224,6 +1225,7 @@ class RecordingSession:
         self._idle_efp_cursor_xy: tuple[int, int] | None = None
         self._idle_efp_probed_name: str = ""
         self._idle_efp_probed_value: str = ""
+        self._idle_efp_probed_control_type: str = ""
         # Full idle ElementFromPoint payload for press-time EFP fallback.
         self._idle_efp_payload: dict[str, Any] | None = None
         self._finalizing = False
@@ -1391,6 +1393,7 @@ class RecordingSession:
             self._uia_status_after_index = None
             self._uia_status_efp_name = ""
             self._uia_status_efp_value = ""
+            self._uia_status_efp_control_type = ""
             self._uia_status_efp_pending = False
             self._hover_uia_led_active = False
             self._hover_uia_led_token = 0
@@ -1398,6 +1401,7 @@ class RecordingSession:
             self._idle_efp_cursor_xy = None
             self._idle_efp_probed_name = ""
             self._idle_efp_probed_value = ""
+            self._idle_efp_probed_control_type = ""
             self._idle_efp_payload = None
             idle_timer = self._idle_efp_timer
             self._idle_efp_timer = None
@@ -1980,6 +1984,7 @@ class RecordingSession:
         after_index: int | None | object = _EFP_UNSET,
         efp_name: str | None | object = _EFP_UNSET,
         efp_value: str | None | object = _EFP_UNSET,
+        efp_control_type: str | None | object = _EFP_UNSET,
         efp_pending: bool | None = None,
     ) -> None:
         """Publish settle-UIA LED + idle EFP label. Safe from worker/window threads."""
@@ -1998,6 +2003,11 @@ class RecordingSession:
                 self._uia_status_efp_value = self._truncate_uia_status_label(
                     "" if efp_value is None else str(efp_value)
                 )
+            if efp_control_type is not _EFP_UNSET:
+                # UIA suffix tokens are short; strip only (no Name/Value truncator).
+                self._uia_status_efp_control_type = str(
+                    "" if efp_control_type is None else efp_control_type
+                ).strip()
             if efp_pending is not None:
                 self._uia_status_efp_pending = bool(efp_pending)
             payload = {
@@ -2006,6 +2016,7 @@ class RecordingSession:
                 "after_index": self._uia_status_after_index,
                 "efp_name": self._uia_status_efp_name,
                 "efp_value": self._uia_status_efp_value,
+                "efp_control_type": self._uia_status_efp_control_type,
                 "efp_pending": self._uia_status_efp_pending,
             }
             callback = self._on_uia_status
@@ -2093,7 +2104,9 @@ class RecordingSession:
                 return
             self._idle_efp_timer = None
         # Clear stale Name/Value while the worker probe is pending (overlay "…").
-        self._emit_uia_status(efp_name="", efp_value="", efp_pending=True)
+        self._emit_uia_status(
+            efp_name="", efp_value="", efp_control_type="", efp_pending=True
+        )
         self._enqueue(
             _DeferredCaptureJob(
                 action="idle_efp",
@@ -2212,6 +2225,7 @@ class RecordingSession:
         cursor_xy: tuple[int, int] | None = None,
         efp_name: str | None = None,
         efp_value: str | None = None,
+        efp_control_type: str | None = None,
         after_index: int | None | object = _EFP_UNSET,
         claim_token: int | None = None,
         from_settle: bool = False,
@@ -2239,6 +2253,8 @@ class RecordingSession:
                 efp_name = self._idle_efp_probed_name
             if efp_value is None:
                 efp_value = self._idle_efp_probed_value
+            if efp_control_type is None:
+                efp_control_type = self._idle_efp_probed_control_type
             # Do not override an in-flight settle yellow (idle finish path).
             # Settle completion itself passes ``from_settle=True``.
             if (
@@ -2256,6 +2272,7 @@ class RecordingSession:
                 after_index=after_index,
                 efp_name=efp_name or "",
                 efp_value=efp_value or "",
+                efp_control_type=efp_control_type or "",
                 efp_pending=False,
             )
         else:
@@ -2319,6 +2336,7 @@ class RecordingSession:
                 self._idle_efp_cursor_xy = None
                 self._idle_efp_probed_name = ""
                 self._idle_efp_probed_value = ""
+                self._idle_efp_probed_control_type = ""
                 self._idle_efp_payload = None
             self._log_idle_efp_probe(
                 run_dir=run_dir,
@@ -2326,7 +2344,9 @@ class RecordingSession:
                 cursor_xy=None,
                 payload=None,
             )
-            self._emit_uia_status(efp_name="", efp_value="", efp_pending=False)
+            self._emit_uia_status(
+                efp_name="", efp_value="", efp_control_type="", efp_pending=False
+            )
             return
         with self._lock:
             if generation != int(self._idle_efp_generation):
@@ -2341,16 +2361,19 @@ class RecordingSession:
             run_dir = self._run_dir
         name = ""
         value = ""
+        control_type = ""
         stored: dict[str, Any] | None = None
         if isinstance(payload, dict):
             name = str(payload.get("name") or "").strip()
             value = str(payload.get("value") or "").strip()
+            control_type = str(payload.get("control_type") or "").strip()
             if name or value:
                 stored = dict(payload)
         with self._lock:
             self._idle_efp_cursor_xy = (int(cursor[0]), int(cursor[1]))
             self._idle_efp_probed_name = name
             self._idle_efp_probed_value = value
+            self._idle_efp_probed_control_type = control_type
             self._idle_efp_payload = stored
         self._log_idle_efp_probe(
             run_dir=run_dir,
@@ -2358,8 +2381,13 @@ class RecordingSession:
             cursor_xy=(int(cursor[0]), int(cursor[1])),
             payload=payload if isinstance(payload, dict) else None,
         )
-        # Show Name/Value as soon as the probe returns (any LED color).
-        self._emit_uia_status(efp_name=name, efp_value=value, efp_pending=False)
+        # Show Name/Value/control_type as soon as the probe returns (any LED color).
+        self._emit_uia_status(
+            efp_name=name,
+            efp_value=value,
+            efp_control_type=control_type,
+            efp_pending=False,
+        )
         cursor_xy = (int(cursor[0]), int(cursor[1]))
         leave_settle_yellow = False
         with self._lock:
@@ -2380,6 +2408,7 @@ class RecordingSession:
                 cursor_xy=cursor_xy,
                 efp_name=name,
                 efp_value=value,
+                efp_control_type=control_type,
             )
             return
         # Labeled chrome EFP can green before hover; still warm a ribbon walk.
@@ -2388,6 +2417,7 @@ class RecordingSession:
                 cursor_xy=cursor_xy,
                 efp_name=name,
                 efp_value=value,
+                efp_control_type=control_type,
             )
         hovered = self._maybe_hover_findall_uia(
             generation,
@@ -2395,6 +2425,7 @@ class RecordingSession:
             int(cursor[1]),
             efp_name=name,
             efp_value=value,
+            efp_control_type=control_type,
         )
         if hovered:
             return
@@ -2402,6 +2433,7 @@ class RecordingSession:
             cursor_xy=cursor_xy,
             efp_name=name,
             efp_value=value,
+            efp_control_type=control_type,
         )
 
     def _begin_settle_uia_yellow(self, *, after_index: int) -> None:
@@ -2414,6 +2446,7 @@ class RecordingSession:
             after_index=int(after_index),
             efp_name="",
             efp_value="",
+            efp_control_type="",
             efp_pending=True,
         )
 
@@ -2424,12 +2457,14 @@ class RecordingSession:
         cursor_xy: tuple[int, int],
         efp_name: str,
         efp_value: str,
+        efp_control_type: str = "",
     ) -> None:
         """End a hover FindAll claim by re-evaluating UIA-path readiness."""
         self._emit_uia_path_readiness(
             cursor_xy=cursor_xy,
             efp_name=efp_name,
             efp_value=efp_value,
+            efp_control_type=efp_control_type,
             claim_token=int(claim_token),
         )
 
@@ -2441,6 +2476,7 @@ class RecordingSession:
         *,
         efp_name: str = "",
         efp_value: str = "",
+        efp_control_type: str = "",
     ) -> bool:
         """Warm a cursor-local FindAll when the settle cache is not ready at point.
 
@@ -2515,6 +2551,7 @@ class RecordingSession:
                 cursor_xy=cursor_xy,
                 efp_name=efp_name,
                 efp_value=efp_value,
+                efp_control_type=efp_control_type,
             )
             self._reschedule_idle_efp_from_last_pointer()
             return True
@@ -2524,6 +2561,7 @@ class RecordingSession:
                 cursor_xy=cursor_xy,
                 efp_name=efp_name,
                 efp_value=efp_value,
+                efp_control_type=efp_control_type,
             )
             self._reschedule_idle_efp_from_last_pointer()
             return True
@@ -2613,6 +2651,7 @@ class RecordingSession:
             cursor_xy=cursor_xy,
             efp_name=efp_name,
             efp_value=efp_value,
+            efp_control_type=efp_control_type,
             claim_token=claim_token,
         )
         # Completed FindAll: only keep polling when the point is now UIA-ready
@@ -3759,6 +3798,7 @@ class RecordingSession:
             after_index=after_index,
             efp_name="",
             efp_value="",
+            efp_control_type="",
             efp_pending=False,
         )
         return generation

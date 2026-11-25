@@ -416,6 +416,7 @@ def test_idle_efp_timer_cancel_on_move_drops_stale(tmp_path: Path) -> None:
     assert statuses[-1]["state"] == "green"
     assert statuses[-1]["efp_name"] == "NameA"
     assert statuses[-1]["efp_value"] == "ValA"
+    assert statuses[-1]["efp_control_type"] == "text"
     assert statuses[-1]["efp_pending"] is False
 
 
@@ -477,6 +478,7 @@ def test_idle_efp_keeps_label_when_findall_empty_red(tmp_path: Path) -> None:
     assert statuses[-1]["state"] == "red"
     assert statuses[-1]["efp_name"] == "Leaf"
     assert statuses[-1]["efp_value"] == "V"
+    assert statuses[-1]["efp_control_type"] == "pane"
     # Confirmed empty after completed FindAll: do not loop hover FindAll.
     reschedule.assert_not_called()
     # Probe paints before hover/readiness.
@@ -609,10 +611,12 @@ def test_idle_efp_pending_clears_stale_label(tmp_path: Path) -> None:
     session._idle_efp_generation = 1
     session._uia_status_efp_name = "舊細胞"
     session._uia_status_efp_value = "1"
+    session._uia_status_efp_control_type = "data_item"
     session._idle_efp_timer_fired(1, 10, 20)
     assert statuses[-1]["efp_pending"] is True
     assert statuses[-1]["efp_name"] == ""
     assert statuses[-1]["efp_value"] == ""
+    assert statuses[-1]["efp_control_type"] == ""
 
 
 def test_settle_yellow_clears_efp_and_reschedules(tmp_path: Path) -> None:
@@ -644,6 +648,7 @@ def test_settle_yellow_clears_efp_and_reschedules(tmp_path: Path) -> None:
         session._collect_and_publish_settle_uia(42, after_event_index=0)
     assert statuses[0]["state"] == "yellow"
     assert statuses[0]["efp_name"] == ""
+    assert statuses[0]["efp_control_type"] == ""
     assert statuses[0]["efp_pending"] is True
     assert reschedule == [(11, 22)]
 
@@ -926,12 +931,15 @@ def test_recording_uia_status_overlay_apply_status() -> None:
                 "pulse": None,
                 "efp_name": "關閉",
                 "efp_value": "",
+                "efp_control_type": "button",
                 "efp_pending": False,
             }
         )
         assert overlay._state == "green"
         assert overlay._label is not None
-        assert "關閉" in str(overlay._label.cget("text"))
+        label_text = str(overlay._label.cget("text"))
+        assert "關閉" in label_text
+        assert label_text == "button · 關閉"
         overlay.destroy()
     finally:
         root.destroy()

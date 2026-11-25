@@ -1206,6 +1206,8 @@ class RecordingSession:
         self._event_queue: queue.Queue[object] = queue.Queue()
         self._worker_thread: threading.Thread | None = None
         self._on_event: Callable[[RecordedEvent], None] | None = None
+        # Optional Esc handler (e.g. mid-replay re-record cancel) — no second hook.
+        self._on_escape_cancel: Callable[[], None] | None = None
         # Settle-UIA LED + idle ElementFromPoint label (hub marshals to Tk).
         self._on_uia_status: Callable[[dict[str, Any]], None] | None = None
         self._uia_status_state: str = "red"
@@ -1228,6 +1230,13 @@ class RecordingSession:
 
     def set_on_event(self, callback: Callable[[RecordedEvent], None] | None) -> None:
         self._on_event = callback
+
+    def set_on_escape_cancel(
+        self, callback: Callable[[], None] | None
+    ) -> None:
+        """When set, Esc invokes ``callback`` instead of recording a key_press."""
+        with self._lock:
+            self._on_escape_cancel = callback
 
     def set_on_uia_status(
         self, callback: Callable[[dict[str, Any]], None] | None
@@ -1455,6 +1464,7 @@ class RecordingSession:
                 return None
             self._accepting_input = False
             self._finalizing = True
+            self._on_escape_cancel = None
             if self._mouse_listener is not None:
                 listeners.append(self._mouse_listener)
                 self._mouse_listener = None
@@ -7826,12 +7836,19 @@ class RecordingSession:
         with self._lock:
             suppress = self._suppress_hotkey_keys
             active = self._accepting_input
+            escape_cancel = self._on_escape_cancel
             # Pop even when this press is ignored so the queue stays aligned
             # with key-down callbacks.
             hardware = self._pop_hardware_key_sample_locked()
         if not active:
             return
         self._note_key_callback()
+        if key == keyboard.Key.esc and escape_cancel is not None:
+            try:
+                escape_cancel()
+            except Exception:
+                pass
+            return
         # Close a sticky left press before typing/hotkeys so a missed mouse-up
         # cannot invert gesture vs text order or inflate into a false hold.
         self._reconcile_sticky_left_press_from_os()

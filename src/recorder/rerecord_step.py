@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal
 
-from pynput import keyboard, mouse
+from pynput import mouse
 
 from src.common.io_utils import read_json, write_json
 from src.common.run_control import mark_recording_replay_dirty
@@ -60,7 +60,6 @@ RERECORDABLE_KINDS = frozenset(
 _DOUBLE_CLICK_INTERVAL_S = 0.35
 _DOUBLE_CLICK_MAX_DIST_PX = 8
 _WINDOW_AFTER_SETTLE_S = 0.45
-_ARM_GRACE_S = 0.35
 _TEMP_DIR_NAME = ".rerecord_tmp"
 
 
@@ -851,8 +850,6 @@ class StepRerecordSession:
         self._on_error: Callable[[BaseException], None] | None = None
         self._on_cancelled: Callable[[], None] | None = None
         self._capture = None
-        self._esc_listener: keyboard.Listener | None = None
-        self._armed_at = 0.0
 
     def is_armed(self) -> bool:
         with self._lock:
@@ -912,12 +909,12 @@ class StepRerecordSession:
             self._on_done = on_done
             self._on_error = on_error
             self._on_cancelled = on_cancelled
-            self._armed_at = time.monotonic()
 
         temp_dir = _reset_temp_dir(_rerecord_temp_dir(run_dir))
         capture = RecordingSession(runs_root=temp_dir.parent)
         if on_uia_status is not None:
             capture.set_on_uia_status(on_uia_status)
+        capture.set_on_escape_cancel(self.cancel)
         try:
             capture.start(
                 ignore_rect_provider=ignore_rect_provider,
@@ -931,12 +928,9 @@ class StepRerecordSession:
             shutil.rmtree(temp_dir, ignore_errors=True)
             raise
 
-        esc_listener = keyboard.Listener(on_press=self._on_esc_press)
         with self._lock:
             self._temp_dir = temp_dir
             self._capture = capture
-            self._esc_listener = esc_listener
-        esc_listener.start()
 
     def finish(self) -> None:
         """Stop capture, splice into the live recording, and invoke ``on_done``."""
@@ -952,11 +946,8 @@ class StepRerecordSession:
             capture = self._capture
             on_done = self._on_done
             on_error = self._on_error
-            esc_listener = self._esc_listener
-            self._esc_listener = None
             self._capture = None
 
-        self._stop_esc_listener(esc_listener)
         if capture is not None:
             try:
                 capture.begin_stop()
@@ -1012,8 +1003,6 @@ class StepRerecordSession:
             finishing = self._finishing
             capture = self._capture
             temp_dir = self._temp_dir
-            esc_listener = self._esc_listener
-            self._esc_listener = None
             self._capture = None
             self._temp_dir = None
             self._run_dir = None
@@ -1021,7 +1010,6 @@ class StepRerecordSession:
             if not finishing:
                 self._finishing = False
 
-        self._stop_esc_listener(esc_listener)
         if was_armed and capture is not None:
             try:
                 capture.begin_stop()
@@ -1059,15 +1047,3 @@ class StepRerecordSession:
             shutil.rmtree(temp_dir, ignore_errors=True)
         except Exception:
             pass
-
-    def _stop_esc_listener(self, listener: keyboard.Listener | None) -> None:
-        if listener is None:
-            return
-        try:
-            listener.stop()
-        except Exception:
-            pass
-
-    def _on_esc_press(self, key: keyboard.Key | keyboard.KeyCode | None) -> None:
-        if key == keyboard.Key.esc:
-            self.cancel()

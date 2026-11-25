@@ -3741,6 +3741,34 @@ def test_begin_stop_and_finalize_stop_write_session(tmp_path) -> None:
     assert session.event_count() == 1
 
 
+def test_escape_cancel_callback_skips_key_press_event(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+    cancelled: list[bool] = []
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key, KeyCode
+
+            session.set_on_escape_cancel(lambda: cancelled.append(True))
+            session._on_key_press(KeyCode.from_char("a"))
+            session._on_key_press(Key.esc)
+            session.stop()
+        finally:
+            if session.is_active():
+                session.stop()
+
+    assert cancelled == [True]
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "text_input"
+    assert raw["text"] == "a"
+    assert not (run_dir / "events" / "event_002.json").is_file()
+
+
 def test_finalize_stop_invokes_on_after_screenshot_before_session_write(tmp_path) -> None:
     session = RecordingSession(runs_root=tmp_path)
     seen: list[str] = []

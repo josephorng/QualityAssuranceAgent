@@ -639,6 +639,7 @@ def test_step_rerecord_cancel_discards_temp_without_splice(
     cancelled: list[bool] = []
     done: list[object] = []
     uia_wired: list[bool] = []
+    escape_wired: list[bool] = []
 
     class _FakeCapture:
         def __init__(self, *args: object, **kwargs: object) -> None:
@@ -646,6 +647,9 @@ def test_step_rerecord_cancel_discards_temp_without_splice(
 
         def set_on_uia_status(self, callback: object) -> None:
             uia_wired.append(callback is not None)
+
+        def set_on_escape_cancel(self, callback: object) -> None:
+            escape_wired.append(callback is not None)
 
         def start(self, **kwargs: object) -> Path:
             return Path(kwargs["existing_run_dir"])  # type: ignore[index]
@@ -660,14 +664,6 @@ def test_step_rerecord_cancel_discards_temp_without_splice(
             return self._count
 
     monkeypatch.setattr("src.recorder.capture.RecordingSession", _FakeCapture)
-    monkeypatch.setattr(
-        "src.recorder.rerecord_step.keyboard.Listener",
-        lambda **kwargs: type(
-            "L",
-            (),
-            {"start": lambda self: None, "stop": lambda self: None},
-        )(),
-    )
 
     session = StepRerecordSession()
     session.arm(
@@ -679,6 +675,7 @@ def test_step_rerecord_cancel_discards_temp_without_splice(
     )
     assert session.is_armed()
     assert uia_wired == [True]
+    assert escape_wired == [True]
     temp = run_dir / ".rerecord_tmp"
     assert temp.is_dir()
     session.cancel()
@@ -687,6 +684,52 @@ def test_step_rerecord_cancel_discards_temp_without_splice(
     assert not session.is_armed()
     assert not temp.exists()
     assert (run_dir / "events" / "event_002.json").is_file()
+
+
+def test_load_events_falls_back_when_manifest_events_empty(tmp_path: Path) -> None:
+    """Seeded ``events: []`` must not hide on-disk event JSON (rerecord temp)."""
+    from src.recorder.orchestrator import _load_events
+
+    run_dir = tmp_path / "tmp_capture"
+    _write_temp_capture(run_dir, kinds=["text_input"])
+    (run_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_dir.name,
+                "events": [],
+                "event_count": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    events = _load_events(run_dir)
+    assert len(events) == 1
+    assert events[0].kind == "text_input"
+    assert events[0].text == "hello1"
+
+
+def test_splice_loads_orphan_files_when_manifest_empty(tmp_path: Path) -> None:
+    run_dir = tmp_path / "rec"
+    _write_recording(run_dir, event_count=2)
+    temp_dir = tmp_path / "tmp_capture"
+    _write_temp_capture(temp_dir, kinds=["text_input"])
+    (temp_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": temp_dir.name,
+                "events": [],
+                "event_count": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    new_indices = splice_rerecord_events(run_dir, 2, temp_dir)
+    assert new_indices == [3]
+    session = read_json(run_dir / "session.json", {})
+    assert "events/event_003.json" in session["events"]
+    assert (run_dir / "events" / "event_003.json").is_file()
 
 
 def test_begin_replay_gesture_capture_shows_uia_overlay() -> None:

@@ -356,7 +356,9 @@ def _load_events(run_dir: Path) -> list[RecordedEvent]:
     events: list[RecordedEvent] = []
     if isinstance(manifest_raw, dict):
         paths = manifest_raw.get("events")
-        if isinstance(paths, list):
+        # Non-empty manifest order wins. Empty ``events: []`` (e.g. seeded
+        # ``.rerecord_tmp``) falls through so on-disk event JSON is not hidden.
+        if isinstance(paths, list) and paths:
             for rel in paths:
                 if not isinstance(rel, str):
                     continue

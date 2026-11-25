@@ -489,7 +489,7 @@ def test_idle_efp_keeps_label_when_findall_empty_red(tmp_path: Path) -> None:
 
 
 def test_idle_efp_empty_synthable_hub_goes_green(tmp_path: Path) -> None:
-    """Unique nearest UIA hub makes empty whitespace green without hover refetch."""
+    """Unique nearest UIA hub greens empty whitespace; empty EFP skips hover."""
     statuses: list[dict] = []
     session = RecordingSession(runs_root=tmp_path)
     session._accepting_input = True
@@ -518,7 +518,7 @@ def test_idle_efp_empty_synthable_hub_goes_green(tmp_path: Path) -> None:
     with (
         patch(
             "src.recorder.uia_input_boxes.uia_text_element_at_point",
-            return_value=("x", (0, 0, 1, 1), "text", "Pane", ""),
+            return_value=None,
         ),
         patch(
             "src.recorder.capture.resolve_click_window",
@@ -537,10 +537,32 @@ def test_idle_efp_empty_synthable_hub_goes_green(tmp_path: Path) -> None:
             )
         )
     assert statuses[-1]["state"] == "green"
-    # Empty-synth walk greens without a covering leaf; hover may still warm a
-    # cursor-local walk (far unique hub alone no longer skips hover).
-    if hover_findall.call_count == 0:
-        reschedule.assert_not_called()
+    # No usable EFP label → no hover warm-up (avoids empty-edge retry storm).
+    hover_findall.assert_not_called()
+    reschedule.assert_not_called()
+
+
+def test_should_skip_hover_findall_empty_efp() -> None:
+    """Blank / weak EFP skips hover even when the settle cache is sparse."""
+    session = RecordingSession(runs_root=None)  # type: ignore[arg-type]
+    session._last_settle_uia = {
+        "hwnd": 7,
+        "window": [0, 0, 400, 300],
+        "inputs": [],
+        "scrollbars": [],
+        "texts": [{"bbox": [10, 10, 50, 26], "text": "遠方"}],
+    }
+    session._idle_efp_payload = None
+    assert session._should_skip_hover_findall_at_cursor((200, 200)) is True
+    session._idle_efp_payload = {"name": "", "value": "", "control_type": "pane"}
+    assert session._should_skip_hover_findall_at_cursor((200, 200)) is True
+    session._idle_efp_payload = {
+        "name": "CoreInput",
+        "value": "",
+        "control_type": "button",
+        "bbox": [1, 1, 10, 10],
+    }
+    assert session._should_skip_hover_findall_at_cursor((5, 5)) is True
 
 
 def test_idle_efp_label_visible_during_hover_yellow(tmp_path: Path) -> None:

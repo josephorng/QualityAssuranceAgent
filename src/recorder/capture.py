@@ -2236,41 +2236,44 @@ class RecordingSession:
         *,
         efp_payload: dict[str, Any] | None | object = _EFP_UNSET,
     ) -> bool:
-        """Skip idle hover walk when a labeled FindAll text covers EFP, or cell.
+        """Skip idle hover unless EFP names a leaf missing from the settle/hover cache.
 
-        Pane-only / oversized input boxes under the cursor do **not** skip —
-        WinMaster-style sparse seeds must still allow hover warm-up + enrich.
-        Empty-synth readiness alone (unique far hub) does not skip hover.
-        Labeled chrome EFP may green the LED without a walk; hover still runs
-        unless an agreeing labeled ``texts`` row already covers the point.
-        Usable ``data_item`` EFP alone skips hover (cells stay FindAll-excluded).
+        Hover runs only when idle EFP has a usable landmark label that is not
+        already covered by an agreeing FindAll ``texts`` row. Empty / weak EFP
+        skips (no leaf to chase; LED uses walk readiness / empty-synth only).
+        Pane-only caches do not count as cover — WinMaster sparse seeds still
+        warm when EFP names an uncovered tree node. Usable ``data_item`` EFP
+        skips (cells stay FindAll-excluded).
         """
         if efp_payload is _EFP_UNSET:
             with self._lock:
                 efp_payload = self._idle_efp_payload
         efp_dict = efp_payload if isinstance(efp_payload, dict) else None
+        from src.recorder.uia_input_boxes import (
+            efp_cover_label_from_payload,
+            efp_payload_is_usable_data_item,
+            uia_snapshot_covers_efp_at_point,
+        )
+
+        # No usable EFP identity → nothing for hover enrich to chase.
+        if not efp_cover_label_from_payload(efp_dict):
+            return True
+        if efp_payload_is_usable_data_item(efp_dict):
+            return True
         if cursor_xy is not None:
             try:
                 x, y = int(cursor_xy[0]), int(cursor_xy[1])
             except (TypeError, ValueError, IndexError):
-                x = y = None  # type: ignore[assignment]
-            else:
-                click_window = self._click_window_payload_at(x, y)
-                cached = self._cached_uia_before(click_window, cursor_xy=(x, y))
-                if isinstance(cached, dict):
-                    from src.recorder.uia_input_boxes import (
-                        uia_snapshot_covers_efp_at_point,
-                    )
-
-                    if uia_snapshot_covers_efp_at_point(
-                        cached,
-                        (x, y),
-                        efp_payload=efp_dict,
-                    ):
-                        return True
-        from src.recorder.uia_input_boxes import efp_payload_is_usable_data_item
-
-        return efp_payload_is_usable_data_item(efp_dict)
+                return False
+            click_window = self._click_window_payload_at(x, y)
+            cached = self._cached_uia_before(click_window, cursor_xy=(x, y))
+            if isinstance(cached, dict) and uia_snapshot_covers_efp_at_point(
+                cached,
+                (x, y),
+                efp_payload=efp_dict,
+            ):
+                return True
+        return False
 
     def _emit_uia_path_readiness(
         self,
@@ -2589,9 +2592,19 @@ class RecordingSession:
         assert click_window is not None
         hwnd = int(click_window.hwnd)
         cursor_xy = (int(x), int(y))
-        # Skip when a walk covers the point or usable data_item EFP (no cells).
-        # Labeled chrome EFP may already green the LED — still warm a walk.
-        if self._should_skip_hover_findall_at_cursor(cursor_xy):
+        # Prefer explicit probe args (tests / worker) over stale idle payload.
+        # Omit the kwarg when blank so the skip helper reads `_idle_efp_payload`.
+        skip_kwargs: dict[str, Any] = {}
+        if str(efp_name or "").strip() or str(efp_value or "").strip():
+            skip_efp: dict[str, Any] = {
+                "name": str(efp_name or "").strip(),
+                "value": str(efp_value or "").strip(),
+            }
+            if str(efp_control_type or "").strip():
+                skip_efp["control_type"] = str(efp_control_type).strip()
+            skip_kwargs["efp_payload"] = skip_efp
+        # Skip unless EFP names a leaf missing from the settle/hover cache.
+        if self._should_skip_hover_findall_at_cursor(cursor_xy, **skip_kwargs):
             return False
 
         from src.recorder.uia_input_boxes import efp_payload_screen_bbox_xywh
@@ -2741,11 +2754,9 @@ class RecordingSession:
                 efp_control_type=efp_control_type,
                 claim_token=claim_token,
             )
-            # Completed FindAll: only keep polling when the point is now UIA-ready
-            # (including empty-synth hubs). Confirmed empty / non-unique stays red
-            # until the mouse moves or settle republishes.
-            if self._uia_path_ready_at_cursor(cursor_xy):
-                self._reschedule_idle_efp_from_last_pointer()
+            # Do not auto-reschedule idle EFP after a successful hover — that
+            # re-armed a yellow retry storm when empty-synth readiness passed
+            # but cover still missed. Wait for mouse move or settle/typing.
             return True
         finally:
             self._emit_uia_status(bg_remove="FindAll:hover")

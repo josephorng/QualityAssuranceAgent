@@ -991,6 +991,7 @@ def test_hover_findall_warms_uncached_hwnd(tmp_path: Path) -> None:
             "src.recorder.uia_input_boxes.snapshot_uia_hover_subtree",
             side_effect=_snap,
         ),
+        patch.object(session, "_reschedule_idle_efp_from_last_pointer") as reschedule,
     ):
         session._worker_idle_efp(
             _DeferredCaptureJob(
@@ -1014,6 +1015,8 @@ def test_hover_findall_warms_uncached_hwnd(tmp_path: Path) -> None:
     ] == ["yellow", "green"]
     assert statuses[-1]["efp_name"] == "Leaf"
     assert session._hover_uia_led_active is False
+    # Successful hover must not re-arm idle→hover (retry-storm fix).
+    reschedule.assert_not_called()
     # No events yet → previous_index 0 matches seed/ready after_index.
     hit = session._cached_uia_before(hover_win, cursor_xy=(100, 100))
     assert hit is not None
@@ -1055,11 +1058,14 @@ def test_hover_findall_fail_restores_readiness_not_auto_green(tmp_path: Path) ->
             return_value=None,
         ),
     ):
-        session._maybe_hover_findall_uia(1, 100, 100)
+        session._maybe_hover_findall_uia(1, 100, 100, efp_name="Leaf", efp_value="V")
     assert session._last_settle_uia_by_hwnd == {}
     # Hover miss leaves no attachable cache under cursor → red, not auto-green.
-    assert [row["state"] for row in statuses] == ["yellow", "red"]
-    assert statuses[-1]["efp_name"] == ""
+    assert [row["state"] for row in statuses if row.get("state")][:2] == [
+        "yellow",
+        "red",
+    ]
+    assert statuses[-1]["state"] == "red"
     assert session._hover_uia_led_active is False
 
 
@@ -1107,11 +1113,13 @@ def test_hover_findall_settle_steal_skips_green_and_upsert(tmp_path: Path) -> No
             side_effect=_snap_and_steal,
         ),
     ):
-        session._maybe_hover_findall_uia(1, 100, 100)
+        session._maybe_hover_findall_uia(1, 100, 100, efp_name="Leaf", efp_value="V")
     assert 55 not in session._last_settle_uia_by_hwnd
     assert session._hover_uia_led_active is False
     # Hover yellow, then settle yellow; no hover green after steal.
-    assert [row["state"] for row in statuses] == ["yellow", "yellow"]
+    yellow_states = [row["state"] for row in statuses if row.get("state") == "yellow"]
+    assert len(yellow_states) >= 2
+    assert "green" not in [row["state"] for row in statuses]
     assert statuses[-1]["after_index"] == 1
 
 
@@ -1226,8 +1234,7 @@ def test_hover_findall_skips_when_already_cached_or_yellow_or_mismatch(
     }
     assert _run(session) == [55]
 
-    # Unique far hub is empty-synth ready but does not cover the cursor —
-    # still warm hover so ribbon/chrome under the pointer can attach.
+    # Usable EFP label N|V is not covered by the far hub — warm hover once.
     session._last_settle_uia_by_hwnd = {
         55: {
             "hwnd": 55,
@@ -1493,7 +1500,7 @@ def test_hover_findall_stale_generation_skips_merge(tmp_path: Path) -> None:
             side_effect=_snap_and_bump,
         ),
     ):
-        session._maybe_hover_findall_uia(1, 100, 100)
+        session._maybe_hover_findall_uia(1, 100, 100, efp_name="Leaf", efp_value="V")
     assert 55 not in session._last_settle_uia_by_hwnd
 
 

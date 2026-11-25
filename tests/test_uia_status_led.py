@@ -933,6 +933,7 @@ def test_recording_uia_status_overlay_apply_status() -> None:
                 "efp_value": "",
                 "efp_control_type": "button",
                 "efp_pending": False,
+                "bg": ["FindAll:hover", "EFP"],
             }
         )
         assert overlay._state == "green"
@@ -940,9 +941,70 @@ def test_recording_uia_status_overlay_apply_status() -> None:
         label_text = str(overlay._label.cget("text"))
         assert "關閉" in label_text
         assert label_text == "button · 關閉"
+        assert overlay._bg_label is not None
+        assert str(overlay._bg_label.cget("text")) == "FindAll:hover · EFP"
+        overlay.apply_status(
+            {
+                "state": "green",
+                "bg": [],
+                "efp_name": "關閉",
+                "efp_value": "",
+                "efp_control_type": "button",
+                "efp_pending": False,
+            }
+        )
+        assert str(overlay._bg_label.cget("text")) == ""
         overlay.destroy()
     finally:
         root.destroy()
+
+
+def test_emit_uia_status_tracks_bg_activities() -> None:
+    statuses: list[dict] = []
+    session = RecordingSession(runs_root=None)  # type: ignore[arg-type]
+    session.set_on_uia_status(statuses.append)
+
+    session._emit_uia_status(bg_add="EFP")
+    assert statuses[-1]["bg"] == ["EFP"]
+    session._emit_uia_status(bg_add="FindAll:settle")
+    assert statuses[-1]["bg"] == ["EFP", "FindAll:settle"]
+    session._emit_uia_status(bg_remove="EFP")
+    assert statuses[-1]["bg"] == ["FindAll:settle"]
+    # No-op remove must not publish.
+    before = len(statuses)
+    session._emit_uia_status(bg_remove="EFP")
+    assert len(statuses) == before
+    session._emit_uia_status(state="yellow", bg_add="FindAll:hover")
+    assert statuses[-1]["state"] == "yellow"
+    assert statuses[-1]["bg"] == ["FindAll:settle", "FindAll:hover"]
+    session._emit_uia_status(bg_clear=True)
+    assert statuses[-1]["bg"] == []
+
+
+def test_collect_and_publish_settle_uia_marks_findall_settle_bg() -> None:
+    statuses: list[dict] = []
+    session = RecordingSession(runs_root=None)  # type: ignore[arg-type]
+    session.set_on_uia_status(statuses.append)
+
+    def _snap(hwnd: int, **_kwargs) -> dict:
+        return {
+            "window": [0, 0, 10, 10],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [{"bbox": [0, 0, 8, 8], "text": "A"}],
+        }
+
+    with (
+        patch("src.recorder.uia_input_boxes.snapshot_uia_screen", side_effect=_snap),
+        patch("src.recorder.capture._window_class_name", return_value="Chrome_WidgetWin_1"),
+    ):
+        session._collect_and_publish_settle_uia(42, after_event_index=3)
+
+    assert any(
+        row.get("state") == "yellow" and "FindAll:settle" in row.get("bg", [])
+        for row in statuses
+    )
+    assert statuses[-1].get("bg") == []
 
 
 def test_monitor_for_point_picks_secondary() -> None:

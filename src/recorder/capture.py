@@ -1216,6 +1216,9 @@ class RecordingSession:
         self._uia_status_efp_value: str = ""
         self._uia_status_efp_control_type: str = ""
         self._uia_status_efp_pending: bool = False
+        # Active background UIA work for the LED strip (EFP / FindAll:* kinds).
+        # Insertion-ordered; keys are short labels shown on the overlay.
+        self._uia_bg_active: dict[str, bool] = {}
         # Idle hover FindAll LED claim; settle/seed yellow bumps the token.
         self._hover_uia_led_active: bool = False
         self._hover_uia_led_token: int = 0
@@ -1395,6 +1398,7 @@ class RecordingSession:
             self._uia_status_efp_value = ""
             self._uia_status_efp_control_type = ""
             self._uia_status_efp_pending = False
+            self._uia_bg_active = {}
             self._hover_uia_led_active = False
             self._hover_uia_led_token = 0
             self._idle_efp_generation = 0
@@ -1420,7 +1424,7 @@ class RecordingSession:
             daemon=True,
         )
         self._worker_thread.start()
-        self._emit_uia_status(state="red")
+        self._emit_uia_status(state="red", bg_clear=True)
 
         # Snapshot stays the first worker job. Hooks do not wait for it.
         self._enqueue(_DeferredCaptureJob(action="seed_settle_windows"))
@@ -1986,30 +1990,70 @@ class RecordingSession:
         efp_value: str | None | object = _EFP_UNSET,
         efp_control_type: str | None | object = _EFP_UNSET,
         efp_pending: bool | None = None,
+        bg_add: str | None = None,
+        bg_remove: str | None = None,
+        bg_clear: bool = False,
     ) -> None:
-        """Publish settle-UIA LED + idle EFP label. Safe from worker/window threads."""
+        """Publish settle-UIA LED + idle EFP label. Safe from worker/window threads.
+
+        ``bg_add`` / ``bg_remove`` / ``bg_clear`` maintain the overlay's
+        background-work strip (``EFP``, ``FindAll:settle``, ``FindAll:hover``, …).
+        """
         with self._lock:
+            bg_changed = False
+            if bg_clear:
+                if self._uia_bg_active:
+                    self._uia_bg_active.clear()
+                    bg_changed = True
+            if bg_remove:
+                kind = str(bg_remove).strip()
+                if kind and kind in self._uia_bg_active:
+                    self._uia_bg_active.pop(kind, None)
+                    bg_changed = True
+            if bg_add:
+                kind = str(bg_add).strip()
+                if kind:
+                    # Re-insert so the newest activity sorts last when displayed.
+                    if kind not in self._uia_bg_active:
+                        bg_changed = True
+                    else:
+                        # Already present; still move to end for display order.
+                        bg_changed = True
+                    self._uia_bg_active.pop(kind, None)
+                    self._uia_bg_active[kind] = True
+            status_changed = False
             if state is not None:
                 self._uia_status_state = str(state)
+                status_changed = True
             if after_index is not _EFP_UNSET:
                 self._uia_status_after_index = (
                     None if after_index is None else int(after_index)  # type: ignore[arg-type]
                 )
+                status_changed = True
             if efp_name is not _EFP_UNSET:
                 self._uia_status_efp_name = self._truncate_uia_status_label(
                     "" if efp_name is None else str(efp_name)
                 )
+                status_changed = True
             if efp_value is not _EFP_UNSET:
                 self._uia_status_efp_value = self._truncate_uia_status_label(
                     "" if efp_value is None else str(efp_value)
                 )
+                status_changed = True
             if efp_control_type is not _EFP_UNSET:
                 # UIA suffix tokens are short; strip only (no Name/Value truncator).
                 self._uia_status_efp_control_type = str(
                     "" if efp_control_type is None else efp_control_type
                 ).strip()
+                status_changed = True
             if efp_pending is not None:
                 self._uia_status_efp_pending = bool(efp_pending)
+                status_changed = True
+            if pulse is not None:
+                status_changed = True
+            # finally-guards often call bg_remove alone; skip no-op publishes.
+            if not status_changed and not bg_changed:
+                return
             payload = {
                 "state": self._uia_status_state,
                 "pulse": pulse,
@@ -2018,6 +2062,7 @@ class RecordingSession:
                 "efp_value": self._uia_status_efp_value,
                 "efp_control_type": self._uia_status_efp_control_type,
                 "efp_pending": self._uia_status_efp_pending,
+                "bg": list(self._uia_bg_active.keys()),
             }
             callback = self._on_uia_status
         if callback is None:
@@ -2072,6 +2117,8 @@ class RecordingSession:
             self._cancel_idle_efp_timer_locked()
             generation = self._bump_idle_efp_generation_locked()
             self._uia_status_efp_pending = False
+            # Prior timer-fire / queued probe is now stale — drop EFP activity.
+            clear_efp_bg = "EFP" in self._uia_bg_active
             delay_s = (
                 _IDLE_EFP_DEBOUNCE_GREEN_S
                 if str(self._uia_status_state) == "green"
@@ -2085,6 +2132,8 @@ class RecordingSession:
             timer.daemon = True
             self._idle_efp_timer = timer
         timer.start()
+        if clear_efp_bg:
+            self._emit_uia_status(bg_remove="EFP")
 
     def _reschedule_idle_efp_from_last_pointer(self) -> None:
         """Queue a fresh idle EFP at the latest cursor after FindAll finishes."""
@@ -2105,7 +2154,11 @@ class RecordingSession:
             self._idle_efp_timer = None
         # Clear stale Name/Value while the worker probe is pending (overlay "…").
         self._emit_uia_status(
-            efp_name="", efp_value="", efp_control_type="", efp_pending=True
+            efp_name="",
+            efp_value="",
+            efp_control_type="",
+            efp_pending=True,
+            bg_add="EFP",
         )
         self._enqueue(
             _DeferredCaptureJob(
@@ -2229,6 +2282,7 @@ class RecordingSession:
         after_index: int | None | object = _EFP_UNSET,
         claim_token: int | None = None,
         from_settle: bool = False,
+        bg_remove: str | None = None,
     ) -> None:
         """Paint green when FindAll or a usable EFP DataItem is UIA-path ready.
 
@@ -2265,6 +2319,10 @@ class RecordingSession:
             ):
                 return
 
+        # Hover / settle completion clears activity on the same paint as green/red.
+        clear_bg = bg_remove
+        if clear_bg is None and claim_token is not None:
+            clear_bg = "FindAll:hover"
         ready = self._uia_path_ready_at_cursor(cursor_xy)
         if ready:
             self._emit_uia_status(
@@ -2274,6 +2332,7 @@ class RecordingSession:
                 efp_value=efp_value or "",
                 efp_control_type=efp_control_type or "",
                 efp_pending=False,
+                bg_remove=clear_bg,
             )
         else:
             # Keep existing EFP preview; only the readiness LED goes red.
@@ -2281,6 +2340,7 @@ class RecordingSession:
                 state="red",
                 after_index=after_index,
                 efp_pending=False,
+                bg_remove=clear_bg,
             )
 
     def _log_idle_efp_probe(
@@ -2345,20 +2405,35 @@ class RecordingSession:
                 payload=None,
             )
             self._emit_uia_status(
-                efp_name="", efp_value="", efp_control_type="", efp_pending=False
+                efp_name="",
+                efp_value="",
+                efp_control_type="",
+                efp_pending=False,
+                bg_remove="EFP",
             )
             return
         with self._lock:
             if generation != int(self._idle_efp_generation):
-                return
-            run_dir = self._run_dir
+                stale_before_probe = True
+                run_dir = self._run_dir
+            else:
+                stale_before_probe = False
+                run_dir = self._run_dir
+        if stale_before_probe:
+            self._emit_uia_status(bg_remove="EFP")
+            return
         from src.recorder.uia_input_boxes import element_from_point_name_value
 
         payload = element_from_point_name_value(int(cursor[0]), int(cursor[1]))
         with self._lock:
             if generation != int(self._idle_efp_generation):
-                return
-            run_dir = self._run_dir
+                stale_after_probe = True
+            else:
+                stale_after_probe = False
+                run_dir = self._run_dir
+        if stale_after_probe:
+            self._emit_uia_status(bg_remove="EFP")
+            return
         name = ""
         value = ""
         control_type = ""
@@ -2387,6 +2462,7 @@ class RecordingSession:
             efp_value=value,
             efp_control_type=control_type,
             efp_pending=False,
+            bg_remove="EFP",
         )
         cursor_xy = (int(cursor[0]), int(cursor[1]))
         leave_settle_yellow = False
@@ -2436,7 +2512,12 @@ class RecordingSession:
             efp_control_type=control_type,
         )
 
-    def _begin_settle_uia_yellow(self, *, after_index: int) -> None:
+    def _begin_settle_uia_yellow(
+        self,
+        *,
+        after_index: int,
+        bg: str = "FindAll:settle",
+    ) -> None:
         """Settle/seed FindAll starting: invalidate hover LED claim, then yellow."""
         with self._lock:
             self._hover_uia_led_active = False
@@ -2448,6 +2529,7 @@ class RecordingSession:
             efp_value="",
             efp_control_type="",
             efp_pending=True,
+            bg_add=str(bg or "FindAll:settle"),
         )
 
     def _release_hover_uia_led_to_readiness(
@@ -2537,129 +2619,136 @@ class RecordingSession:
             claim_token = int(self._hover_uia_led_token)
             self._hover_uia_led_active = True
         # LED yellow only; keep the just-probed EFP Name/Value visible.
-        self._emit_uia_status(state="yellow", efp_pending=False)
+        self._emit_uia_status(
+            state="yellow",
+            efp_pending=False,
+            bg_add="FindAll:hover",
+        )
 
         from src.recorder.uia_input_boxes import snapshot_uia_hover_subtree
 
         try:
-            value = snapshot_uia_hover_subtree(hwnd, int(x), int(y))
-            if isinstance(value, dict):
-                self._log_findall_snapshot("hover", hwnd, value)
-        except Exception:
-            self._release_hover_uia_led_to_readiness(
-                claim_token,
-                cursor_xy=cursor_xy,
-                efp_name=efp_name,
-                efp_value=efp_value,
-                efp_control_type=efp_control_type,
-            )
-            self._reschedule_idle_efp_from_last_pointer()
-            return True
-        if not isinstance(value, dict):
-            self._release_hover_uia_led_to_readiness(
-                claim_token,
-                cursor_xy=cursor_xy,
-                efp_name=efp_name,
-                efp_value=efp_value,
-                efp_control_type=efp_control_type,
-            )
-            self._reschedule_idle_efp_from_last_pointer()
-            return True
-        snapshot = dict(value)
-        snapshot["hwnd"] = hwnd
-        class_name = str(click_window.class_name or "").strip()
-        if not class_name:
-            class_name = str(_window_class_name(hwnd) or "").strip()
-        if class_name:
-            snapshot["class_name"] = class_name
-        stale_generation = False
-        with self._lock:
-            if (
-                not self._hover_uia_led_active
-                or int(claim_token) != int(self._hover_uia_led_token)
-            ):
-                # Settle stole the LED; do not upsert or paint readiness.
-                return True
-            still_in_start_leaf = False
-            if generation != int(self._idle_efp_generation):
-                check_xy = (
-                    self._last_move_xy
-                    or self._last_pointer_cursor_xy
-                    or self._idle_efp_cursor_xy
-                    or cursor_xy
+            try:
+                value = snapshot_uia_hover_subtree(hwnd, int(x), int(y))
+                if isinstance(value, dict):
+                    self._log_findall_snapshot("hover", hwnd, value)
+            except Exception:
+                self._release_hover_uia_led_to_readiness(
+                    claim_token,
+                    cursor_xy=cursor_xy,
+                    efp_name=efp_name,
+                    efp_value=efp_value,
+                    efp_control_type=efp_control_type,
                 )
+                self._reschedule_idle_efp_from_last_pointer()
+                return True
+            if not isinstance(value, dict):
+                self._release_hover_uia_led_to_readiness(
+                    claim_token,
+                    cursor_xy=cursor_xy,
+                    efp_name=efp_name,
+                    efp_value=efp_value,
+                    efp_control_type=efp_control_type,
+                )
+                self._reschedule_idle_efp_from_last_pointer()
+                return True
+            snapshot = dict(value)
+            snapshot["hwnd"] = hwnd
+            class_name = str(click_window.class_name or "").strip()
+            if not class_name:
+                class_name = str(_window_class_name(hwnd) or "").strip()
+            if class_name:
+                snapshot["class_name"] = class_name
+            stale_generation = False
+            with self._lock:
                 if (
-                    start_leaf_bbox is not None
-                    and check_xy is not None
-                    and point_in_rect_xywh(
-                        int(check_xy[0]), int(check_xy[1]), start_leaf_bbox
-                    )
+                    not self._hover_uia_led_active
+                    or int(claim_token) != int(self._hover_uia_led_token)
                 ):
-                    still_in_start_leaf = True
-                else:
-                    # Cursor left the starting leaf; drop without merge/LED paint.
+                    # Settle stole the LED; do not upsert or paint readiness.
+                    return True
+                still_in_start_leaf = False
+                if generation != int(self._idle_efp_generation):
+                    check_xy = (
+                        self._last_move_xy
+                        or self._last_pointer_cursor_xy
+                        or self._idle_efp_cursor_xy
+                        or cursor_xy
+                    )
+                    if (
+                        start_leaf_bbox is not None
+                        and check_xy is not None
+                        and point_in_rect_xywh(
+                            int(check_xy[0]), int(check_xy[1]), start_leaf_bbox
+                        )
+                    ):
+                        still_in_start_leaf = True
+                    else:
+                        # Cursor left the starting leaf; drop without merge/LED paint.
+                        self._hover_uia_led_active = False
+                        stale_generation = True
+                if (
+                    not stale_generation
+                    and self._accepting_input
+                    and not self._finalizing
+                    and self._uia_snapshot_has_leaves(snapshot)
+                ):
+                    try:
+                        current_last = self._last_settle_uia
+                        current_last_hwnd = int(
+                            (current_last or {}).get("hwnd") or 0
+                        ) if isinstance(current_last, dict) else 0
+                    except (TypeError, ValueError):
+                        current_last = None
+                        current_last_hwnd = 0
+                    # Covering leaf under cursor — not empty-synth "ready" alone —
+                    # so a far unique grid cell does not block ribbon hover upsert.
+                    primary_covers_point = (
+                        hwnd == current_last_hwnd
+                        and isinstance(current_last, dict)
+                        and self._uia_snapshot_has_leaves(current_last)
+                        and self._uia_snapshot_covers_screen_point(
+                            current_last, cursor_xy
+                        )
+                    )
+                    # Upsert by_hwnd when hwnd differs, or same-hwnd primary has no
+                    # leaf under the hover point (e.g. grid settle after typing).
+                    if hwnd != current_last_hwnd or not primary_covers_point:
+                        existing = self._last_settle_uia_by_hwnd.get(hwnd)
+                        merged = self._merge_uia_hover_snapshot(
+                            existing if isinstance(existing, dict) else None,
+                            snapshot,
+                        )
+                        self._last_settle_uia_by_hwnd[hwnd] = merged
+                        if hwnd == current_last_hwnd and not primary_covers_point:
+                            # Prefer ribbon hover for the next press without bumping
+                            # after_index (generation gate stays intact).
+                            self._last_settle_uia = merged
+                # Re-check token before painting (settle may have raced).
+                if int(claim_token) != int(self._hover_uia_led_token):
                     self._hover_uia_led_active = False
-                    stale_generation = True
-            if (
-                not stale_generation
-                and self._accepting_input
-                and not self._finalizing
-                and self._uia_snapshot_has_leaves(snapshot)
-            ):
-                try:
-                    current_last = self._last_settle_uia
-                    current_last_hwnd = int(
-                        (current_last or {}).get("hwnd") or 0
-                    ) if isinstance(current_last, dict) else 0
-                except (TypeError, ValueError):
-                    current_last = None
-                    current_last_hwnd = 0
-                # Covering leaf under cursor — not empty-synth "ready" alone —
-                # so a far unique grid cell does not block ribbon hover upsert.
-                primary_covers_point = (
-                    hwnd == current_last_hwnd
-                    and isinstance(current_last, dict)
-                    and self._uia_snapshot_has_leaves(current_last)
-                    and self._uia_snapshot_covers_screen_point(
-                        current_last, cursor_xy
-                    )
-                )
-                # Upsert by_hwnd when hwnd differs, or same-hwnd primary has no
-                # leaf under the hover point (e.g. grid settle after typing).
-                if hwnd != current_last_hwnd or not primary_covers_point:
-                    existing = self._last_settle_uia_by_hwnd.get(hwnd)
-                    merged = self._merge_uia_hover_snapshot(
-                        existing if isinstance(existing, dict) else None,
-                        snapshot,
-                    )
-                    self._last_settle_uia_by_hwnd[hwnd] = merged
-                    if hwnd == current_last_hwnd and not primary_covers_point:
-                        # Prefer ribbon hover for the next press without bumping
-                        # after_index (generation gate stays intact).
-                        self._last_settle_uia = merged
-            # Re-check token before painting (settle may have raced).
-            if int(claim_token) != int(self._hover_uia_led_token):
-                self._hover_uia_led_active = False
+                    return True
+                if still_in_start_leaf:
+                    # Generation bumped from a micro-move; treat as current for LED.
+                    pass
+            if stale_generation:
+                self._reschedule_idle_efp_from_last_pointer()
                 return True
-            if still_in_start_leaf:
-                # Generation bumped from a micro-move; treat as current for LED.
-                pass
-        if stale_generation:
-            self._reschedule_idle_efp_from_last_pointer()
+            self._emit_uia_path_readiness(
+                cursor_xy=cursor_xy,
+                efp_name=efp_name,
+                efp_value=efp_value,
+                efp_control_type=efp_control_type,
+                claim_token=claim_token,
+            )
+            # Completed FindAll: only keep polling when the point is now UIA-ready
+            # (including empty-synth hubs). Confirmed empty / non-unique stays red
+            # until the mouse moves or settle republishes.
+            if self._uia_path_ready_at_cursor(cursor_xy):
+                self._reschedule_idle_efp_from_last_pointer()
             return True
-        self._emit_uia_path_readiness(
-            cursor_xy=cursor_xy,
-            efp_name=efp_name,
-            efp_value=efp_value,
-            efp_control_type=efp_control_type,
-            claim_token=claim_token,
-        )
-        # Completed FindAll: only keep polling when the point is now UIA-ready
-        # (including empty-synth hubs). Confirmed empty / non-unique stays red
-        # until the mouse moves or settle republishes.
-        if self._uia_path_ready_at_cursor(cursor_xy):
-            self._reschedule_idle_efp_from_last_pointer()
-        return True
+        finally:
+            self._emit_uia_status(bg_remove="FindAll:hover")
 
     def _notify_pending_text_input(self, event_index: int) -> None:
         """Fire deferred vision notify once the window step has patched (or failed)."""
@@ -3993,70 +4082,81 @@ class RecordingSession:
             return
 
         after_event_index = self._previous_event_index_for_settle_cache()
-        self._begin_settle_uia_yellow(after_index=int(after_event_index))
+        self._begin_settle_uia_yellow(
+            after_index=int(after_event_index),
+            bg="FindAll:typing",
+        )
         from src.recorder.uia_input_boxes import snapshot_uia_screen
 
-        with self._lock:
-            cursor_xy = self._last_pointer_cursor_xy or self._last_move_xy
         try:
-            value = snapshot_uia_screen(host, cursor_xy=cursor_xy)
-        except Exception:
-            value = None
-        if isinstance(value, dict):
-            self._log_findall_snapshot("typing", host, value)
-        paint_red = False
-        with self._lock:
-            if int(typing_uia_generation) != int(self._typing_uia_generation):
-                return
-            if (
-                self._run_dir is None
-                or not self._accepting_input
-                or self._finalizing
-                or self._pending_text_meta is None
-            ):
-                paint_red = True
-            elif not isinstance(value, dict):
-                # Keep after_index so a later successful prefetch can still attach.
-                paint_red = True
-            else:
-                snapshot = dict(value)
-                snapshot["hwnd"] = host
-                class_name = str(_window_class_name(host) or "").strip()
-                if class_name:
-                    snapshot["class_name"] = class_name
-                snapshot["cache_kind"] = "typing"
-                retained = self._by_hwnd_retained_across_settle(
-                    self._last_settle_uia_by_hwnd,
-                    settle_hwnd=host,
-                )
-                if not self._uia_snapshot_has_leaves(snapshot):
-                    prior = self._last_settle_uia
-                    try:
-                        prior_hwnd = int(
-                            (prior or {}).get("hwnd") or 0
-                        ) if isinstance(prior, dict) else 0
-                    except (TypeError, ValueError):
-                        prior_hwnd = 0
-                    if prior_hwnd == host or not self._uia_snapshot_has_leaves(prior):
-                        self._last_settle_uia = None
-                    self._last_settle_uia_by_hwnd = retained
-                    self._last_settle_uia_after_index = int(after_event_index)
+            with self._lock:
+                cursor_xy = self._last_pointer_cursor_xy or self._last_move_xy
+            try:
+                value = snapshot_uia_screen(host, cursor_xy=cursor_xy)
+            except Exception:
+                value = None
+            if isinstance(value, dict):
+                self._log_findall_snapshot("typing", host, value)
+            paint_red = False
+            with self._lock:
+                if int(typing_uia_generation) != int(self._typing_uia_generation):
+                    return
+                if (
+                    self._run_dir is None
+                    or not self._accepting_input
+                    or self._finalizing
+                    or self._pending_text_meta is None
+                ):
+                    paint_red = True
+                elif not isinstance(value, dict):
+                    # Keep after_index so a later successful prefetch can still attach.
                     paint_red = True
                 else:
-                    if self._is_shell_retained_uia_class(class_name):
-                        retained[host] = snapshot
-                    self._last_settle_uia = snapshot
-                    self._last_settle_uia_by_hwnd = retained
-                    self._last_settle_uia_after_index = int(after_event_index)
-        if paint_red:
-            self._emit_uia_status(state="red", after_index=int(after_event_index))
+                    snapshot = dict(value)
+                    snapshot["hwnd"] = host
+                    class_name = str(_window_class_name(host) or "").strip()
+                    if class_name:
+                        snapshot["class_name"] = class_name
+                    snapshot["cache_kind"] = "typing"
+                    retained = self._by_hwnd_retained_across_settle(
+                        self._last_settle_uia_by_hwnd,
+                        settle_hwnd=host,
+                    )
+                    if not self._uia_snapshot_has_leaves(snapshot):
+                        prior = self._last_settle_uia
+                        try:
+                            prior_hwnd = int(
+                                (prior or {}).get("hwnd") or 0
+                            ) if isinstance(prior, dict) else 0
+                        except (TypeError, ValueError):
+                            prior_hwnd = 0
+                        if prior_hwnd == host or not self._uia_snapshot_has_leaves(prior):
+                            self._last_settle_uia = None
+                        self._last_settle_uia_by_hwnd = retained
+                        self._last_settle_uia_after_index = int(after_event_index)
+                        paint_red = True
+                    else:
+                        if self._is_shell_retained_uia_class(class_name):
+                            retained[host] = snapshot
+                        self._last_settle_uia = snapshot
+                        self._last_settle_uia_by_hwnd = retained
+                        self._last_settle_uia_after_index = int(after_event_index)
+            if paint_red:
+                self._emit_uia_status(
+                    state="red",
+                    after_index=int(after_event_index),
+                    bg_remove="FindAll:typing",
+                )
+                self._reschedule_idle_efp_from_last_pointer()
+                return
+            self._emit_uia_path_readiness(
+                after_index=int(after_event_index),
+                from_settle=True,
+                bg_remove="FindAll:typing",
+            )
             self._reschedule_idle_efp_from_last_pointer()
-            return
-        self._emit_uia_path_readiness(
-            after_index=int(after_event_index),
-            from_settle=True,
-        )
-        self._reschedule_idle_efp_from_last_pointer()
+        finally:
+            self._emit_uia_status(bg_remove="FindAll:typing")
 
     def _refresh_pending_pre_type(
         self,
@@ -5752,56 +5852,67 @@ class RecordingSession:
             self._emit_uia_status(state="red", after_index=after_event_index)
             return None
 
-        self._begin_settle_uia_yellow(after_index=after_event_index)
+        self._begin_settle_uia_yellow(
+            after_index=after_event_index,
+            bg="FindAll:seed",
+        )
         from src.recorder.uia_input_boxes import snapshot_uia_screen
 
-        by_hwnd: dict[int, dict[str, Any]] = {}
-        for win in eligible:
-            hwnd = int(win.hwnd)
-            try:
-                value = snapshot_uia_screen(hwnd)
-            except Exception:
-                continue
-            if not isinstance(value, dict):
-                continue
-            self._log_findall_snapshot("seed", hwnd, value)
-            snapshot = dict(value)
-            snapshot["hwnd"] = hwnd
-            class_name = str(win.class_name or "").strip()
-            if class_name:
-                snapshot["class_name"] = class_name
-            if self._uia_snapshot_has_leaves(snapshot):
-                by_hwnd[hwnd] = snapshot
-
-        if not by_hwnd:
-            with self._lock:
-                self._last_settle_uia = None
-                self._last_settle_uia_by_hwnd = {}
-                self._last_settle_uia_after_index = after_event_index
-            self._emit_uia_status(state="red", after_index=after_event_index)
-            return None
-
-        fg = self._foreground_hwnd()
-        primary = by_hwnd.get(fg)
-        if primary is None:
+        try:
+            by_hwnd: dict[int, dict[str, Any]] = {}
             for win in eligible:
+                hwnd = int(win.hwnd)
+                try:
+                    value = snapshot_uia_screen(hwnd)
+                except Exception:
+                    continue
+                if not isinstance(value, dict):
+                    continue
+                self._log_findall_snapshot("seed", hwnd, value)
+                snapshot = dict(value)
+                snapshot["hwnd"] = hwnd
                 class_name = str(win.class_name or "").strip()
-                if class_name in _TASKBAR_CLASS_NAMES and int(win.hwnd) in by_hwnd:
-                    primary = by_hwnd[int(win.hwnd)]
-                    break
-        if primary is None:
-            primary = next(iter(by_hwnd.values()))
+                if class_name:
+                    snapshot["class_name"] = class_name
+                if self._uia_snapshot_has_leaves(snapshot):
+                    by_hwnd[hwnd] = snapshot
 
-        with self._lock:
-            self._last_settle_uia = primary
-            self._last_settle_uia_by_hwnd = by_hwnd
-            self._last_settle_uia_after_index = after_event_index
-        self._emit_uia_path_readiness(
-            after_index=after_event_index,
-            from_settle=True,
-        )
-        self._reschedule_idle_efp_from_last_pointer()
-        return self._copy_uia_snapshot(primary)
+            if not by_hwnd:
+                with self._lock:
+                    self._last_settle_uia = None
+                    self._last_settle_uia_by_hwnd = {}
+                    self._last_settle_uia_after_index = after_event_index
+                self._emit_uia_status(
+                    state="red",
+                    after_index=after_event_index,
+                    bg_remove="FindAll:seed",
+                )
+                return None
+
+            fg = self._foreground_hwnd()
+            primary = by_hwnd.get(fg)
+            if primary is None:
+                for win in eligible:
+                    class_name = str(win.class_name or "").strip()
+                    if class_name in _TASKBAR_CLASS_NAMES and int(win.hwnd) in by_hwnd:
+                        primary = by_hwnd[int(win.hwnd)]
+                        break
+            if primary is None:
+                primary = next(iter(by_hwnd.values()))
+
+            with self._lock:
+                self._last_settle_uia = primary
+                self._last_settle_uia_by_hwnd = by_hwnd
+                self._last_settle_uia_after_index = after_event_index
+            self._emit_uia_path_readiness(
+                after_index=after_event_index,
+                from_settle=True,
+                bg_remove="FindAll:seed",
+            )
+            self._reschedule_idle_efp_from_last_pointer()
+            return self._copy_uia_snapshot(primary)
+        finally:
+            self._emit_uia_status(bg_remove="FindAll:seed")
 
     def _collect_and_publish_settle_uia(
         self,
@@ -5826,73 +5937,92 @@ class RecordingSession:
                 )
             self._emit_uia_status(state="red", after_index=int(after_event_index))
             return None
-        self._begin_settle_uia_yellow(after_index=int(after_event_index))
+        self._begin_settle_uia_yellow(
+            after_index=int(after_event_index),
+            bg="FindAll:settle",
+        )
         from src.recorder.uia_input_boxes import snapshot_uia_screen
 
-        with self._lock:
-            cursor_xy = self._last_pointer_cursor_xy or self._last_move_xy
         try:
-            value = snapshot_uia_screen(hwnd, cursor_xy=cursor_xy)
-        except Exception:
             with self._lock:
-                self._last_settle_uia_by_hwnd = self._by_hwnd_retained_across_settle(
-                    self._last_settle_uia_by_hwnd,
-                    settle_hwnd=hwnd,
+                cursor_xy = self._last_pointer_cursor_xy or self._last_move_xy
+            try:
+                value = snapshot_uia_screen(hwnd, cursor_xy=cursor_xy)
+            except Exception:
+                with self._lock:
+                    self._last_settle_uia_by_hwnd = self._by_hwnd_retained_across_settle(
+                        self._last_settle_uia_by_hwnd,
+                        settle_hwnd=hwnd,
+                    )
+                self._emit_uia_status(
+                    state="red",
+                    after_index=int(after_event_index),
+                    bg_remove="FindAll:settle",
                 )
-            self._emit_uia_status(state="red", after_index=int(after_event_index))
-            self._reschedule_idle_efp_from_last_pointer()
-            return None
-        if not isinstance(value, dict):
-            with self._lock:
-                self._last_settle_uia_by_hwnd = self._by_hwnd_retained_across_settle(
-                    self._last_settle_uia_by_hwnd,
-                    settle_hwnd=hwnd,
+                self._reschedule_idle_efp_from_last_pointer()
+                return None
+            if not isinstance(value, dict):
+                with self._lock:
+                    self._last_settle_uia_by_hwnd = self._by_hwnd_retained_across_settle(
+                        self._last_settle_uia_by_hwnd,
+                        settle_hwnd=hwnd,
+                    )
+                self._emit_uia_status(
+                    state="red",
+                    after_index=int(after_event_index),
+                    bg_remove="FindAll:settle",
                 )
-            self._emit_uia_status(state="red", after_index=int(after_event_index))
-            self._reschedule_idle_efp_from_last_pointer()
-            return None
-        self._log_findall_snapshot("settle", hwnd, value)
-        snapshot = dict(value)
-        snapshot["hwnd"] = hwnd
-        class_name = str(_window_class_name(hwnd) or "").strip()
-        if class_name:
-            snapshot["class_name"] = class_name
-        if not self._uia_snapshot_has_leaves(snapshot):
+                self._reschedule_idle_efp_from_last_pointer()
+                return None
+            self._log_findall_snapshot("settle", hwnd, value)
+            snapshot = dict(value)
+            snapshot["hwnd"] = hwnd
+            class_name = str(_window_class_name(hwnd) or "").strip()
+            if class_name:
+                snapshot["class_name"] = class_name
+            if not self._uia_snapshot_has_leaves(snapshot):
+                with self._lock:
+                    retained = self._by_hwnd_retained_across_settle(
+                        self._last_settle_uia_by_hwnd,
+                        settle_hwnd=hwnd,
+                    )
+                    prior = self._last_settle_uia
+                    try:
+                        prior_hwnd = int(
+                            (prior or {}).get("hwnd") or 0
+                        ) if isinstance(prior, dict) else 0
+                    except (TypeError, ValueError):
+                        prior_hwnd = 0
+                    if prior_hwnd == hwnd or not self._uia_snapshot_has_leaves(prior):
+                        self._last_settle_uia = None
+                    self._last_settle_uia_by_hwnd = retained
+                    self._last_settle_uia_after_index = int(after_event_index)
+                self._emit_uia_status(
+                    state="red",
+                    after_index=int(after_event_index),
+                    bg_remove="FindAll:settle",
+                )
+                self._reschedule_idle_efp_from_last_pointer()
+                return None
             with self._lock:
                 retained = self._by_hwnd_retained_across_settle(
                     self._last_settle_uia_by_hwnd,
                     settle_hwnd=hwnd,
                 )
-                prior = self._last_settle_uia
-                try:
-                    prior_hwnd = int(
-                        (prior or {}).get("hwnd") or 0
-                    ) if isinstance(prior, dict) else 0
-                except (TypeError, ValueError):
-                    prior_hwnd = 0
-                if prior_hwnd == hwnd or not self._uia_snapshot_has_leaves(prior):
-                    self._last_settle_uia = None
+                if self._is_shell_retained_uia_class(class_name):
+                    retained[hwnd] = snapshot
+                self._last_settle_uia = snapshot
                 self._last_settle_uia_by_hwnd = retained
                 self._last_settle_uia_after_index = int(after_event_index)
-            self._emit_uia_status(state="red", after_index=int(after_event_index))
-            self._reschedule_idle_efp_from_last_pointer()
-            return None
-        with self._lock:
-            retained = self._by_hwnd_retained_across_settle(
-                self._last_settle_uia_by_hwnd,
-                settle_hwnd=hwnd,
+            self._emit_uia_path_readiness(
+                after_index=int(after_event_index),
+                from_settle=True,
+                bg_remove="FindAll:settle",
             )
-            if self._is_shell_retained_uia_class(class_name):
-                retained[hwnd] = snapshot
-            self._last_settle_uia = snapshot
-            self._last_settle_uia_by_hwnd = retained
-            self._last_settle_uia_after_index = int(after_event_index)
-        self._emit_uia_path_readiness(
-            after_index=int(after_event_index),
-            from_settle=True,
-        )
-        self._reschedule_idle_efp_from_last_pointer()
-        return self._copy_uia_snapshot(snapshot)
+            self._reschedule_idle_efp_from_last_pointer()
+            return self._copy_uia_snapshot(snapshot)
+        finally:
+            self._emit_uia_status(bg_remove="FindAll:settle")
 
     def _opened_hwnd_from_change(
         self,
@@ -6064,16 +6194,20 @@ class RecordingSession:
         if cursor_xy is None:
             with self._lock:
                 cursor_xy = self._last_pointer_cursor_xy or self._last_move_xy
+        self._emit_uia_status(bg_add="FindAll:press_miss")
         try:
-            value = snapshot_uia_screen(hwnd, cursor_xy=cursor_xy)
-        except Exception:
-            return None
-        if not isinstance(value, dict):
-            return None
-        self._log_findall_snapshot("press_miss", hwnd, value)
-        snapshot = dict(value)
-        snapshot["hwnd"] = hwnd
-        return snapshot
+            try:
+                value = snapshot_uia_screen(hwnd, cursor_xy=cursor_xy)
+            except Exception:
+                return None
+            if not isinstance(value, dict):
+                return None
+            self._log_findall_snapshot("press_miss", hwnd, value)
+            snapshot = dict(value)
+            snapshot["hwnd"] = hwnd
+            return snapshot
+        finally:
+            self._emit_uia_status(bg_remove="FindAll:press_miss")
 
     def _patch_event_uia_field(
         self,

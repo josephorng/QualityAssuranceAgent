@@ -51,6 +51,8 @@ _UIA_LED_PULSE_COLORS = {
 _UIA_LED_SIZE = 14
 _UIA_STATUS_PULSE_MS = 350
 _UIA_EFP_LABEL_WIDTH = 42
+_UIA_BG_LABEL_WIDTH = 36
+_UIA_BG_LABEL_COLOR = "#f39c12"
 
 _EDGE_TRIGGER_PX = 4
 _HIDE_DELAY_MS = 450
@@ -677,8 +679,11 @@ class RecordingUiaStatusOverlay:
         self._master = master
         self._window: ctk.CTkToplevel | None = None
         self._led: ctk.CTkLabel | None = None
+        self._bg_label: ctk.CTkLabel | None = None
         self._label: ctk.CTkLabel | None = None
+        self._row: ctk.CTkFrame | None = None
         self._state = "red"
+        self._bg_text = ""
         self._pulse_after_id: str | None = None
         self._poll_after_id: str | None = None
         self._destroyed = False
@@ -709,6 +714,7 @@ class RecordingUiaStatusOverlay:
 
         row = ctk.CTkFrame(frame, fg_color="transparent")
         row.pack(padx=10, pady=6)
+        self._row = row
 
         self._led = ctk.CTkLabel(
             row,
@@ -718,6 +724,14 @@ class RecordingUiaStatusOverlay:
             text_color=_UIA_LED_COLORS["red"],
         )
         self._led.pack(side="left", padx=(0, 8))
+        self._bg_label = ctk.CTkLabel(
+            row,
+            text="",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=_UIA_BG_LABEL_COLOR,
+            anchor="w",
+        )
+        # Packed only while background work is active (see set_bg_activities).
         self._label = ctk.CTkLabel(
             row,
             text="—",
@@ -920,6 +934,38 @@ class RecordingUiaStatusOverlay:
         except Exception:
             pass
 
+    def set_bg_activities(self, activities: list[str] | tuple[str, ...] | None) -> None:
+        """Show active background UIA work (EFP / FindAll:settle / …) beside the LED."""
+        if self._destroyed or self._bg_label is None:
+            return
+        parts: list[str] = []
+        if isinstance(activities, (list, tuple)):
+            for raw in activities:
+                label = str(raw or "").strip()
+                if label and label not in parts:
+                    parts.append(label)
+        text = " · ".join(parts)
+        if len(text) > _UIA_BG_LABEL_WIDTH:
+            text = text[: _UIA_BG_LABEL_WIDTH - 1] + "…"
+        if text == self._bg_text:
+            return
+        self._bg_text = text
+        try:
+            self._bg_label.configure(text=text)
+        except Exception:
+            pass
+        try:
+            if text:
+                # Keep order: LED, bg, EFP name strip.
+                self._bg_label.pack(side="left", padx=(0, 8), before=self._label)
+            else:
+                self._bg_label.pack_forget()
+        except Exception:
+            pass
+        # Geometry may grow/shrink; re-place on the current monitor.
+        self._placed_monitor_key = None
+        self.ensure_visible(force=True)
+
     def apply_status(self, payload: dict[str, Any] | None) -> None:
         """Apply a RecordingSession UIA status payload on the Tk thread."""
         if not isinstance(payload, dict) or self._destroyed:
@@ -930,6 +976,11 @@ class RecordingUiaStatusOverlay:
         pulse = payload.get("pulse")
         if isinstance(pulse, str) and pulse:
             self.pulse(pulse)
+        bg = payload.get("bg")
+        if isinstance(bg, (list, tuple)):
+            self.set_bg_activities(bg)
+        elif "bg" in payload:
+            self.set_bg_activities(None)
         self.set_efp_label(
             str(payload.get("efp_name") or ""),
             str(payload.get("efp_value") or ""),
@@ -964,7 +1015,9 @@ class RecordingUiaStatusOverlay:
         win = self._window
         self._window = None
         self._led = None
+        self._bg_label = None
         self._label = None
+        self._row = None
         if win is None:
             return
         try:

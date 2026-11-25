@@ -32,6 +32,8 @@ from cua_mcp.select_mouse_target import (
     _scan_efp_neighbors_for_name,
     _should_run_constellation_efp,
     _subtarget_hub_for_efp_gate,
+    _subtarget_should_force_ocr_finish,
+    _subtarget_yolo_boxes_in_hub,
     _try_uia_first_unique_select,
     _verify_geometry_candidates_with_efp,
 )
@@ -2043,3 +2045,41 @@ def test_efp_gate_unique_unlabeled_skips_ocr() -> None:
     )
     assert method == "uia_yolo_subtarget"
     assert chosen is only
+
+
+def test_subtarget_should_force_ocr_finish_predicates() -> None:
+    assert _subtarget_should_force_ocr_finish(pending_count=0, in_hub_count=2)
+    assert _subtarget_should_force_ocr_finish(pending_count=0, in_hub_count=3)
+    assert not _subtarget_should_force_ocr_finish(pending_count=0, in_hub_count=0)
+    assert not _subtarget_should_force_ocr_finish(pending_count=0, in_hub_count=1)
+    assert not _subtarget_should_force_ocr_finish(pending_count=1, in_hub_count=2)
+    assert not _subtarget_should_force_ocr_finish(pending_count=2, in_hub_count=2)
+
+
+def test_subtarget_yolo_boxes_in_hub_uses_debug_when_pending_empty() -> None:
+    """Unified pool falls back to debug_layers so multi-box force OCR can fire."""
+    hub = UiDetection(
+        bbox=(220, 100, 140, 40),
+        cx=290,
+        cy=120,
+        class_id=YOLO_CLASS_TEXT,
+        class_name="text",
+        source="uia",
+    )
+    # Image-local boxes whose centers fall inside hub (monitor origin 0,0).
+    timing = {
+        "debug_layers": {
+            "yolo": [
+                {"class_name": "element", "bbox": [233, 114, 10, 11]},
+                {"class_name": "element", "bbox": [247, 111, 20, 19]},
+                {"class_name": "text", "bbox": [280, 110, 50, 14]},
+            ]
+        }
+    }
+    pool = _subtarget_yolo_boxes_in_hub(
+        hub, [], timing, frozenset({YOLO_CLASS_ELEMENT})
+    )
+    assert len(pool) == 2
+    assert _subtarget_should_force_ocr_finish(
+        pending_count=0, in_hub_count=len(pool)
+    )

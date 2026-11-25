@@ -6127,39 +6127,25 @@ def _debug_yolo_boxes_inside_uia(
     return matched
 
 
-def _unique_yolo_box_inside_uia(
-    uia_det: UiDetection,
-    pendings: list[_MouseOcrPending],
-    vision_timing: dict[str, Any],
-    class_id: int,
-) -> UiDetection | None:
-    """Return the sole in-box YOLO box of ``class_id``, or ``None``.
-
-    Prefers deferred OCR pending boxes; falls back to ``debug_layers`` when the
-    pending list is empty so a unique text/icon can still skip OCR.
-    """
-    in_box = _pending_yolo_boxes_inside_uia(uia_det, pendings, class_id)
-    if not in_box:
-        in_box = _debug_yolo_boxes_inside_uia(uia_det, vision_timing, class_id)
-    if len(in_box) == 1:
-        return in_box[0]
-    return None
-
-
-def _yolo_boxes_inside_uia_for_classes(
-    uia_det: UiDetection,
+def _subtarget_yolo_boxes_in_hub(
+    hub: UiDetection,
     pendings: list[_MouseOcrPending],
     vision_timing: dict[str, Any],
     class_ids: frozenset[int] | set[int],
 ) -> list[UiDetection]:
-    """All unlabeled in-pane YOLO boxes for ``class_ids`` (pending, else debug)."""
+    """Unified in-hub YOLO pool: pending-first, then ``debug_layers`` fallback.
+
+    Callers (unique-box skip, EFP pool, multi-box OCR) must use this so counting
+    and finish decisions see the same set. Pending is OCR-capable; debug is
+    geometry-only — force a real OCR finish when multi-box and pending is empty.
+    """
     matched: list[UiDetection] = []
     seen: set[tuple[int, int, int, int]] = set()
     for class_id in class_ids:
-        in_box = _pending_yolo_boxes_inside_uia(uia_det, pendings, int(class_id))
+        in_box = _pending_yolo_boxes_inside_uia(hub, pendings, int(class_id))
         if not in_box:
             in_box = _debug_yolo_boxes_inside_uia(
-                uia_det, vision_timing, int(class_id)
+                hub, vision_timing, int(class_id)
             )
         for det in in_box:
             key = (
@@ -6173,6 +6159,45 @@ def _yolo_boxes_inside_uia_for_classes(
             seen.add(key)
             matched.append(det)
     return matched
+
+
+def _subtarget_should_force_ocr_finish(
+    *,
+    pending_count: int,
+    in_hub_count: int,
+) -> bool:
+    """True when multi in-hub boxes need OCR but deferred pending is missing."""
+    return int(in_hub_count) >= 2 and int(pending_count) == 0
+
+
+def _unique_yolo_box_inside_uia(
+    uia_det: UiDetection,
+    pendings: list[_MouseOcrPending],
+    vision_timing: dict[str, Any],
+    class_id: int,
+) -> UiDetection | None:
+    """Return the sole in-box YOLO box of ``class_id``, or ``None``.
+
+    Uses the unified in-hub pool (pending-first, ``debug_layers`` fallback).
+    """
+    in_box = _subtarget_yolo_boxes_in_hub(
+        uia_det, pendings, vision_timing, frozenset({int(class_id)})
+    )
+    if len(in_box) == 1:
+        return in_box[0]
+    return None
+
+
+def _yolo_boxes_inside_uia_for_classes(
+    uia_det: UiDetection,
+    pendings: list[_MouseOcrPending],
+    vision_timing: dict[str, Any],
+    class_ids: frozenset[int] | set[int],
+) -> list[UiDetection]:
+    """All unlabeled in-pane YOLO boxes for ``class_ids`` (unified pool)."""
+    return _subtarget_yolo_boxes_in_hub(
+        uia_det, pendings, vision_timing, class_ids
+    )
 
 
 def _detections_from_uia_prefetched(
@@ -7833,6 +7858,25 @@ async def _find_mouse_point_attempt(
                         )
                     )
                 else:
+                    force_cls_ids: frozenset[int] | set[int]
+                    if preferred_cls is not None:
+                        force_cls_ids = frozenset({int(preferred_cls)})
+                    else:
+                        force_cls_ids = (
+                            frozenset(int(v) for v in fb_plan.ocr_class_ids)
+                            if fb_plan.ocr_class_ids
+                            else frozenset()
+                        )
+                    in_hub_pool = (
+                        _subtarget_yolo_boxes_in_hub(
+                            sub_hub,
+                            deferred_pendings,
+                            vision_timing,
+                            force_cls_ids,
+                        )
+                        if force_cls_ids
+                        else []
+                    )
                     if deferred_pendings:
                         yolo_detections, vision_timing = await asyncio.to_thread(
                             _finish_deferred_ocr_pendings,
@@ -7842,6 +7886,66 @@ async def _find_mouse_point_attempt(
                         capture_s = float(vision_timing.get("capture_s", 0.0))
                         vision_timing["vision_path"] = "uia_yolo_subtarget"
                         vision_timing["uia_first_hit"] = True
+                    elif (
+                        preferred_cls is not None
+                        and _subtarget_should_force_ocr_finish(
+                            pending_count=0,
+                            in_hub_count=len(in_hub_pool),
+                        )
+                    ):
+                        # Pending lost but debug_layers still shows 2+ boxes —
+                        # re-finish capture so twin OCR (e.g. 展開節點) can run.
+                        _log_info(
+                            "move_mouse uia_yolo_subtarget force_ocr "
+                            "multi_box pending_missing "
+                            f"n={len(in_hub_pool)} "
+                            f"class_id={int(preferred_cls)}"
+                        )
+                        force_vision = await asyncio.to_thread(
+                            _finish_captured_mouse_candidates,
+                            monitor_indices,
+                            image_paths,
+                            captured,
+                            capture_s,
+                            yolo_conf_threshold,
+                            ocr_class_ids=fb_plan.ocr_class_ids,
+                            refine_with_uia=False,
+                            click_window=click_window,
+                            caption_roi_screen=caption_roi_screen,
+                            landmark_geometry=ocr_fallback.landmark_geometry,
+                            defer_ocr=False,
+                        )
+                        (
+                            monitor_indices,
+                            image_paths,
+                            captured,
+                            yolo_detections,
+                            force_timing,
+                        ) = force_vision
+                        _note_capture(captured)
+                        capture_s = float(
+                            force_timing.get("capture_s", capture_s)
+                        )
+                        for key in (
+                            "yolo_s",
+                            "line_s",
+                            "uia_input_s",
+                            "uia_scrollbar_s",
+                            "uia_text_s",
+                            "ocr_s",
+                            "icon_ocr_retry_s",
+                            "ocr_reused",
+                            "ocr_fresh",
+                            "ocr_roi",
+                            "ocr_roi_pad",
+                            "debug_layers",
+                            "debug_layers_by_monitor",
+                        ):
+                            if key in force_timing:
+                                vision_timing[key] = force_timing[key]
+                        vision_timing["vision_path"] = "uia_yolo_subtarget"
+                        vision_timing["uia_first_hit"] = True
+                        vision_timing["uia_yolo_subtarget_force_ocr"] = True
                     chosen, method = _choose_uia_yolo_subtarget_in_hub(
                         hub=sub_hub,
                         labeled_detections=yolo_detections,

@@ -190,8 +190,11 @@ flowchart TD
   E -->|miss + unverified| H[Clear UIA → adopt twin → full YOLO]
   D -->|no| I{exactly one preferred_cls box in hub/gate?}
   I -->|yes| J[unique_box_skip_ocr<br/>NO OCR]
-  I -->|no 2+ boxes| K[Finish deferred OCR]
-  K --> L[Match twin anchor inside hub/gate]
+  I -->|no 2+ boxes| K{deferred_pendings?}
+  K -->|yes| Finish[Finish deferred OCR]
+  K -->|no pending + pool n>=2| Force[Re-finish capture defer_ocr=False]
+  Finish --> L[Match twin anchor inside hub/gate]
+  Force --> L
   L -->|n==1| M[uia_yolo_subtarget or _efp_ocr]
   L -->|else + efp_fallback| N[uia_yolo_subtarget_efp]
   L -->|else| G
@@ -205,6 +208,15 @@ Non-offset recorded-EFP **hit** is a **row gate**, not the click chooser:
 - Not unique → fall back to the Name/Value pool det (`uia_yolo_subtarget_efp`) so Explorer-style pane disambiguation still works.
 - Offset / synth empty-space clicks still commit EFP immediately.
 
+### In-hub YOLO pool
+
+`_subtarget_yolo_boxes_in_hub` is the single consumer API for in-hub/gate geometry:
+
+- **Pending-first** (`_ocr_pending` / `_MouseOcrPending`) — OCR-capable work units.
+- **`debug_layers` fallback** — geometry sidecar only (no BGR); used when pending was lost.
+
+Counting (unique-box / EFP pool / multi-box) and finish decisions must use this pool so they cannot diverge. When the pool has **2+** preferred-class boxes and pending is empty, re-finish the same capture with `defer_ocr=False` so twin OCR (e.g. `展開節點`) still runs — do not choose unlabeled boxes + row-EFP alone.
+
 ### Preferred class (`_uia_yolo_subtarget_preferred_class`)
 
 | Fallback wrapper | Class |
@@ -213,7 +225,7 @@ Non-offset recorded-EFP **hit** is a **row gate**, not the click chooser:
 | `…圖示` / `元素` | ELEMENT |
 | ambiguous (e.g. bare 輸入欄) | `None` → cannot unique-skip |
 
-One in-hub (or in-gate) box of that class → skip OCR. Multiple → OCR, then match the fallback anchor (icon id / text similarity) among those boxes.
+One in-hub (or in-gate) box of that class → skip OCR. Multiple → OCR (deferred finish, or forced re-finish if pending missing), then match the fallback anchor (icon id / text similarity) among those boxes.
 
 ---
 

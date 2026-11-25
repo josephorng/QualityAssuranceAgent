@@ -73,6 +73,7 @@ _UIA_CREATE_AND_CONDITION = 25
 _UIA_CREATE_OR_CONDITION = 28
 
 # IUIAutomationElement
+_UIA_SET_FOCUS = 3
 _UIA_FIND_FIRST = 5
 _UIA_FIND_ALL = 6
 _UIA_FIND_ALL_BUILD_CACHE = 8
@@ -136,6 +137,9 @@ _UIA_INPUT_CONTROL_TYPE_IDS = (
 _OCR_CLIP_FIELD_CONTROL_TYPE_IDS = _UIA_INPUT_CONTROL_TYPE_IDS
 _UIA_VALUE_PATTERN = 10002
 _UIA_VALUE_GET_CURRENT = 4
+# IUIAutomationScrollItemPattern (UIA_ScrollItemPatternId).
+_UIA_SCROLL_ITEM_PATTERN = 10017
+_UIA_SCROLL_ITEM_SCROLL_INTO_VIEW = 3
 _TREE_SCOPE_ELEMENT = 0x1
 _TREE_SCOPE_DESCENDANTS = 0x4
 _VT_I4 = 3
@@ -148,7 +152,8 @@ _HOVER_SUBTREE_MAX_CLIMB = 12
 # Budgeted ControlView walk (replaces unbounded FindAllBuildCache).
 _DEFAULT_WALK_MAX_HITS = 500
 _DEFAULT_WALK_MAX_NODES = 4000
-_DEFAULT_WALK_MAX_SECONDS = 2.0
+# VM / slow providers often need more than 2s to finish a local climb walk.
+_DEFAULT_WALK_MAX_SECONDS = 5.0
 _DEFAULT_WALK_MAX_CHILDREN_PER_PARENT = 80
 _WALK_OFFSCREEN_SCORE_BASE = 1_000_000_000.0
 _WALK_MISSING_BBOX_SCORE = 1_000_000_000_000.0
@@ -159,7 +164,9 @@ _EFP_SCAN_ROI_HALF_PX = 300
 _EFP_SCAN_STEP_PX = 28
 _EFP_SCAN_MAX_PROBES = 80
 _EFP_SCAN_MAX_SECONDS = 1.0
-_SNAPSHOT_UIA_ENRICH_TIMEOUT_S = 5.5
+# Outer uia_call waits (must cover walk budget; enrich stacks refetch + EFP scan).
+_SNAPSHOT_UIA_TIMEOUT_S = 5.5
+_SNAPSHOT_UIA_ENRICH_TIMEOUT_S = 15.0
 
 
 @dataclass(frozen=True)
@@ -3868,6 +3875,283 @@ def find_uia_elements_by_name(
     return cleaned
 
 
+def _element_set_focus(element: ctypes.c_void_p) -> bool:
+    """IUIAutomationElement::SetFocus. Returns True on S_OK."""
+    try:
+        set_focus = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+        )(_com_vtable(element, _UIA_SET_FOCUS + 1)[_UIA_SET_FOCUS])
+        return set_focus(element) == _S_OK
+    except Exception:
+        return False
+
+
+def _element_scroll_into_view(element: ctypes.c_void_p) -> bool:
+    """ScrollItemPattern.ScrollIntoView when available. Returns True on S_OK."""
+    pattern: ctypes.c_void_p | None = None
+    try:
+        getter = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_void_p),
+        )(
+            _com_vtable(element, _UIA_GET_CURRENT_PATTERN + 1)[
+                _UIA_GET_CURRENT_PATTERN
+            ]
+        )
+        pattern_ptr = ctypes.c_void_p()
+        hr = getter(
+            element, int(_UIA_SCROLL_ITEM_PATTERN), ctypes.byref(pattern_ptr)
+        )
+        if hr != _S_OK or not pattern_ptr:
+            return False
+        pattern = pattern_ptr
+        scroll_into_view = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+        )(
+            _com_vtable(pattern, _UIA_SCROLL_ITEM_SCROLL_INTO_VIEW + 1)[
+                _UIA_SCROLL_ITEM_SCROLL_INTO_VIEW
+            ]
+        )
+        return scroll_into_view(pattern) == _S_OK
+    except Exception:
+        return False
+    finally:
+        _com_release(pattern)
+
+
+def _positive_xywh_from_element(
+    element: ctypes.c_void_p,
+    window_xywh: RectXywh | None,
+) -> RectXywh | None:
+    """Return usable screen xywh, or None when missing/zero/oversized."""
+    bounds = _element_bounding_xyxy(element)
+    if bounds is None:
+        return None
+    x1, y1, x2, y2 = (int(v) for v in bounds)
+    w = x2 - x1
+    h = y2 - y1
+    if w <= 0 or h <= 0:
+        return None
+    xywh = (x1, y1, w, h)
+    if window_xywh is not None and is_oversized_uia_rect(xywh, window_xywh):
+        return None
+    return xywh
+
+
+def _bring_uia_named_element_into_view_impl(
+    hwnd: int,
+    name: str,
+    value: str,
+    control_type_id: int | None,
+) -> tuple[RectXywh, str, str, str] | None:
+    """Worker-thread: Name FindAll (keep zero-size), scroll/focus, refreshed bbox."""
+    target = str(name or "").strip()
+    if not int(hwnd or 0) or not target:
+        return None
+
+    ole32, initialized_here = _coinitialize_uia()
+    if ole32 is None:
+        return None
+
+    automation: ctypes.c_void_p | None = None
+    root: ctypes.c_void_p | None = None
+    type_cond: ctypes.c_void_p | None = None
+    name_cond: ctypes.c_void_p | None = None
+    and_cond: ctypes.c_void_p | None = None
+    query_cond: ctypes.c_void_p | None = None
+    found: ctypes.c_void_p | None = None
+    held: list[ctypes.c_void_p] = []
+    chosen: ctypes.c_void_p | None = None
+    try:
+        automation = _create_uia_automation()
+        if automation is None:
+            return None
+        root = _element_from_handle(automation, int(hwnd))
+        if root is None:
+            return None
+        name_cond = _create_name_condition(automation, target)
+        if name_cond is None:
+            return None
+        query_cond = name_cond
+        if control_type_id is not None and int(control_type_id) > 0:
+            type_cond = _create_control_type_condition(
+                automation, int(control_type_id)
+            )
+            if type_cond is None:
+                return None
+            and_cond = _create_and_condition(automation, type_cond, name_cond)
+            if and_cond is None:
+                return None
+            query_cond = and_cond
+
+        root_bounds = _element_bounding_xyxy(root)
+        window_xywh: RectXywh | None = None
+        if root_bounds is not None:
+            rx1, ry1, rx2, ry2 = (int(v) for v in root_bounds)
+            rw, rh = rx2 - rx1, ry2 - ry1
+            if rw > 0 and rh > 0:
+                window_xywh = (rx1, ry1, rw, rh)
+
+        find_all = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        )(_com_vtable(root, _UIA_FIND_ALL + 1)[_UIA_FIND_ALL])
+        found_ptr = ctypes.c_void_p()
+        hr = find_all(
+            root,
+            _TREE_SCOPE_DESCENDANTS,
+            query_cond,
+            ctypes.byref(found_ptr),
+        )
+        if hr != _S_OK or not found_ptr:
+            return None
+        found = found_ptr
+        get_length = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_int),
+        )(_com_vtable(found, _UIA_ARRAY_GET_LENGTH + 1)[_UIA_ARRAY_GET_LENGTH])
+        get_element = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_void_p),
+        )(_com_vtable(found, _UIA_ARRAY_GET_ELEMENT + 1)[_UIA_ARRAY_GET_ELEMENT])
+        length = ctypes.c_int(0)
+        if get_length(found, ctypes.byref(length)) != _S_OK:
+            return None
+
+        # (element, live_name, live_value, ct_token) — zero-size / missing
+        # bounds stay eligible; only positive oversized rects are skipped.
+        candidates: list[tuple[ctypes.c_void_p, str, str, str]] = []
+        hit_count = min(int(length.value), _NAME_FINDALL_MAX_HITS)
+        for index in range(hit_count):
+            elem_ptr = ctypes.c_void_p()
+            if get_element(found, index, ctypes.byref(elem_ptr)) != _S_OK or not elem_ptr:
+                continue
+            element = elem_ptr
+            held.append(element)
+            # Keep missing/zero-size bounds for ScrollIntoView. Drop only when
+            # UIA reports a positive rect that is oversized vs the window.
+            positive = _positive_xywh_from_element(element, window_xywh)
+            if positive is None and _element_bounding_xyxy(element) is not None:
+                continue
+            _label, live_name, live_value = _element_label_parts(element)
+            ct = control_type_token_from_id(
+                _element_control_type(element, cached=False)
+            )
+            candidates.append(
+                (
+                    element,
+                    str(live_name or ""),
+                    str(live_value or ""),
+                    str(ct or ""),
+                )
+            )
+
+        target_value = str(value or "").strip()
+        if target_value:
+            matched = [
+                item
+                for item in candidates
+                if str(item[2] or "").strip() == target_value
+            ]
+        else:
+            matched = list(candidates)
+        if len(matched) != 1:
+            return None
+
+        chosen_elem, _n0, _v0, _ct0 = matched[0]
+        chosen = chosen_elem
+        # Drop ownership of chosen from held so finally does not double-release
+        # before we finish scroll/focus; remaining held are released in finally.
+        held = [el for el in held if el is not chosen_elem]
+
+        if not _element_scroll_into_view(chosen):
+            _element_set_focus(chosen)
+
+        refreshed = _positive_xywh_from_element(chosen, window_xywh)
+        if refreshed is None:
+            return None
+        _label, live_name, live_value = _element_label_parts(chosen)
+        ct = control_type_token_from_id(
+            _element_control_type(chosen, cached=False)
+        )
+        return (
+            refreshed,
+            str(live_name or ""),
+            str(live_value or ""),
+            str(ct or ""),
+        )
+    except Exception:
+        return None
+    finally:
+        for el in held:
+            if el is not chosen:
+                _com_release(el)
+        _com_release(chosen)
+        _com_release(found)
+        _com_release(and_cond)
+        _com_release(name_cond)
+        _com_release(type_cond)
+        _com_release(root)
+        _com_release(automation)
+        if initialized_here:
+            try:
+                ole32.CoUninitialize()
+            except Exception:
+                pass
+
+
+def bring_uia_named_element_into_view(
+    hwnd: int,
+    name: str,
+    *,
+    value: str = "",
+    control_type_id: int | None = None,
+    timeout_s: float = 2.5,
+) -> tuple[RectXywh, str, str, str] | None:
+    """FindAll by Name, keep zero-size hits, ScrollIntoView/SetFocus, refresh bbox.
+
+    Recovery-only path for off-scroll-view leaves. COM FindAll is Name (+ optional
+    ControlType); Value is a post-filter requiring a unique strip match when set.
+    Zero-size / missing bounds are kept until after scroll/focus; the return
+    requires a refreshed positive, non-oversized ``xywh``.
+
+    Returns ``(screen_xywh, live_name, live_value, control_type_token)`` or ``None``.
+    """
+    if os.name != "nt" or not int(hwnd or 0) or not str(name or "").strip():
+        return None
+    from src.recorder.uia_thread import uia_call
+
+    try:
+        result = uia_call(
+            _bring_uia_named_element_into_view_impl,
+            int(hwnd),
+            str(name),
+            str(value or ""),
+            int(control_type_id) if control_type_id is not None else None,
+            timeout_s=float(timeout_s),
+        )
+    except Exception:
+        return None
+    if (
+        isinstance(result, tuple)
+        and len(result) == 4
+        and isinstance(result[0], tuple)
+        and len(result[0]) == 4
+    ):
+        return result  # type: ignore[return-value]
+    return None
+
+
 def control_type_id_from_token(token: str | None) -> int | None:
     """Inverse of :func:`control_type_token_from_id` for Name FindAll filters.
 
@@ -4093,7 +4377,7 @@ def snapshot_uia_screen(
     timeout_s = (
         float(_SNAPSHOT_UIA_ENRICH_TIMEOUT_S)
         if enrich and cursor_xy is not None
-        else 2.5
+        else float(_SNAPSHOT_UIA_TIMEOUT_S)
     )
     try:
         return uia_call(_run, timeout_s=timeout_s)

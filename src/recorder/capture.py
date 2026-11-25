@@ -2696,6 +2696,14 @@ class RecordingSession:
                 if isinstance(value, dict):
                     self._log_findall_snapshot("hover", hwnd, value)
             except Exception:
+                with self._lock:
+                    run_dir = self._run_dir
+                if run_dir is not None:
+                    self._log(
+                        run_dir,
+                        f"hover FindAll hwnd={hwnd} failed=1 "
+                        f"xy=({int(x)},{int(y)})",
+                    )
                 self._release_hover_uia_led_to_readiness(
                     claim_token,
                     cursor_xy=cursor_xy,
@@ -2703,9 +2711,18 @@ class RecordingSession:
                     efp_value=efp_value,
                     efp_control_type=efp_control_type,
                 )
-                self._reschedule_idle_efp_from_last_pointer()
+                # Do not reschedule: timeout/exception retries caused ~7s yellow
+                # loops on slow VMs. Wait for mouse move or settle/typing.
                 return True
             if not isinstance(value, dict):
+                with self._lock:
+                    run_dir = self._run_dir
+                if run_dir is not None:
+                    self._log(
+                        run_dir,
+                        f"hover FindAll hwnd={hwnd} timeout=1 "
+                        f"xy=({int(x)},{int(y)})",
+                    )
                 self._release_hover_uia_led_to_readiness(
                     claim_token,
                     cursor_xy=cursor_xy,
@@ -2713,7 +2730,7 @@ class RecordingSession:
                     efp_value=efp_value,
                     efp_control_type=efp_control_type,
                 )
-                self._reschedule_idle_efp_from_last_pointer()
+                # Same as exception path — no idle→hover re-arm on timeout.
                 return True
             snapshot = dict(value)
             snapshot["hwnd"] = hwnd

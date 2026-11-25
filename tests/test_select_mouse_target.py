@@ -6583,7 +6583,7 @@ def test_try_uia_first_unique_select_hit_and_miss() -> None:
 
 
 def test_try_uia_first_name_findall_recovers_unique_miss() -> None:
-    """Budgeted snapshot miss + Name FindAll unique hit → UIA commit."""
+    """Budgeted snapshot miss + legacy Name FindAll unique hit → UIA commit."""
     from cua_mcp.select_mouse_target import _try_uia_first_unique_select
     from src.common.nearby_side import normalize_nearby_hints
 
@@ -6619,6 +6619,84 @@ def test_try_uia_first_name_findall_recovers_unique_miss() -> None:
     assert chosen.bbox == leaf_bbox
     assert "龜速的網域 (3)" in str(chosen.text or "")
     assert calls == [("龜速的網域 (3)", None)]  # text token → no ControlType AND
+
+
+def test_try_uia_first_bring_into_view_recovers_with_refreshed_bbox() -> None:
+    """Snapshot miss + bring_into_view → name_findall_hit with refreshed bbox."""
+    from cua_mcp.select_mouse_target import _try_uia_first_unique_select
+    from src.common.nearby_side import normalize_nearby_hints
+
+    snapshot = [
+        _detection_from_bbox(
+            (10, 10, 40, 16), YOLO_CLASS_TEXT, text="組織圖", source="uia"
+        ),
+    ]
+    refreshed = (300, 200, 140, 28)
+    bring_calls: list[tuple[str, str, int | None]] = []
+    name_findall_calls: list[str] = []
+
+    def fake_bring(
+        name: str, value: str, control_type_id: int | None
+    ) -> tuple[tuple[int, int, int, int], str, str, str]:
+        bring_calls.append((name, value, control_type_id))
+        assert name == "龜速的網域 (3)"
+        assert value == "1"
+        return (refreshed, "龜速的網域 (3)", "1", "tree_item")
+
+    def fake_name_findall(name: str, control_type_id: int | None):
+        name_findall_calls.append(name)
+        return [((1, 1, 10, 10), "龜速的網域 (3)", "1", "tree_item")]
+
+    chosen, reason = _try_uia_first_unique_select(
+        snapshot,
+        anchor="龜速的網域 (3)|1",
+        nearby_hints=normalize_nearby_hints([]),
+        nearby_labels=[],
+        nearby_phrases=[],
+        filter_by_control_type=True,
+        control_type_token="text",
+        recorded_anchor=True,
+        name_findall_fn=fake_name_findall,
+        bring_into_view_fn=fake_bring,
+    )
+    assert reason == "name_findall_hit"
+    assert chosen is not None
+    assert chosen.bbox == refreshed
+    assert "龜速的網域 (3)" in str(chosen.text or "")
+    assert bring_calls == [("龜速的網域 (3)", "1", None)]
+    assert name_findall_calls == []  # bring preferred over legacy FindAll
+
+
+def test_try_uia_first_snapshot_hit_skips_bring_into_view() -> None:
+    """Ordinary unique snapshot Name hit must not call bring_into_view."""
+    from cua_mcp.select_mouse_target import _try_uia_first_unique_select
+    from src.common.nearby_side import normalize_nearby_hints
+
+    leaf = _detection_from_bbox(
+        (50, 50, 80, 20),
+        YOLO_CLASS_TEXT,
+        text="空白活頁簿",
+        source="uia",
+    )
+    bring_calls: list[tuple[str, str, int | None]] = []
+
+    def fake_bring(
+        name: str, value: str, control_type_id: int | None
+    ) -> tuple[tuple[int, int, int, int], str, str, str] | None:
+        bring_calls.append((name, value, control_type_id))
+        return ((9, 9, 9, 9), "空白活頁簿", "", "list_item")
+
+    chosen, reason = _try_uia_first_unique_select(
+        [leaf],
+        anchor="空白活頁簿",
+        nearby_hints=normalize_nearby_hints([]),
+        nearby_labels=[],
+        nearby_phrases=[],
+        bring_into_view_fn=fake_bring,
+    )
+    assert reason == "hit"
+    assert chosen is leaf
+    assert bring_calls == []
 
 
 def test_try_uia_first_name_findall_duplicate_stays_not_unique() -> None:

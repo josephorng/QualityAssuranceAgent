@@ -25,6 +25,7 @@ from src.recorder.uia_input_boxes import (
     _UIA_TREEITEM_CONTROL_TYPE_ID,
     attach_findall_timing,
     bind_findall_timing,
+    bring_uia_named_element_into_view,
     canonicalize_uia_shell_status_label,
     compose_uia_input_landmark_label,
     control_type_token_from_id,
@@ -33,6 +34,7 @@ from src.recorder.uia_input_boxes import (
     filter_uia_input_rects,
     filter_uia_scrollbar_rects,
     control_type_id_from_token,
+    _bring_uia_named_element_into_view_impl,
     _unique_data_item_hit_by_value,
     find_uia_data_item_by_name,
     find_uia_elements_by_name,
@@ -185,6 +187,253 @@ def test_find_uia_elements_by_name_rejects_empty_inputs() -> None:
     assert find_uia_elements_by_name(0, "龜速的網域 (3)") == []
     assert find_uia_elements_by_name(123, "") == []
     assert find_uia_elements_by_name(123, "   ") == []
+
+
+def test_bring_uia_named_element_into_view_rejects_empty_inputs() -> None:
+    assert bring_uia_named_element_into_view(0, "龜速的網域 (3)") is None
+    assert bring_uia_named_element_into_view(123, "") is None
+    assert bring_uia_named_element_into_view(123, "   ") is None
+
+
+def test_bring_uia_named_element_into_view_marshals_impl_result(
+    monkeypatch,
+) -> None:
+    """Public API returns the worker-thread refreshed bbox tuple unchanged."""
+    import src.recorder.uia_input_boxes as uia_mod
+
+    monkeypatch.setattr(uia_mod, "os", type("O", (), {"name": "nt"})())
+    expected = ((228, 108, 125, 24), "龜速的網域 (3)", "1", "tree_item")
+    calls: list[tuple] = []
+
+    def fake_uia_call(fn, *args, timeout_s=2.5):
+        calls.append((fn, args, timeout_s))
+        assert fn is _bring_uia_named_element_into_view_impl
+        assert args[0] == 42
+        assert args[1] == "龜速的網域 (3)"
+        assert args[2] == "1"
+        return expected
+
+    monkeypatch.setattr(
+        "src.recorder.uia_thread.uia_call", fake_uia_call
+    )
+    hit = bring_uia_named_element_into_view(
+        42, "龜速的網域 (3)", value="1", control_type_id=50025
+    )
+    assert hit == expected
+    assert len(calls) == 1
+
+
+def test_bring_uia_named_element_into_view_impl_zero_size_scrolls(
+    monkeypatch,
+) -> None:
+    """Zero-size Name hit stays eligible; ScrollIntoView then positive bbox."""
+    import ctypes
+
+    import src.recorder.uia_input_boxes as uia_mod
+
+    class _FakeOle:
+        def CoUninitialize(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        uia_mod, "_coinitialize_uia", lambda: (_FakeOle(), True)
+    )
+    automation = ctypes.c_void_p(1)
+    root = ctypes.c_void_p(2)
+    name_cond = ctypes.c_void_p(3)
+    found = ctypes.c_void_p(4)
+    element = ctypes.c_void_p(5)
+    monkeypatch.setattr(
+        uia_mod, "_create_uia_automation", lambda: automation
+    )
+    monkeypatch.setattr(
+        uia_mod, "_element_from_handle", lambda *_a, **_k: root
+    )
+    monkeypatch.setattr(
+        uia_mod, "_create_name_condition", lambda *_a, **_k: name_cond
+    )
+    monkeypatch.setattr(
+        uia_mod, "_create_control_type_condition", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(uia_mod, "_com_release", lambda *_a, **_k: None)
+
+    # Root has a positive window box; leaf starts with no usable bounds.
+    def fake_bounds(el, *, cached=False):
+        if el is root:
+            return (0, 0, 800, 600)
+        return None
+
+    bound_reads = {"n": 0}
+
+    def fake_positive(el, window_xywh):
+        # First pass (candidate filter): None (zero-size). After scroll: positive.
+        bound_reads["n"] += 1
+        if bound_reads["n"] <= 1:
+            return None
+        return (100, 200, 80, 24)
+
+    monkeypatch.setattr(uia_mod, "_element_bounding_xyxy", fake_bounds)
+    monkeypatch.setattr(uia_mod, "_positive_xywh_from_element", fake_positive)
+    monkeypatch.setattr(
+        uia_mod,
+        "_element_label_parts",
+        lambda *_a, **_k: ("葉|1", "葉", "1"),
+    )
+    monkeypatch.setattr(
+        uia_mod, "_element_control_type", lambda *_a, **_k: 50025
+    )
+    scroll_calls: list[object] = []
+    focus_calls: list[object] = []
+
+    def fake_scroll(el):
+        scroll_calls.append(el)
+        return True
+
+    def fake_focus(el):
+        focus_calls.append(el)
+        return True
+
+    monkeypatch.setattr(uia_mod, "_element_scroll_into_view", fake_scroll)
+    monkeypatch.setattr(uia_mod, "_element_set_focus", fake_focus)
+
+    # Fake FindAll vtable path: length=1, get_element returns our leaf.
+    def fake_vtable(ptr, size):
+        class _Arr:
+            def __getitem__(self, idx):
+                return ctypes.c_void_p(99)
+
+        return _Arr()
+
+    monkeypatch.setattr(uia_mod, "_com_vtable", fake_vtable)
+
+    call_state = {"findall": 0, "length": 0, "get": 0}
+
+    def fake_winfunc(restype, *argtypes):
+        def decorator(fn_ptr):
+            def caller(*args):
+                # find_all(root, scope, cond, byref(found_ptr))
+                if len(args) == 4 and hasattr(args[3], "_obj"):
+                    call_state["findall"] += 1
+                    args[3]._obj.value = found.value
+                    return uia_mod._S_OK
+                # get_length(found, byref(length))
+                if len(args) == 2 and hasattr(args[1], "_obj"):
+                    # length is c_int or pointer to c_int via byref
+                    try:
+                        args[1]._obj.value = 1
+                    except Exception:
+                        pass
+                    call_state["length"] += 1
+                    return uia_mod._S_OK
+                # get_element(found, index, byref(elem_ptr))
+                if len(args) == 3:
+                    call_state["get"] += 1
+                    args[2]._obj.value = element.value
+                    return uia_mod._S_OK
+                return uia_mod._S_OK
+
+            return caller
+
+        return decorator
+
+    monkeypatch.setattr(ctypes, "WINFUNCTYPE", fake_winfunc)
+
+    hit = _bring_uia_named_element_into_view_impl(42, "葉", "1", None)
+    assert hit == ((100, 200, 80, 24), "葉", "1", "tree_item")
+    assert scroll_calls  # ScrollIntoView attempted
+    assert not focus_calls  # not needed when scroll succeeds
+
+
+def test_bring_uia_named_element_into_view_impl_still_zero_after_scroll(
+    monkeypatch,
+) -> None:
+    """If bbox stays non-positive after scroll/focus, return None."""
+    import ctypes
+
+    import src.recorder.uia_input_boxes as uia_mod
+
+    class _FakeOle:
+        def CoUninitialize(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        uia_mod, "_coinitialize_uia", lambda: (_FakeOle(), True)
+    )
+    automation = ctypes.c_void_p(1)
+    root = ctypes.c_void_p(2)
+    name_cond = ctypes.c_void_p(3)
+    found = ctypes.c_void_p(4)
+    element = ctypes.c_void_p(5)
+    monkeypatch.setattr(
+        uia_mod, "_create_uia_automation", lambda: automation
+    )
+    monkeypatch.setattr(
+        uia_mod, "_element_from_handle", lambda *_a, **_k: root
+    )
+    monkeypatch.setattr(
+        uia_mod, "_create_name_condition", lambda *_a, **_k: name_cond
+    )
+    monkeypatch.setattr(uia_mod, "_com_release", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        uia_mod,
+        "_element_bounding_xyxy",
+        lambda el, *, cached=False: (0, 0, 800, 600) if el is root else None,
+    )
+    monkeypatch.setattr(
+        uia_mod, "_positive_xywh_from_element", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(
+        uia_mod,
+        "_element_label_parts",
+        lambda *_a, **_k: ("葉", "葉", ""),
+    )
+    monkeypatch.setattr(
+        uia_mod, "_element_control_type", lambda *_a, **_k: 50025
+    )
+    monkeypatch.setattr(
+        uia_mod, "_element_scroll_into_view", lambda *_a, **_k: False
+    )
+    focus_calls: list[object] = []
+    monkeypatch.setattr(
+        uia_mod,
+        "_element_set_focus",
+        lambda el: focus_calls.append(el) or True,
+    )
+
+    def fake_vtable(ptr, size):
+        class _Arr:
+            def __getitem__(self, idx):
+                return ctypes.c_void_p(99)
+
+        return _Arr()
+
+    monkeypatch.setattr(uia_mod, "_com_vtable", fake_vtable)
+
+    def fake_winfunc(restype, *argtypes):
+        def decorator(fn_ptr):
+            def caller(*args):
+                if len(args) == 4 and hasattr(args[3], "_obj"):
+                    args[3]._obj.value = found.value
+                    return uia_mod._S_OK
+                if len(args) == 2 and hasattr(args[1], "_obj"):
+                    try:
+                        args[1]._obj.value = 1
+                    except Exception:
+                        pass
+                    return uia_mod._S_OK
+                if len(args) == 3:
+                    args[2]._obj.value = element.value
+                    return uia_mod._S_OK
+                return uia_mod._S_OK
+
+            return caller
+
+        return decorator
+
+    monkeypatch.setattr(ctypes, "WINFUNCTYPE", fake_winfunc)
+
+    assert _bring_uia_named_element_into_view_impl(42, "葉", "", None) is None
+    assert focus_calls  # SetFocus fallback after scroll miss
 
 
 def test_control_type_id_from_token_skips_generic_text() -> None:

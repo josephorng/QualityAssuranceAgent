@@ -5602,6 +5602,7 @@ def _try_uia_first_unique_select(
     point_probe_fn: Any | None = None,
     data_item_lookup_fn: Any | None = None,
     name_findall_fn: Any | None = None,
+    bring_into_view_fn: Any | None = None,
 ) -> tuple[UiDetection | None, str]:
     """Soft UIA-first commit: unique after filter + nearby prefilter, else miss reason.
 
@@ -5615,8 +5616,10 @@ def _try_uia_first_unique_select(
     unavailable also continues into Name. For ``data_item``, Name lookup runs
     after pool/synth EFP miss and before scan-EFP (FindFirst when Value empty;
     FindAll+Value filter when Value recorded). When the budgeted snapshot
-    Name shortlist is empty, a Name PropertyCondition FindAll (not FindFirst)
-    recovers truncated tree/list hubs.
+    Name shortlist is empty, ``bring_into_view_fn`` recovers via Name FindAll
+    that keeps zero-size hits, ScrollIntoView/SetFocus, then a refreshed
+    positive bbox (``name_findall_hit``). Legacy ``name_findall_fn`` remains a
+    fallback when bring-into-view is unset.
     """
     from src.recorder.uia_input_boxes import (
         control_type_id_from_token,
@@ -5689,6 +5692,42 @@ def _try_uia_first_unique_select(
                 f"live_name={live_name_s!r} live_value={live_value_s!r}"
             )
             return None, None
+        if bring_into_view_fn is not None:
+            try:
+                refreshed = bring_into_view_fn(
+                    target_name,
+                    target_value,
+                    control_type_id_from_token("data_item"),
+                )
+            except Exception as exc:
+                refreshed = None
+                _log_info(
+                    "move_mouse uia_first data_item bring_into_view error "
+                    f"name={target_name!r} value={target_value!r} err={exc!r}"
+                )
+            if (
+                isinstance(refreshed, tuple)
+                and len(refreshed) >= 3
+                and isinstance(refreshed[0], (list, tuple))
+                and len(refreshed[0]) == 4
+            ):
+                try:
+                    rx, ry, rw, rh = (int(v) for v in refreshed[0][:4])
+                except (TypeError, ValueError):
+                    rx = ry = rw = rh = 0
+                if rw > 0 and rh > 0:
+                    sx, sy, sw, sh = rx, ry, rw, rh
+                    live_name_s = str(refreshed[1] or "").strip() or live_name_s
+                    live_value_s = (
+                        str(refreshed[2] or "").strip()
+                        if len(refreshed) > 2
+                        else live_value_s
+                    ) or live_value_s
+                    _log_info(
+                        "move_mouse uia_first data_item bring_into_view ok "
+                        f"center=[{sx + sw // 2},{sy + sh // 2}] "
+                        f"name={live_name_s!r} value={live_value_s!r}"
+                    )
         label = (
             uia_label_combine_name_value(live_name_s, live_value_s)
             or live_name_s
@@ -5897,93 +5936,156 @@ def _try_uia_first_unique_select(
     )
     _log_move_mouse_detections("uia_first anchor_matches", anchor_matches)
     _log_move_mouse_detections("uia_first nearby_matches", nearby_matches)
-    if not anchor_matches and token != "data_item" and name_findall_fn is not None:
-        # Budgeted walk truncation: targeted Name FindAll under the click hwnd.
-        # Use the raw Name (no lookalike fold) for the COM PropertyCondition.
+    if not anchor_matches and token != "data_item":
+        # Budgeted walk truncation / off-view leaf: targeted Name recovery.
+        # Prefer bring_into_view (keeps zero-size COM hits, ScrollIntoView,
+        # refreshed positive bbox). Legacy name_findall_fn when unset.
         raw_name = str(split_uia_name_value_label(anchor)[0] or "").strip()
+        raw_value = str(split_uia_name_value_label(anchor)[1] or "").strip()
         if not raw_name and recorded_efp_name:
             raw_name = str(
                 split_uia_name_value_label(str(recorded_efp_name))[0] or ""
             ).strip() or str(recorded_efp_name or "").strip()
+        if not raw_value and recorded_efp_value:
+            raw_value = str(recorded_efp_value or "").strip()
         if raw_name:
             type_id = control_type_id_from_token(token)
-            try:
-                hits = name_findall_fn(raw_name, type_id)
-            except Exception as exc:
-                hits = []
-                _log_info(
-                    "move_mouse uia_first name_findall error "
-                    f"name={raw_name!r} err={exc!r}"
-                )
-            recovered: list[UiDetection] = []
-            if isinstance(hits, list):
-                for hit in hits:
-                    if not (
-                        isinstance(hit, tuple)
-                        and len(hit) >= 3
-                        and isinstance(hit[0], (list, tuple))
-                        and len(hit[0]) == 4
-                    ):
-                        continue
+            if bring_into_view_fn is not None:
+                try:
+                    brought = bring_into_view_fn(raw_name, raw_value, type_id)
+                except Exception as exc:
+                    brought = None
+                    _log_info(
+                        "move_mouse uia_first name_findall bring_into_view error "
+                        f"name={raw_name!r} value={raw_value!r} err={exc!r}"
+                    )
+                if (
+                    isinstance(brought, tuple)
+                    and len(brought) >= 3
+                    and isinstance(brought[0], (list, tuple))
+                    and len(brought[0]) == 4
+                ):
                     try:
-                        sx, sy, sw, sh = (int(v) for v in hit[0][:4])
+                        sx, sy, sw, sh = (int(v) for v in brought[0][:4])
                     except (TypeError, ValueError):
-                        continue
-                    if sw <= 0 or sh <= 0:
-                        continue
-                    live_name = str(hit[1] or "").strip()
-                    live_value = str(hit[2] or "").strip() if len(hit) > 2 else ""
-                    live_ct = (
-                        str(hit[3] or "").strip() if len(hit) > 3 else ""
-                    ) or None
-                    label = uia_label_combine_name_value(
-                        live_name, live_value
-                    ).strip() or live_name or raw_name
-                    recovered.append(
-                        _detection_from_bbox(
+                        sx = sy = sw = sh = 0
+                    if sw > 0 and sh > 0:
+                        live_name = str(brought[1] or "").strip()
+                        live_value = (
+                            str(brought[2] or "").strip() if len(brought) > 2 else ""
+                        )
+                        live_ct = (
+                            str(brought[3] or "").strip() if len(brought) > 3 else ""
+                        ) or None
+                        label = uia_label_combine_name_value(
+                            live_name, live_value
+                        ).strip() or live_name or raw_name
+                        chosen = _detection_from_bbox(
                             (sx, sy, sw, sh),
                             YOLO_CLASS_TEXT,
                             text=label,
                             source="uia",
                             uia_control_type=live_ct or token or None,
                         )
-                    )
-            if recovered:
-                name_detections.extend(recovered)
-                anchor_matches = _filter_uia_anchor_by_name_then_value(
-                    recovered, anchor, recorded_anchor=recorded_anchor
-                )
+                        _log_info(
+                            "move_mouse uia_first name_findall bring_into_view "
+                            f"com_hits=1 unique=1 ok "
+                            f"name={raw_name!r} value={raw_value!r} "
+                            f"center=[{chosen.cx},{chosen.cy}] "
+                            f"control_type_id={type_id!r}"
+                        )
+                        return chosen, "name_findall_hit"
                 _log_info(
-                    "move_mouse uia_first name_findall "
-                    f"raw_name={raw_name!r} hits={len(recovered)} "
-                    f"name_matches={len(anchor_matches)} "
+                    "move_mouse uia_first name_findall bring_into_view fail "
+                    f"name={raw_name!r} value={raw_value!r} "
                     f"control_type_id={type_id!r}"
                 )
-                _log_move_mouse_detections(
-                    "uia_first name_findall_matches", anchor_matches
-                )
-                # Rebuild nearby from the expanded detections so prefilter works.
-                if filter_by_control_type:
-                    nearby_matches = []
-                    seen = {id(det) for det in anchor_matches}
-                    for phrase in nearby_labels:
-                        for det in _matches_for_phrase(name_detections, phrase):
-                            if id(det) in seen:
-                                continue
-                            seen.add(id(det))
-                            nearby_matches.append(det)
-                else:
-                    _anchor_exact, nearby_matches = _filter_mouse_candidates_exact(
-                        name_detections,
-                        anchor,
-                        nearby_labels,
-                        recorded_anchor=recorded_anchor,
+            elif name_findall_fn is not None:
+                try:
+                    hits = name_findall_fn(raw_name, type_id)
+                except Exception as exc:
+                    hits = []
+                    _log_info(
+                        "move_mouse uia_first name_findall error "
+                        f"name={raw_name!r} err={exc!r}"
                     )
-                    nearby_matches = [
-                        det
-                        for det in nearby_matches
-                        if id(det) not in {id(a) for a in anchor_matches}
-                    ]
+                recovered: list[UiDetection] = []
+                if isinstance(hits, list):
+                    for hit in hits:
+                        if not (
+                            isinstance(hit, tuple)
+                            and len(hit) >= 3
+                            and isinstance(hit[0], (list, tuple))
+                            and len(hit[0]) == 4
+                        ):
+                            continue
+                        try:
+                            sx, sy, sw, sh = (int(v) for v in hit[0][:4])
+                        except (TypeError, ValueError):
+                            continue
+                        if sw <= 0 or sh <= 0:
+                            continue
+                        live_name = str(hit[1] or "").strip()
+                        live_value = (
+                            str(hit[2] or "").strip() if len(hit) > 2 else ""
+                        )
+                        live_ct = (
+                            str(hit[3] or "").strip() if len(hit) > 3 else ""
+                        ) or None
+                        label = uia_label_combine_name_value(
+                            live_name, live_value
+                        ).strip() or live_name or raw_name
+                        recovered.append(
+                            _detection_from_bbox(
+                                (sx, sy, sw, sh),
+                                YOLO_CLASS_TEXT,
+                                text=label,
+                                source="uia",
+                                uia_control_type=live_ct or token or None,
+                            )
+                        )
+                if recovered:
+                    name_detections.extend(recovered)
+                    anchor_matches = _filter_uia_anchor_by_name_then_value(
+                        recovered, anchor, recorded_anchor=recorded_anchor
+                    )
+                    _log_info(
+                        "move_mouse uia_first name_findall "
+                        f"raw_name={raw_name!r} hits={len(recovered)} "
+                        f"name_matches={len(anchor_matches)} "
+                        f"control_type_id={type_id!r}"
+                    )
+                    _log_move_mouse_detections(
+                        "uia_first name_findall_matches", anchor_matches
+                    )
+                    # Rebuild nearby from the expanded detections so prefilter works.
+                    if filter_by_control_type:
+                        nearby_matches = []
+                        seen = {id(det) for det in anchor_matches}
+                        for phrase in nearby_labels:
+                            for det in _matches_for_phrase(name_detections, phrase):
+                                if id(det) in seen:
+                                    continue
+                                seen.add(id(det))
+                                nearby_matches.append(det)
+                    else:
+                        _anchor_exact, nearby_matches = _filter_mouse_candidates_exact(
+                            name_detections,
+                            anchor,
+                            nearby_labels,
+                            recorded_anchor=recorded_anchor,
+                        )
+                        nearby_matches = [
+                            det
+                            for det in nearby_matches
+                            if id(det) not in {id(a) for a in anchor_matches}
+                        ]
+                else:
+                    _log_info(
+                        "move_mouse uia_first name_findall "
+                        f"raw_name={raw_name!r} hits=0 name_matches=0 "
+                        f"control_type_id={type_id!r}"
+                    )
 
     def _name_path_miss(reason: str) -> tuple[None, str]:
         # Preserve constellation-miss reason when Name shortlist / FindAll
@@ -7488,6 +7590,24 @@ async def _find_mouse_point_attempt(
                 control_type_id=control_type_id,
             )
 
+        def _bring_named_into_view(
+            name: str,
+            value: str,
+            control_type_id: int | None,
+        ) -> tuple[tuple[int, int, int, int], str, str, str] | None:
+            from src.recorder.uia_input_boxes import bring_uia_named_element_into_view
+            from src.recorder.window_snapshot import find_matching_click_window
+
+            live = find_matching_click_window(click_window)
+            if live is None or not int(live.hwnd or 0):
+                return None
+            return bring_uia_named_element_into_view(
+                int(live.hwnd),
+                str(name),
+                value=str(value or ""),
+                control_type_id=control_type_id,
+            )
+
         def _select_uia_snapshot(
             dets: list[UiDetection],
         ) -> tuple[UiDetection | None, str]:
@@ -7506,6 +7626,7 @@ async def _find_mouse_point_attempt(
                 hub_source=hub_source,
                 data_item_lookup_fn=_data_item_lookup_by_name,
                 name_findall_fn=_name_findall_by_name,
+                bring_into_view_fn=_bring_named_into_view,
             )
 
         constellation_joint = _should_run_constellation_efp(

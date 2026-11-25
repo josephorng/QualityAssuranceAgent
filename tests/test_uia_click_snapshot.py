@@ -1057,6 +1057,7 @@ def test_hover_findall_fail_restores_readiness_not_auto_green(tmp_path: Path) ->
             "src.recorder.uia_input_boxes.snapshot_uia_hover_subtree",
             return_value=None,
         ),
+        patch.object(session, "_reschedule_idle_efp_from_last_pointer") as reschedule,
     ):
         session._maybe_hover_findall_uia(1, 100, 100, efp_name="Leaf", efp_value="V")
     assert session._last_settle_uia_by_hwnd == {}
@@ -1067,6 +1068,8 @@ def test_hover_findall_fail_restores_readiness_not_auto_green(tmp_path: Path) ->
     ]
     assert statuses[-1]["state"] == "red"
     assert session._hover_uia_led_active is False
+    # Timeout/None must not re-arm idle→hover (VM yellow-loop fix).
+    reschedule.assert_not_called()
 
 
 def test_hover_findall_settle_steal_skips_green_and_upsert(tmp_path: Path) -> None:

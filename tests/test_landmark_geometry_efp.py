@@ -1237,8 +1237,9 @@ def test_uia_first_data_item_name_findfirst_hit_before_scan() -> None:
         scan_calls["n"] += 1
         return ("LM", (x - 5, y - 5, 10, 10), "text", "LM", "")
 
-    def lookup(name: str):
+    def lookup(name: str, value: str = ""):
         assert name == "N15"
+        assert value == ""
         return ((2900, 630, 72, 22), "N15", "")
 
     chosen, reason = _try_uia_first_unique_select(
@@ -1335,8 +1336,9 @@ def test_uia_first_data_item_geom_unavailable_findfirst_hit() -> None:
     # Landmark label missing from detections → geom unavailable.
     orphan = _det(50, 50, text="OTHER", class_name="text")
 
-    def lookup(name: str):
+    def lookup(name: str, value: str = ""):
         assert name == "N15"
+        assert value == ""
         return ((1000, 600, 70, 20), "N15", "")
 
     chosen, reason = _try_uia_first_unique_select(
@@ -1359,6 +1361,72 @@ def test_uia_first_data_item_geom_unavailable_findfirst_hit() -> None:
     assert reason == "uia_data_item_name_hit"
     assert chosen is not None
     assert (chosen.cx, chosen.cy) == (1035, 610)
+
+
+def test_uia_first_data_item_value_mismatch_does_not_commit() -> None:
+    """Recorded Value present but lookup returns wrong live Value → no hit."""
+    orphan = _det(50, 50, text="OTHER", class_name="text")
+    calls: list[tuple[str, str]] = []
+
+    def lookup(name: str, value: str = ""):
+        calls.append((name, value))
+        # Simulate FindFirst-style first column cell (wrong row).
+        return ((446, 110, 130, 22), "電腦名稱", "Lannie_CentOS8")
+
+    chosen, reason = _try_uia_first_unique_select(
+        [orphan],
+        anchor="電腦名稱|Red-Hat10",
+        nearby_hints=[],
+        nearby_labels=[],
+        nearby_phrases=[],
+        control_type_token="data_item",
+        landmark_geometry=_simple_landmark_geometry(
+            landmark_label="MISSING",
+            landmark_xy=(100.0, 100.0),
+            target_xy=(511.0, 190.0),
+        ),
+        recorded_efp_name="電腦名稱",
+        recorded_efp_value="Red-Hat10",
+        hub_source="uia_efp",
+        point_probe_fn=lambda *_a: ("x", None, "text", "x", ""),
+        data_item_lookup_fn=lookup,
+    )
+    assert calls and all(c == ("電腦名稱", "Red-Hat10") for c in calls)
+    assert reason != "uia_data_item_name_hit"
+    assert chosen is None
+
+
+def test_uia_first_data_item_unique_value_hit_geom_unavailable() -> None:
+    """Geom unavailable + Name FindAll Value filter → correct grid cell."""
+    orphan = _det(50, 50, text="OTHER", class_name="text")
+
+    def lookup(name: str, value: str = ""):
+        assert name == "電腦名稱"
+        assert value == "Red-Hat10"
+        return ((446, 179, 130, 22), "電腦名稱", "Red-Hat10")
+
+    chosen, reason = _try_uia_first_unique_select(
+        [orphan],
+        anchor="電腦名稱|Red-Hat10",
+        nearby_hints=[],
+        nearby_labels=[],
+        nearby_phrases=[],
+        control_type_token="data_item",
+        landmark_geometry=_simple_landmark_geometry(
+            landmark_label="MISSING",
+            landmark_xy=(100.0, 100.0),
+            target_xy=(511.0, 190.0),
+        ),
+        recorded_efp_name="電腦名稱",
+        recorded_efp_value="Red-Hat10",
+        hub_source="uia_efp",
+        point_probe_fn=lambda *_a: ("x", None, "text", "x", ""),
+        data_item_lookup_fn=lookup,
+    )
+    assert reason == "uia_data_item_name_hit"
+    assert chosen is not None
+    assert (chosen.cx, chosen.cy) == (511, 190)
+    assert chosen.text == "電腦名稱|Red-Hat10"
 
 
 def test_recorded_efp_agrees_with_hub_rejects_overlay_poison() -> None:

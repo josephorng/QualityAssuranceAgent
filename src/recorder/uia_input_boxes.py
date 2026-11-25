@@ -3495,6 +3495,42 @@ def _snapshot_uia_screen_impl(
                 pass
 
 
+def _unique_data_item_hit_by_value(
+    hits: list[tuple[RectXywh, str, str, str]],
+    value: str,
+) -> tuple[RectXywh, str, str] | None:
+    """Pick the unique FindAll Name hit whose live Value strip-equals ``value``.
+
+    COM FindAll is Name (+ ControlType) only; Value is filtered here. Returns
+    ``None`` when zero or multiple Value matches.
+    """
+    target = str(value or "").strip()
+    if not target:
+        return None
+    matched: list[tuple[RectXywh, str, str]] = []
+    for item in hits:
+        if not (
+            isinstance(item, tuple)
+            and len(item) >= 3
+            and isinstance(item[0], tuple)
+            and len(item[0]) == 4
+        ):
+            continue
+        bbox, live_name, live_value = item[0], item[1], item[2]
+        if str(live_value or "").strip() != target:
+            continue
+        matched.append(
+            (
+                bbox,  # type: ignore[arg-type]
+                str(live_name or ""),
+                str(live_value or ""),
+            )
+        )
+    if len(matched) != 1:
+        return None
+    return matched[0]
+
+
 def _find_uia_data_item_by_name_impl(
     hwnd: int, name: str
 ) -> tuple[RectXywh, str, str] | None:
@@ -3584,9 +3620,19 @@ def find_uia_data_item_by_name(
     hwnd: int,
     name: str,
     *,
+    value: str = "",
     timeout_s: float = 2.5,
 ) -> tuple[RectXywh, str, str] | None:
-    """FindFirst under ``hwnd``: ControlType=DataItem AND Name=``name``.
+    """Find a DataItem under ``hwnd`` by Name, optionally disambiguated by Value.
+
+    When ``value`` is empty: FindFirst with ControlType=DataItem AND Name=``name``
+    (Excel-style unique cell Names such as ``N15``).
+
+    When ``value`` is set: FindAll with the same Name+DataItem PropertyCondition
+    (Value is **not** a COM search filter), then keep hits whose live ValuePattern
+    strip-equals ``value``. Returns the hit only when exactly one Value match
+    remains — used for column-named grid cells (e.g. Name=``電腦名稱``,
+    Value=``Red-Hat10``).
 
     Returns ``(screen_xywh, live_name, live_value)`` or ``None``. Does not add
     DataItems to the default budgeted FindAll walk — targeted lookup only.
@@ -3594,6 +3640,16 @@ def find_uia_data_item_by_name(
     """
     if os.name != "nt" or not int(hwnd or 0) or not str(name or "").strip():
         return None
+    target_value = str(value or "").strip()
+    if target_value:
+        hits = find_uia_elements_by_name(
+            int(hwnd),
+            str(name),
+            control_type_id=_UIA_DATAITEM_CONTROL_TYPE_ID,
+            timeout_s=float(timeout_s),
+        )
+        return _unique_data_item_hit_by_value(hits, target_value)
+
     from src.recorder.uia_thread import uia_call
 
     try:

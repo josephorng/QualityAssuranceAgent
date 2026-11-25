@@ -33,6 +33,7 @@ from src.recorder.uia_input_boxes import (
     filter_uia_input_rects,
     filter_uia_scrollbar_rects,
     control_type_id_from_token,
+    _unique_data_item_hit_by_value,
     find_uia_data_item_by_name,
     find_uia_elements_by_name,
     is_oversized_uia_rect,
@@ -132,6 +133,52 @@ def test_find_uia_data_item_by_name_rejects_empty_inputs() -> None:
     assert find_uia_data_item_by_name(0, "N15") is None
     assert find_uia_data_item_by_name(123, "") is None
     assert find_uia_data_item_by_name(123, "   ") is None
+    assert find_uia_data_item_by_name(0, "電腦名稱", value="Red-Hat10") is None
+
+
+def test_unique_data_item_hit_by_value_picks_single_match() -> None:
+    hits = [
+        ((446, 110, 130, 22), "電腦名稱", "Lannie_CentOS8", "data_item"),
+        ((446, 155, 130, 22), "電腦名稱", "lannie-ubuntu-20", "data_item"),
+        ((446, 179, 130, 22), "電腦名稱", "Red-Hat10", "data_item"),
+    ]
+    picked = _unique_data_item_hit_by_value(hits, "Red-Hat10")
+    assert picked == ((446, 179, 130, 22), "電腦名稱", "Red-Hat10")
+
+
+def test_unique_data_item_hit_by_value_rejects_zero_or_many() -> None:
+    hits = [
+        ((446, 110, 130, 22), "電腦名稱", "Lannie_CentOS8", "data_item"),
+        ((446, 179, 130, 22), "電腦名稱", "Red-Hat10", "data_item"),
+        ((500, 200, 130, 22), "電腦名稱", "Red-Hat10", "data_item"),
+    ]
+    assert _unique_data_item_hit_by_value(hits, "missing") is None
+    assert _unique_data_item_hit_by_value(hits, "Red-Hat10") is None
+    assert _unique_data_item_hit_by_value(hits, "") is None
+    assert _unique_data_item_hit_by_value([], "Red-Hat10") is None
+
+
+def test_find_uia_data_item_by_name_value_uses_findall_filter(
+    monkeypatch,
+) -> None:
+    """Non-empty value → FindAll Name hits, then unique Value post-filter."""
+    import src.recorder.uia_input_boxes as uia_mod
+
+    monkeypatch.setattr(uia_mod, "os", type("O", (), {"name": "nt"})())
+
+    def fake_findall(hwnd, name, *, control_type_id=None, timeout_s=2.5):
+        assert hwnd == 42
+        assert name == "電腦名稱"
+        assert control_type_id == uia_mod._UIA_DATAITEM_CONTROL_TYPE_ID
+        return [
+            ((446, 110, 130, 22), "電腦名稱", "Lannie_CentOS8", "data_item"),
+            ((446, 179, 130, 22), "電腦名稱", "Red-Hat10", "data_item"),
+        ]
+
+    monkeypatch.setattr(uia_mod, "find_uia_elements_by_name", fake_findall)
+    hit = find_uia_data_item_by_name(42, "電腦名稱", value="Red-Hat10")
+    assert hit == ((446, 179, 130, 22), "電腦名稱", "Red-Hat10")
+    assert find_uia_data_item_by_name(42, "電腦名稱", value="missing") is None
 
 
 def test_find_uia_elements_by_name_rejects_empty_inputs() -> None:

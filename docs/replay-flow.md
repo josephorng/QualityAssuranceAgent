@@ -106,7 +106,7 @@ flowchart TD
 ```mermaid
 flowchart TD
   Start[detections + policy] --> Empty{no detections?}
-  Empty -->|yes + data_item| DI1[Name FindFirst → uia_data_item_name_hit]
+  Empty -->|yes + data_item| DI1[Name FindFirst or Name FindAll+Value → uia_data_item_name_hit]
   Empty -->|yes else| ND[no_detections]
   Empty -->|has dets| CE{_should_run_constellation_efp?}
 
@@ -309,6 +309,13 @@ sequenceDiagram
 ```
 
 Name FindAll recovery of the same unique hub still returns `hit` and still runs this subtarget path. Excel `uia_data_item_name_hit` does **not** — it commits the Name leaf and skips the twin.
+
+### `uia_data_item_name_hit` Name vs Value
+
+DataItems are omitted from the budgeted FindAll snapshot walk, so UIA-first uses a targeted lookup:
+
+- **Empty recorded Value** (Excel-style unique Names such as `N15`): Name FindFirst → commit.
+- **Non-empty recorded Value** (column-named grid cells such as Name=`電腦名稱`, Value=`Red-Hat10`): Name+DataItem FindAll, then **post-filter** live ValuePattern to the recorded Value. Commit only when exactly one Value match remains; otherwise treat as a miss and fall through. COM FindAll does not receive Value as a PropertyCondition.
 
 ### Soft EFP after empty UIA + icon twin
 

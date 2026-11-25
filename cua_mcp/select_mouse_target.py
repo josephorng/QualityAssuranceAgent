@@ -5601,8 +5601,9 @@ def _try_uia_first_unique_select(
     (``uia_efp`` recording can miss FindAll at press time; live walk may still
     expose the leaf). After constellation, Name matching uses UIA-family sources
     only so deferred YOLO/OCR boxes cannot fake a FindAll hit. Geometry
-    unavailable also continues into Name. For ``data_item``, Name FindFirst runs
-    after pool/synth EFP miss and before scan-EFP. When the budgeted snapshot
+    unavailable also continues into Name. For ``data_item``, Name lookup runs
+    after pool/synth EFP miss and before scan-EFP (FindFirst when Value empty;
+    FindAll+Value filter when Value recorded). When the budgeted snapshot
     Name shortlist is empty, a Name PropertyCondition FindAll (not FindFirst)
     recovers truncated tree/list hubs.
     """
@@ -5626,21 +5627,32 @@ def _try_uia_first_unique_select(
         target_name = _data_item_target_name()
         if not target_name:
             return None, None
+        target_value = str(recorded_efp_value or "").strip()
         try:
-            hit = data_item_lookup_fn(target_name)
+            hit = data_item_lookup_fn(target_name, target_value)
+        except TypeError:
+            # Older one-arg mocks / callers.
+            try:
+                hit = data_item_lookup_fn(target_name)
+            except Exception as exc:
+                _log_info(
+                    "move_mouse uia_first data_item_name_lookup error "
+                    f"name={target_name!r} value={target_value!r} err={exc!r}"
+                )
+                return None, None
         except Exception as exc:
             _log_info(
                 "move_mouse uia_first data_item_name_lookup error "
-                f"name={target_name!r} err={exc!r}"
+                f"name={target_name!r} value={target_value!r} err={exc!r}"
             )
             return None, None
         if hit is None:
             _log_info(
                 "move_mouse uia_first data_item_name_miss "
-                f"name={target_name!r}"
+                f"name={target_name!r} value={target_value!r}"
             )
             return None, None
-        bbox, live_name, _live_value = hit
+        bbox, live_name, live_value = hit
         if not (
             isinstance(bbox, (list, tuple))
             and len(bbox) == 4
@@ -5652,7 +5664,25 @@ def _try_uia_first_unique_select(
             return None, None
         if sw <= 0 or sh <= 0:
             return None, None
-        label = str(live_name or "").strip() or target_name
+        live_name_s = str(live_name or "").strip()
+        live_value_s = str(live_value or "").strip()
+        if not _efp_name_value_matches(
+            live_name_s,
+            live_value_s,
+            target_name,
+            target_value,
+        ):
+            _log_info(
+                "move_mouse uia_first data_item_name_value_mismatch "
+                f"name={target_name!r} value={target_value!r} "
+                f"live_name={live_name_s!r} live_value={live_value_s!r}"
+            )
+            return None, None
+        label = (
+            uia_label_combine_name_value(live_name_s, live_value_s)
+            or live_name_s
+            or target_name
+        )
         det = _detection_from_bbox(
             (sx, sy, sw, sh),
             YOLO_CLASS_TEXT,
@@ -5662,7 +5692,8 @@ def _try_uia_first_unique_select(
         )
         _log_info(
             "move_mouse uia_first uia_data_item_name_hit "
-            f"center=[{det.cx},{det.cy}] name={label!r}"
+            f"center=[{det.cx},{det.cy}] name={live_name_s!r} "
+            f"value={live_value_s!r}"
         )
         return det, "uia_data_item_name_hit"
 
@@ -7415,6 +7446,7 @@ async def _find_mouse_point_attempt(
 
         def _data_item_lookup_by_name(
             name: str,
+            value: str = "",
         ) -> tuple[tuple[int, int, int, int], str, str] | None:
             from src.recorder.uia_input_boxes import find_uia_data_item_by_name
             from src.recorder.window_snapshot import find_matching_click_window
@@ -7422,7 +7454,11 @@ async def _find_mouse_point_attempt(
             live = find_matching_click_window(click_window)
             if live is None or not int(live.hwnd or 0):
                 return None
-            return find_uia_data_item_by_name(int(live.hwnd), str(name))
+            return find_uia_data_item_by_name(
+                int(live.hwnd),
+                str(name),
+                value=str(value or ""),
+            )
 
         def _name_findall_by_name(
             name: str,

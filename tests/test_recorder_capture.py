@@ -1651,6 +1651,13 @@ def test_chinese_ime_enter_click_cancels_delay_and_seals_click_before(
 
     session = RecordingSession(runs_root=tmp_path)
 
+    def _signals(*_args, kind=None, **_kwargs) -> dict:
+        # Type-burst begin refreshes focused live; keep the edit-bar sample so
+        # this test still checks click-seal vs late Save-As after-read.
+        if kind == "text_input":
+            return dict(click_before)
+        return dict(late_save_as)
+
     with _default_capture_window_patches(), patch(
         "src.recorder.capture.pyautogui.position",
         return_value=type("P", (), {"x": 100, "y": 100})(),
@@ -1662,7 +1669,7 @@ def test_chinese_ime_enter_click_cancels_delay_and_seals_click_before(
         return_value=zh,
     ), patch(
         "src.recorder.capture.capture_step_signals",
-        return_value=late_save_as,
+        side_effect=_signals,
     ):
         run_dir = session.start()
         try:
@@ -2106,6 +2113,86 @@ def test_text_input_stores_before_on_first_key_and_after_on_flush(tmp_path) -> N
     assert (run_dir / "screenshots" / "event_001_end.jpeg").is_file()
 
 
+def test_click_then_type_refreshes_stale_ready_focused(tmp_path) -> None:
+    """Live type-start UIA replaces settle-cache focused after a focus click.
+
+    Slow settle UIA can still name the previous field when typing begins; ready
+    must use the live focused control so replay does not demand the old field.
+    """
+    session = RecordingSession(runs_root=tmp_path)
+    account = {
+        "foreground": {
+            "class_name": "WindowsForms10.Window.8.app.0.141b42a_r8_ad1",
+            "title": "登入系統",
+            "process_name": "WM7Ldr.exe",
+        },
+        "focused": {"name": "帳號|Textbox|txt_ID", "value": "joseph"},
+        "caret": {
+            "hwnd": 100,
+            "rect": [0, 0, 1, 10],
+            "class_name": "WindowsForms10.EDIT.app.0.141b42a_r8_ad1",
+            "process_name": "WM7Ldr.exe",
+        },
+    }
+    password_live = {
+        "focused": {"name": "密碼|Textbox|txt_Password", "value": ""},
+        "caret": {
+            "hwnd": 200,
+            "rect": [0, 40, 1, 50],
+            "class_name": "WindowsForms10.EDIT.app.0.141b42a_r8_ad1",
+            "process_name": "WM7Ldr.exe",
+        },
+    }
+
+    def _live_type_signals(*_args, **_kwargs) -> dict:
+        return dict(password_live)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture.capture_step_signals",
+        side_effect=_live_type_signals,
+    ), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 900, "y": 444})(),
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import KeyCode
+
+            assert session._settle_windows_ready.wait(2.0)
+            with session._lock:
+                session._last_settle_signals = dict(account)
+                session._last_settle_windows = ()
+
+            _left_click(session, 900, 444)
+            # Stale settle still names 帳號 after the password-field click.
+            with session._lock:
+                session._last_settle_signals = dict(account)
+            session._on_key_press(KeyCode.from_char("x"))
+            session.wait_for_deferred_work()
+            session._join_window_step_threads()
+        finally:
+            session.stop()
+
+    click_raw, click_debug = _hydrated_event_debug(run_dir, 1)
+    text_raw, text_debug = _hydrated_event_debug(run_dir, 2)
+    assert click_raw["kind"] == "click"
+    assert text_raw["kind"] == "text_input"
+    assert text_raw["text"] == "x"
+    assert text_debug["signals_before"]["focused"]["name"] == (
+        "密碼|Textbox|txt_Password"
+    )
+    assert click_debug["signals_after"]["focused"]["name"] == (
+        "密碼|Textbox|txt_Password"
+    )
+    text_verify = window_verify_from_debug(text_debug, typed_text="x")
+    ready = text_verify.get("ready")
+    assert isinstance(ready, dict)
+    assert ready.get("focused") == {"name": "密碼|Textbox|txt_Password"}
+
+
 def _login_and_logo_windows() -> tuple[WindowInfo, WindowInfo]:
     login = WindowInfo(
         hwnd=2098012,
@@ -2150,7 +2237,13 @@ def test_text_flushed_by_click_does_not_inherit_click_windows(tmp_path) -> None:
     def _snapshot() -> list[WindowInfo]:
         return [logo] if live_is_logo["value"] else [login]
 
-    def _signals(*_args, **_kwargs) -> dict:
+    def _signals(*_args, kind=None, **_kwargs) -> dict:
+        # Type-burst begin refreshes focused/caret live; keep password focus so
+        # this test still isolates window inheritance (not ready.focused).
+        if kind == "text_input":
+            return {
+                "focused": {"name": "密碼|Textbox|txt_Password", "value": ""},
+            }
         return {
             "foreground": {
                 "class_name": logo.class_name,

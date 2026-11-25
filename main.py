@@ -43,14 +43,65 @@ def _fault_log_path() -> Path:
     return _application_dir_for_crash_log() / FAULT_LOG_FILENAME
 
 
+_FAULT_HEARTBEAT_INTERVAL_S = 10.0
+_fault_log_path_active: Path | None = None
+_fault_heartbeat_stop = threading.Event()
+
+
+def _write_fault_marker(path: Path, kind: str, **fields: Any) -> None:
+    """Append a human-readable marker. Safe under concurrent faulthandler dumps."""
+    parts = [
+        f"timestamp_utc={datetime.now(timezone.utc).isoformat()}",
+        f"kind={kind}",
+        f"pid={os.getpid()}",
+    ]
+    for key, value in fields.items():
+        parts.append(f"{key}={value!r}")
+    line = "--- " + " ".join(parts) + " ---\n"
+    try:
+        with open(path, "a", encoding="utf-8", errors="replace") as handle:
+            handle.write(line)
+            handle.flush()
+    except OSError:
+        pass
+
+
+def _fault_heartbeat_loop(path: Path) -> None:
+    """Periodic timestamps so SEH dumps (no built-in time) can be bracketed."""
+    while not _fault_heartbeat_stop.wait(_FAULT_HEARTBEAT_INTERVAL_S):
+        _write_fault_marker(path, "heartbeat")
+
+
 def _install_faulthandler() -> None:
-    """Dump native / fatal-error traces (segfaults bypass sys.excepthook)."""
+    """Dump native / fatal-error traces (segfaults bypass sys.excepthook).
+
+    Windows SEH dumps from faulthandler have no timestamps of their own, so we
+    write a session banner at enable time and a heartbeat every
+    ``_FAULT_HEARTBEAT_INTERVAL_S`` seconds. Correlate a dump with the nearest
+    preceding/following ``kind=heartbeat`` / ``kind=session_start`` marker.
+    """
+    global _fault_log_path_active
     candidates = [_fault_log_path(), Path(tempfile.gettempdir()) / FAULT_LOG_FILENAME]
     for path in candidates:
         try:
             # Keep the handle open for the process lifetime; faulthandler needs it.
             fault_file = open(path, "a", encoding="utf-8", errors="replace")
             faulthandler.enable(file=fault_file, all_threads=True)
+            _fault_log_path_active = path
+            _write_fault_marker(
+                path,
+                "session_start",
+                executable=sys.executable,
+                cwd=os.getcwd(),
+                frozen=getattr(sys, "frozen", False),
+            )
+            _fault_heartbeat_stop.clear()
+            threading.Thread(
+                target=_fault_heartbeat_loop,
+                args=(path,),
+                name="cua-fault-heartbeat",
+                daemon=True,
+            ).start()
             return
         except OSError:
             continue

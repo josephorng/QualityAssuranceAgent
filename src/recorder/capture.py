@@ -1215,6 +1215,7 @@ class RecordingSession:
         self._uia_status_efp_name: str = ""
         self._uia_status_efp_value: str = ""
         self._uia_status_efp_control_type: str = ""
+        self._uia_status_efp_scroll: str = ""
         self._uia_status_efp_pending: bool = False
         # Active background UIA work for the LED strip (EFP / FindAll:* kinds).
         # Insertion-ordered; keys are short labels shown on the overlay.
@@ -1397,6 +1398,7 @@ class RecordingSession:
             self._uia_status_efp_name = ""
             self._uia_status_efp_value = ""
             self._uia_status_efp_control_type = ""
+            self._uia_status_efp_scroll = ""
             self._uia_status_efp_pending = False
             self._uia_bg_active = {}
             self._hover_uia_led_active = False
@@ -1989,6 +1991,7 @@ class RecordingSession:
         efp_name: str | None | object = _EFP_UNSET,
         efp_value: str | None | object = _EFP_UNSET,
         efp_control_type: str | None | object = _EFP_UNSET,
+        efp_scroll: str | None | object = _EFP_UNSET,
         efp_pending: bool | None = None,
         bg_add: str | None = None,
         bg_remove: str | None = None,
@@ -1998,6 +2001,8 @@ class RecordingSession:
 
         ``bg_add`` / ``bg_remove`` / ``bg_clear`` maintain the overlay's
         background-work strip (``EFP``, ``FindAll:settle``, ``FindAll:hover``, …).
+        ``efp_scroll`` is a compact ScrollPattern/RangeValue percent label
+        (``V37%``) shown only for scrollbar-like leaves.
         """
         with self._lock:
             bg_changed = False
@@ -2046,6 +2051,11 @@ class RecordingSession:
                     "" if efp_control_type is None else efp_control_type
                 ).strip()
                 status_changed = True
+            if efp_scroll is not _EFP_UNSET:
+                self._uia_status_efp_scroll = self._truncate_uia_status_label(
+                    "" if efp_scroll is None else str(efp_scroll)
+                )
+                status_changed = True
             if efp_pending is not None:
                 self._uia_status_efp_pending = bool(efp_pending)
                 status_changed = True
@@ -2061,6 +2071,7 @@ class RecordingSession:
                 "efp_name": self._uia_status_efp_name,
                 "efp_value": self._uia_status_efp_value,
                 "efp_control_type": self._uia_status_efp_control_type,
+                "efp_scroll": self._uia_status_efp_scroll,
                 "efp_pending": self._uia_status_efp_pending,
                 "bg": list(self._uia_bg_active.keys()),
             }
@@ -2157,6 +2168,7 @@ class RecordingSession:
             efp_name="",
             efp_value="",
             efp_control_type="",
+            efp_scroll="",
             efp_pending=True,
             bg_add="EFP",
         )
@@ -2411,6 +2423,7 @@ class RecordingSession:
                 efp_name="",
                 efp_value="",
                 efp_control_type="",
+                efp_scroll="",
                 efp_pending=False,
                 bg_remove="EFP",
             )
@@ -2425,7 +2438,10 @@ class RecordingSession:
         if stale_before_probe:
             self._emit_uia_status(bg_remove="EFP")
             return
-        from src.recorder.uia_input_boxes import element_from_point_name_value
+        from src.recorder.uia_input_boxes import (
+            efp_payload_looks_like_scrollbar,
+            element_from_point_name_value,
+        )
 
         payload = element_from_point_name_value(int(cursor[0]), int(cursor[1]))
         with self._lock:
@@ -2447,6 +2463,38 @@ class RecordingSession:
             control_type = str(payload.get("control_type") or "").strip()
             if name or value:
                 stored = dict(payload)
+        scroll_label = ""
+        scroll_gate = stored if isinstance(stored, dict) else {
+            "name": name,
+            "value": value,
+            "control_type": control_type,
+        }
+        if efp_payload_looks_like_scrollbar(scroll_gate):
+            from src.recorder.verify_signals import (
+                format_scroll_percent_label,
+                read_uia_fields,
+            )
+
+            try:
+                fields = read_uia_fields(
+                    cursor_xy=(int(cursor[0]), int(cursor[1])),
+                    want_control=False,
+                    want_focused=False,
+                    want_scroll=True,
+                )
+            except Exception:
+                fields = {}
+            with self._lock:
+                stale_after_scroll = generation != int(self._idle_efp_generation)
+            if stale_after_scroll:
+                self._emit_uia_status(bg_remove="EFP")
+                return
+            if isinstance(fields, dict):
+                scroll_label = format_scroll_percent_label(fields.get("scroll"))
+                if scroll_label and isinstance(stored, dict):
+                    stored = dict(stored)
+                    stored["scroll"] = fields.get("scroll")
+                    stored["scroll_label"] = scroll_label
         with self._lock:
             self._idle_efp_cursor_xy = (int(cursor[0]), int(cursor[1]))
             self._idle_efp_probed_name = name
@@ -2464,6 +2512,7 @@ class RecordingSession:
             efp_name=name,
             efp_value=value,
             efp_control_type=control_type,
+            efp_scroll=scroll_label,
             efp_pending=False,
             bg_remove="EFP",
         )
@@ -2531,6 +2580,7 @@ class RecordingSession:
             efp_name="",
             efp_value="",
             efp_control_type="",
+            efp_scroll="",
             efp_pending=True,
             bg_add=str(bg or "FindAll:settle"),
         )
@@ -3899,6 +3949,7 @@ class RecordingSession:
             efp_name="",
             efp_value="",
             efp_control_type="",
+            efp_scroll="",
             efp_pending=False,
         )
         return generation

@@ -238,6 +238,23 @@ def is_winforms_scrollbar_thumb_efp_name(name: str | None) -> bool:
     """True when an EFP leaf Name should seed a scrollbar peer (``Position``)."""
     return str(name or "").strip().casefold() in _SCROLLBAR_THUMB_NAMES
 
+
+def efp_payload_looks_like_scrollbar(payload: dict[str, Any] | None) -> bool:
+    """True when idle EFP should also probe ScrollPattern / RangeValue percent.
+
+    Gated so ordinary buttons/cells do not pay a second COM parent walk. Covers
+    WinForms ``Position`` thumbs and Up/Down/Page line-button Names.
+    """
+    if not isinstance(payload, dict):
+        return False
+    name = str(payload.get("name") or "").strip()
+    if is_winforms_scrollbar_thumb_efp_name(name):
+        return True
+    if is_uia_scrollbar_line_button_part(automation_id=None, name=name):
+        return True
+    control_type = str(payload.get("control_type") or "").strip().casefold()
+    return control_type in {"scrollbar", "thumb", "scroll_bar"}
+
 # DataItem (Excel cells, dense grids) is intentionally omitted: FindAll under
 # XLMAIN would return every visible cell and block settle/hover for tens of
 # seconds. Recording/replay name cells from ElementFromPoint instead
@@ -467,6 +484,8 @@ def control_type_token_from_id(control_type_id: int | None) -> str:
         _UIA_DOCUMENT_CONTROL_TYPE_ID: "input",
         _UIA_COMBOBOX_CONTROL_TYPE_ID: "input",
         _UIA_PANE_CONTROL_TYPE_ID: "input",
+        _UIA_THUMB_CONTROL_TYPE_ID: "thumb",
+        _UIA_SCROLLBAR_CONTROL_TYPE_ID: "scrollbar",
     }.get(int(control_type_id), "")
 
 

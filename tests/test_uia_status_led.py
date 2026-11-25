@@ -967,18 +967,49 @@ def test_recording_uia_status_overlay_apply_status() -> None:
         assert str(overlay._bg_label.cget("text")) == "FindAll:hover · EFP"
         overlay.apply_status(
             {
-                "state": "green",
+                "state": "red",
                 "bg": [],
-                "efp_name": "關閉",
+                "efp_name": "Position",
                 "efp_value": "",
-                "efp_control_type": "button",
+                "efp_control_type": "data_item",
+                "efp_scroll": "V37%",
                 "efp_pending": False,
             }
         )
         assert str(overlay._bg_label.cget("text")) == ""
+        assert str(overlay._label.cget("text")) == "data_item · Position · V37%"
         overlay.destroy()
     finally:
         root.destroy()
+
+
+def test_format_scroll_percent_label() -> None:
+    from src.recorder.verify_signals import format_scroll_percent_label
+
+    assert format_scroll_percent_label(37.2) == "37%"
+    assert format_scroll_percent_label({"vertical": 37.2, "horizontal": 12.6}) == (
+        "V37% H13%"
+    )
+    assert format_scroll_percent_label({"horizontal": 0}) == "H0%"
+    assert format_scroll_percent_label(None) == ""
+    assert format_scroll_percent_label({}) == ""
+
+
+def test_efp_payload_looks_like_scrollbar() -> None:
+    from src.recorder.uia_input_boxes import efp_payload_looks_like_scrollbar
+
+    assert efp_payload_looks_like_scrollbar(
+        {"name": "Position", "control_type": "data_item"}
+    )
+    assert efp_payload_looks_like_scrollbar({"name": "Line down"})
+    assert efp_payload_looks_like_scrollbar({"control_type": "thumb"})
+    assert efp_payload_looks_like_scrollbar({"control_type": "scrollbar"})
+    assert not efp_payload_looks_like_scrollbar(
+        {"name": "關閉", "control_type": "button"}
+    )
+    assert not efp_payload_looks_like_scrollbar(
+        {"name": "G8", "control_type": "data_item"}
+    )
 
 
 def test_emit_uia_status_tracks_bg_activities() -> None:

@@ -50,7 +50,7 @@ _UIA_LED_PULSE_COLORS = {
 }
 _UIA_LED_SIZE = 14
 _UIA_STATUS_PULSE_MS = 350
-_UIA_EFP_LABEL_WIDTH = 42
+_UIA_EFP_LABEL_WIDTH = 52
 _UIA_BG_LABEL_WIDTH = 36
 _UIA_BG_LABEL_COLOR = "#f39c12"
 
@@ -906,6 +906,7 @@ class RecordingUiaStatusOverlay:
         value: str | None,
         *,
         control_type: str | None = None,
+        scroll: str | None = None,
         pending: bool = False,
     ) -> None:
         if self._destroyed or self._label is None:
@@ -913,7 +914,8 @@ class RecordingUiaStatusOverlay:
         name_s = str(name or "").strip()
         value_s = str(value or "").strip()
         type_s = str(control_type or "").strip()
-        if pending and not name_s and not value_s:
+        scroll_s = str(scroll or "").strip()
+        if pending and not name_s and not value_s and not scroll_s:
             text = "…"
         elif name_s and value_s:
             text = f"{name_s} | {value_s}"
@@ -923,10 +925,14 @@ class RecordingUiaStatusOverlay:
             text = value_s
         elif type_s:
             text = type_s
+        elif scroll_s:
+            text = scroll_s
         else:
             text = "—"
         if type_s and text not in ("…", type_s):
             text = f"{type_s} · {text}"
+        if scroll_s and text not in ("…", scroll_s) and scroll_s not in text:
+            text = f"{text} · {scroll_s}"
         if len(text) > _UIA_EFP_LABEL_WIDTH:
             text = text[: _UIA_EFP_LABEL_WIDTH - 1] + "…"
         try:
@@ -985,6 +991,7 @@ class RecordingUiaStatusOverlay:
             str(payload.get("efp_name") or ""),
             str(payload.get("efp_value") or ""),
             control_type=str(payload.get("efp_control_type") or ""),
+            scroll=str(payload.get("efp_scroll") or ""),
             pending=bool(payload.get("efp_pending")),
         )
 

@@ -718,6 +718,20 @@ def _has_scroll_assertion(value: Any) -> bool:
     )
 
 
+def format_scroll_percent_label(scroll: Any) -> str:
+    """Compact LED label for ScrollPattern / RangeValue percents (``V37% H12%``)."""
+    if _is_scroll_percent_number(scroll):
+        return f"{round(float(scroll)):.0f}%"
+    if not isinstance(scroll, dict) or not scroll:
+        return ""
+    parts: list[str] = []
+    for axis, prefix in (("vertical", "V"), ("horizontal", "H")):
+        raw = scroll.get(axis)
+        if _is_scroll_percent_number(raw):
+            parts.append(f"{prefix}{round(float(raw)):.0f}%")
+    return " ".join(parts)
+
+
 def recorded_scroll_axis_targets(value: Any) -> dict[str, float]:
     """Normalize a recorded ``scroll`` assertion to ``vertical`` / ``horizontal`` targets.
 

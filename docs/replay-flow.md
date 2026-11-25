@@ -183,16 +183,27 @@ flowchart TD
   B --> C[preferred_cls from wrapper]
   C --> D{recorded EFP present?}
   D -->|yes| E[Probe in-hub YOLO boxes vs Name/Value]
-  E -->|hit| F[uia_yolo_subtarget_efp / _efp_synth]
+  E -->|hit non-offset| F[Keep efp_fallback + padded leaf gate]
+  F --> I
+  E -->|hit offset| Os[uia_yolo_subtarget_efp / _efp_synth commit]
   E -->|miss + verified hub| G[Keep UIA center]
   E -->|miss + unverified| H[Clear UIA → adopt twin → full YOLO]
-  D -->|no| I{exactly one in-hub box of preferred_cls?}
+  D -->|no| I{exactly one preferred_cls box in hub/gate?}
   I -->|yes| J[unique_box_skip_ocr<br/>NO OCR]
   I -->|no 2+ boxes| K[Finish deferred OCR]
-  K --> L[_yolo_subtargets_inside_uia match anchor]
-  L -->|n==1| M[uia_yolo_subtarget hit]
+  K --> L[Match twin anchor inside hub/gate]
+  L -->|n==1| M[uia_yolo_subtarget or _efp_ocr]
+  L -->|else + efp_fallback| N[uia_yolo_subtarget_efp]
   L -->|else| G
 ```
+
+Non-offset recorded-EFP **hit** is a **row gate**, not the click chooser:
+
+- Build a padded leaf rect (12px; fall back to padded UIA-first bbox).
+- Still run unique-box / OCR for the twin anchor **inside that gate**.
+- Unique OCR/icon match → `uia_yolo_subtarget_efp_ocr`.
+- Not unique → fall back to the Name/Value pool det (`uia_yolo_subtarget_efp`) so Explorer-style pane disambiguation still works.
+- Offset / synth empty-space clicks still commit EFP immediately.
 
 ### Preferred class (`_uia_yolo_subtarget_preferred_class`)
 
@@ -202,7 +213,7 @@ flowchart TD
 | `…圖示` / `元素` | ELEMENT |
 | ambiguous (e.g. bare 輸入欄) | `None` → cannot unique-skip |
 
-One in-hub box of that class → skip OCR. Multiple → OCR, then match the fallback anchor (icon id / text similarity) among those boxes.
+One in-hub (or in-gate) box of that class → skip OCR. Multiple → OCR, then match the fallback anchor (icon id / text similarity) among those boxes.
 
 ---
 

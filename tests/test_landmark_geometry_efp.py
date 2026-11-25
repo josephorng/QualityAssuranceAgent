@@ -11,6 +11,7 @@ from cua_mcp.select_mouse_target import (
     _DATA_ITEM_EFP_STEP_X,
     _DATA_ITEM_EFP_STEP_Y,
     _chebyshev_ring_offsets,
+    _choose_uia_yolo_subtarget_in_hub,
     _commit_geometry_efp_hit,
     _distance_synth_to_det_bbox,
     _efp_gate_required_for_hub,
@@ -22,6 +23,7 @@ from cua_mcp.select_mouse_target import (
     _leaf_bbox_contains_point,
     _mouse_select_fields_from_ocr_fallback_instruction,
     _order_geometry_efp_candidates,
+    _pad_bbox_xywh,
     _phrase_match_pool,
     _prefer_pool_over_efp_leaf,
     _preferred_yolo_class_for_near_synth,
@@ -29,6 +31,7 @@ from cua_mcp.select_mouse_target import (
     _recorded_efp_present,
     _scan_efp_neighbors_for_name,
     _should_run_constellation_efp,
+    _subtarget_hub_for_efp_gate,
     _try_uia_first_unique_select,
     _verify_geometry_candidates_with_efp,
 )
@@ -1864,3 +1867,179 @@ def test_keep_uia_first_on_subtarget_efp_soft_miss_reasons() -> None:
     assert _keep_uia_first_on_subtarget_efp_soft_miss("hit") is False
     assert _keep_uia_first_on_subtarget_efp_soft_miss("uia_first_unique") is False
     assert _keep_uia_first_on_subtarget_efp_soft_miss("") is False
+
+
+def test_pad_bbox_and_efp_gate_hub() -> None:
+    leaf = (228, 108, 125, 24)
+    assert _pad_bbox_xywh(leaf, 12) == (216, 96, 149, 48)
+    uia_hub = UiDetection(
+        bbox=(228, 108, 125, 24),
+        cx=290,
+        cy=120,
+        class_id=YOLO_CLASS_TEXT,
+        class_name="text",
+        text="龜速的網域 (3)|1",
+        source="uia",
+    )
+    gate = _subtarget_hub_for_efp_gate(leaf_bbox=leaf, uia_hub=uia_hub, pad=12)
+    assert gate.bbox == (216, 96, 149, 48)
+    gate_fallback = _subtarget_hub_for_efp_gate(
+        leaf_bbox=None, uia_hub=uia_hub, pad=12
+    )
+    assert gate_fallback.bbox == (216, 96, 149, 48)
+
+
+def test_efp_gate_ocr_picks_expand_node_not_nearer_folder() -> None:
+    """EFP Name/Value hits both row icons; OCR twin picks 展開節點."""
+    leaf = (228, 108, 125, 24)
+    uia_hub = UiDetection(
+        bbox=leaf,
+        cx=290,
+        cy=120,
+        class_id=YOLO_CLASS_TEXT,
+        class_name="text",
+        text="龜速的網域 (3)|1",
+        source="uia",
+    )
+    gate = _subtarget_hub_for_efp_gate(leaf_bbox=leaf, uia_hub=uia_hub, pad=12)
+    folder = UiDetection(
+        bbox=(247, 111, 20, 19),
+        cx=257,
+        cy=120,
+        class_id=YOLO_CLASS_ELEMENT,
+        class_name="element",
+        icons=[{"chinese_id": "資料夾"}],
+        source="yolo",
+    )
+    expand = UiDetection(
+        bbox=(233, 114, 10, 11),
+        cx=238,
+        cy=119,
+        class_id=YOLO_CLASS_ELEMENT,
+        class_name="element",
+        icons=[{"chinese_id": "展開節點"}],
+        source="yolo",
+    )
+    # Nearer folder would win pure EFP distance; OCR must override.
+    chosen, method = _choose_uia_yolo_subtarget_in_hub(
+        hub=gate,
+        labeled_detections=[folder, expand],
+        anchor="「展開節點」圖示",
+        preferred_cls=YOLO_CLASS_ELEMENT,
+        efp_fallback=folder,
+    )
+    assert method == "uia_yolo_subtarget_efp_ocr"
+    assert chosen is expand
+    assert chosen is not folder
+
+
+def test_efp_gate_ocr_miss_falls_back_to_efp_pool() -> None:
+    leaf = (228, 108, 125, 24)
+    uia_hub = UiDetection(
+        bbox=leaf,
+        cx=290,
+        cy=120,
+        class_id=YOLO_CLASS_TEXT,
+        class_name="text",
+        source="uia",
+    )
+    gate = _subtarget_hub_for_efp_gate(leaf_bbox=leaf, uia_hub=uia_hub, pad=12)
+    folder = UiDetection(
+        bbox=(247, 111, 20, 19),
+        cx=257,
+        cy=120,
+        class_id=YOLO_CLASS_ELEMENT,
+        class_name="element",
+        icons=[{"chinese_id": "資料夾"}],
+        source="yolo",
+    )
+    other = UiDetection(
+        bbox=(233, 114, 10, 11),
+        cx=238,
+        cy=119,
+        class_id=YOLO_CLASS_ELEMENT,
+        class_name="element",
+        icons=[{"chinese_id": "關閉"}],
+        source="yolo",
+    )
+    chosen, method = _choose_uia_yolo_subtarget_in_hub(
+        hub=gate,
+        labeled_detections=[folder, other],
+        anchor="「展開節點」圖示",
+        preferred_cls=YOLO_CLASS_ELEMENT,
+        efp_fallback=folder,
+    )
+    assert method == "uia_yolo_subtarget_efp"
+    assert chosen is folder
+
+
+def test_efp_gate_ocr_ignores_match_outside_padded_leaf() -> None:
+    leaf = (228, 108, 125, 24)
+    uia_hub = UiDetection(
+        bbox=leaf,
+        cx=290,
+        cy=120,
+        class_id=YOLO_CLASS_TEXT,
+        class_name="text",
+        source="uia",
+    )
+    gate = _subtarget_hub_for_efp_gate(leaf_bbox=leaf, uia_hub=uia_hub, pad=12)
+    outside = UiDetection(
+        bbox=(50, 50, 10, 10),
+        cx=55,
+        cy=55,
+        class_id=YOLO_CLASS_ELEMENT,
+        class_name="element",
+        icons=[{"chinese_id": "展開節點"}],
+        source="yolo",
+    )
+    folder = UiDetection(
+        bbox=(247, 111, 20, 19),
+        cx=257,
+        cy=120,
+        class_id=YOLO_CLASS_ELEMENT,
+        class_name="element",
+        icons=[{"chinese_id": "資料夾"}],
+        source="yolo",
+    )
+    assert _leaf_bbox_contains_point(gate.bbox, 55, 55) is False
+    chosen, method = _choose_uia_yolo_subtarget_in_hub(
+        hub=gate,
+        labeled_detections=[outside, folder],
+        anchor="「展開節點」圖示",
+        preferred_cls=YOLO_CLASS_ELEMENT,
+        efp_fallback=folder,
+    )
+    assert method == "uia_yolo_subtarget_efp"
+    assert chosen is folder
+
+
+def test_efp_gate_unique_unlabeled_skips_ocr() -> None:
+    leaf = (228, 108, 125, 24)
+    uia_hub = UiDetection(
+        bbox=leaf,
+        cx=290,
+        cy=120,
+        class_id=YOLO_CLASS_TEXT,
+        class_name="text",
+        source="uia",
+    )
+    gate = _subtarget_hub_for_efp_gate(leaf_bbox=leaf, uia_hub=uia_hub, pad=12)
+    only = UiDetection(
+        bbox=(233, 114, 10, 11),
+        cx=238,
+        cy=119,
+        class_id=YOLO_CLASS_ELEMENT,
+        class_name="element",
+        source="yolo",
+    )
+    chosen, method = _choose_uia_yolo_subtarget_in_hub(
+        hub=gate,
+        labeled_detections=[],
+        anchor="「展開節點」圖示",
+        preferred_cls=YOLO_CLASS_ELEMENT,
+        efp_fallback=only,
+        unique_unlabeled=only,
+    )
+    assert method == "uia_yolo_subtarget"
+    assert chosen is only

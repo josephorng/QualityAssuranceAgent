@@ -4929,6 +4929,85 @@ def _leaf_bbox_contains_point(
     return lx <= int(x) <= lx + lw and ly <= int(y) <= ly + lh
 
 
+_EFP_SUBTARGET_GATE_PAD_PX = 12
+
+
+def _pad_bbox_xywh(
+    bbox: tuple[int, int, int, int],
+    pad: int = _EFP_SUBTARGET_GATE_PAD_PX,
+) -> tuple[int, int, int, int]:
+    """Expand ``(x, y, w, h)`` by ``pad`` on each side (clamped pad >= 0)."""
+    x, y, w, h = (int(v) for v in bbox)
+    p = max(0, int(pad))
+    return (x - p, y - p, w + 2 * p, h + 2 * p)
+
+
+def _subtarget_hub_for_efp_gate(
+    *,
+    leaf_bbox: tuple[int, int, int, int] | None,
+    uia_hub: UiDetection,
+    pad: int = _EFP_SUBTARGET_GATE_PAD_PX,
+) -> UiDetection:
+    """Synthetic hub bbox: padded live EFP leaf, else padded UIA-first hub."""
+    if leaf_bbox is not None:
+        lx, ly, lw, lh = (int(v) for v in leaf_bbox)
+        if lw > 0 and lh > 0:
+            return _detection_from_bbox(
+                _pad_bbox_xywh((lx, ly, lw, lh), pad),
+                YOLO_CLASS_TEXT,
+                source="uia",
+            )
+    hx, hy, hw, hh = (int(v) for v in uia_hub.bbox)
+    return _detection_from_bbox(
+        _pad_bbox_xywh((hx, hy, hw, hh), pad),
+        YOLO_CLASS_TEXT,
+        source="uia",
+    )
+
+
+def _choose_uia_yolo_subtarget_in_hub(
+    *,
+    hub: UiDetection,
+    labeled_detections: list[UiDetection],
+    anchor: str,
+    preferred_cls: int | None,
+    efp_fallback: UiDetection | None,
+    unique_unlabeled: UiDetection | None = None,
+    ocr_class_ids: frozenset[int] | set[int] | None = None,
+) -> tuple[UiDetection | None, str]:
+    """Pick twin subtarget inside ``hub``; fall back to EFP pool det when needed.
+
+    Returns ``(detection_or_None, selection_method)``. ``unique_unlabeled`` is the
+    sole preferred-class YOLO box inside the hub (OCR still deferred); when set,
+    OCR matching is skipped. When OCR/unique is not unique and ``efp_fallback``
+    is set, keep today's Name/Value pool pick.
+    """
+    if unique_unlabeled is not None:
+        return unique_unlabeled, "uia_yolo_subtarget"
+    if preferred_cls is not None:
+        subtarget_classes: frozenset[int] | set[int] | None = frozenset(
+            {preferred_cls}
+        )
+    else:
+        subtarget_classes = ocr_class_ids
+    subtargets = _yolo_subtargets_inside_uia(
+        hub,
+        labeled_detections,
+        anchor,
+        ocr_class_ids=subtarget_classes,
+    )
+    if len(subtargets) == 1:
+        method = (
+            "uia_yolo_subtarget_efp_ocr"
+            if efp_fallback is not None
+            else "uia_yolo_subtarget"
+        )
+        return subtargets[0], method
+    if efp_fallback is not None:
+        return efp_fallback, "uia_yolo_subtarget_efp"
+    return None, "uia_yolo_subtarget"
+
+
 def _prefer_pool_over_efp_leaf(
     pool_det: UiDetection | None,
     leaf_bbox: tuple[int, int, int, int] | None,
@@ -7525,9 +7604,13 @@ async def _find_mouse_point_attempt(
             preferred_cls = _uia_yolo_subtarget_preferred_class(fb_anchor)
             efp_subtarget_hit = False
             efp_subtarget_required_miss = False
+            efp_fallback_det: UiDetection | None = None
+            efp_gate_hub: UiDetection | None = None
             if _recorded_efp_present(recorded_efp_name, recorded_efp_value):
                 # Prefer live EFP Name/Value over OCR twin text for in-pane
                 # disambiguation (e.g. 下載 vs 圖片 inside one Explorer pane).
+                # Non-offset: EFP only gates the row; OCR/unique still picks the
+                # twin glyph inside a padded leaf rect.
                 efp_class_ids: frozenset[int] | set[int]
                 if preferred_cls is not None:
                     efp_class_ids = frozenset({preferred_cls})
@@ -7624,15 +7707,22 @@ async def _find_mouse_point_attempt(
                         )
                     )
                     if efp_reason != "miss" and efp_det is not None:
-                        uia_yolo_subtarget_chosen = efp_det
-                        uia_yolo_subtarget_method = "uia_yolo_subtarget_efp"
-                        detections = _sort_detections_reading_order(
-                            [*uia_dets, *yolo_detections, efp_det]
+                        # Gate only — do not commit pool det; OCR/unique picks
+                        # the twin inside the padded leaf.
+                        efp_fallback_det = efp_det
+                        _leaf_name, _leaf_value, leaf_bbox = _probe_efp_leaf_at(
+                            int(efp_det.cx), int(efp_det.cy)
                         )
-                        efp_subtarget_hit = True
+                        efp_gate_hub = _subtarget_hub_for_efp_gate(
+                            leaf_bbox=leaf_bbox,
+                            uia_hub=uia_first_chosen,
+                        )
                         _log_info(
-                            "move_mouse uia_yolo_subtarget_efp "
-                            f"center=[{efp_det.cx},{efp_det.cy}] "
+                            "move_mouse uia_yolo_subtarget_efp gate "
+                            f"fallback_center=[{efp_det.cx},{efp_det.cy}] "
+                            f"gate={list(efp_gate_hub.bbox)!r} "
+                            f"leaf_bbox="
+                            f"{list(leaf_bbox) if leaf_bbox else None!r} "
                             f"pool={len(efp_pool)} "
                             f"recorded_name={recorded_efp_name!r} "
                             f"recorded_value={recorded_efp_value!r}"
@@ -7704,16 +7794,30 @@ async def _find_mouse_point_attempt(
                     nearby_labels = list(fb_fields["nearby_labels"])
                     nearby_phrases = list(fb_fields["nearby_phrases"])
             else:
+                sub_hub = (
+                    efp_gate_hub
+                    if efp_gate_hub is not None
+                    else uia_first_chosen
+                )
                 unique_box: UiDetection | None = None
                 if preferred_cls is not None:
                     unique_box = _unique_yolo_box_inside_uia(
-                        uia_first_chosen,
+                        sub_hub,
                         deferred_pendings,
                         vision_timing,
                         preferred_cls,
                     )
                 if unique_box is not None:
-                    uia_yolo_subtarget_chosen = unique_box
+                    chosen, method = _choose_uia_yolo_subtarget_in_hub(
+                        hub=sub_hub,
+                        labeled_detections=[],
+                        anchor=fb_anchor,
+                        preferred_cls=preferred_cls,
+                        efp_fallback=efp_fallback_det,
+                        unique_unlabeled=unique_box,
+                    )
+                    uia_yolo_subtarget_chosen = chosen
+                    uia_yolo_subtarget_method = method
                     detections = _sort_detections_reading_order(
                         [*uia_dets, *yolo_detections, unique_box]
                     )
@@ -7722,6 +7826,11 @@ async def _find_mouse_point_attempt(
                         f"anchor={fb_anchor!r} "
                         f"class_id={unique_box.class_id} "
                         f"center=[{unique_box.cx},{unique_box.cy}]"
+                        + (
+                            f" gate={list(sub_hub.bbox)!r}"
+                            if efp_gate_hub is not None
+                            else ""
+                        )
                     )
                 else:
                     if deferred_pendings:
@@ -7733,37 +7842,60 @@ async def _find_mouse_point_attempt(
                         capture_s = float(vision_timing.get("capture_s", 0.0))
                         vision_timing["vision_path"] = "uia_yolo_subtarget"
                         vision_timing["uia_first_hit"] = True
-                    # After OCR, match the fallback anchor; prefer the target class
-                    # when the hub wrapper names one (ignore sibling class noise).
-                    subtarget_classes: frozenset[int] | set[int] | None = (
-                        frozenset({preferred_cls})
-                        if preferred_cls is not None
-                        else fb_plan.ocr_class_ids
+                    chosen, method = _choose_uia_yolo_subtarget_in_hub(
+                        hub=sub_hub,
+                        labeled_detections=yolo_detections,
+                        anchor=fb_anchor,
+                        preferred_cls=preferred_cls,
+                        efp_fallback=efp_fallback_det,
+                        ocr_class_ids=fb_plan.ocr_class_ids,
                     )
-                    subtargets = _yolo_subtargets_inside_uia(
-                        uia_first_chosen,
-                        yolo_detections,
-                        fb_anchor,
-                        ocr_class_ids=subtarget_classes,
-                    )
+                    uia_yolo_subtarget_chosen = chosen
+                    uia_yolo_subtarget_method = method
                     detections = _sort_detections_reading_order(
-                        [*uia_dets, *yolo_detections]
+                        [
+                            *uia_dets,
+                            *yolo_detections,
+                            *([chosen] if chosen is not None else []),
+                        ]
                     )
-                    if len(subtargets) == 1:
-                        uia_yolo_subtarget_chosen = subtargets[0]
+                    if (
+                        chosen is not None
+                        and method == "uia_yolo_subtarget_efp_ocr"
+                    ):
+                        _log_info(
+                            "move_mouse uia_yolo_subtarget_efp_ocr "
+                            f"anchor={fb_anchor!r} "
+                            f"center=[{chosen.cx},{chosen.cy}] "
+                            f"gate={list(sub_hub.bbox)!r} "
+                            f"text={chosen.text!r} "
+                            f"icons={chosen.icons!r}"
+                        )
+                    elif (
+                        chosen is not None
+                        and method == "uia_yolo_subtarget_efp"
+                    ):
+                        _log_info(
+                            "move_mouse uia_yolo_subtarget_efp "
+                            f"center=[{chosen.cx},{chosen.cy}] "
+                            f"gate={list(sub_hub.bbox)!r} "
+                            "ocr_miss fallback "
+                            f"recorded_name={recorded_efp_name!r} "
+                            f"recorded_value={recorded_efp_value!r}"
+                        )
+                    elif chosen is not None:
                         _log_info(
                             "move_mouse uia_yolo_subtarget hit "
                             f"anchor={fb_anchor!r} "
-                            f"center=[{uia_yolo_subtarget_chosen.cx},"
-                            f"{uia_yolo_subtarget_chosen.cy}] "
-                            f"text={uia_yolo_subtarget_chosen.text!r} "
-                            f"icons={uia_yolo_subtarget_chosen.icons!r}"
+                            f"center=[{chosen.cx},{chosen.cy}] "
+                            f"text={chosen.text!r} "
+                            f"icons={chosen.icons!r}"
                         )
                     else:
-                        uia_yolo_subtarget_chosen = None
                         _log_info(
                             "move_mouse uia_yolo_subtarget miss "
-                            f"anchor={fb_anchor!r} n={len(subtargets)}; "
+                            f"anchor={fb_anchor!r} "
+                            f"hub={list(sub_hub.bbox)!r}; "
                             "keeping UIA center"
                         )
 

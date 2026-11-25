@@ -3615,9 +3615,18 @@ _EFP_VERIFIED_UIA_FIRST_REASONS = frozenset(
 )
 
 
-def _keep_uia_first_on_subtarget_efp_soft_miss(uia_first_reason: str) -> bool:
-    """True when subtarget EFP soft-miss should keep the UIA-first hub."""
-    return str(uia_first_reason or "").strip() in _EFP_VERIFIED_UIA_FIRST_REASONS
+def _keep_uia_first_on_subtarget_efp_soft_miss(
+    uia_first_reason: str,
+    hub_source: str | None = None,
+) -> bool:
+    """True when subtarget EFP soft-miss should keep the UIA-first hub.
+
+    EFP-verified constellation / data_item hits stay. ``hub_source=findall``
+    also keeps the Name FindAll leaf (do not clear into OCR twin fallthrough).
+    """
+    if str(uia_first_reason or "").strip() in _EFP_VERIFIED_UIA_FIRST_REASONS:
+        return True
+    return _normalize_hub_source(hub_source) == "findall"
 
 
 def _hub_is_input_or_scrollbar(
@@ -6200,6 +6209,79 @@ def _yolo_boxes_inside_uia_for_classes(
     )
 
 
+def _extract_deferred_ocr_pendings(
+    vision_timing: dict[str, Any],
+) -> list[_MouseOcrPending]:
+    """Pop deferred OCR pending list from a subtarget vision timing dict."""
+    pending_raw = vision_timing.pop("_ocr_pending", None)
+    if not (isinstance(pending_raw, list) and pending_raw):
+        pending_raw = vision_timing.pop("ocr_pending", None)
+    if isinstance(pending_raw, list) and pending_raw:
+        return list(pending_raw)
+    return []
+
+
+async def _recapture_deferred_subtarget_yolo(
+    *,
+    click_window: dict[str, Any] | None,
+    caption_roi_screen: tuple[int, int, int, int] | None,
+    landmark_geometry: dict[str, Any] | None,
+    yolo_conf_threshold: float,
+    ocr_class_ids: frozenset[int] | set[int] | list[int] | None,
+    note_capture: Any | None = None,
+) -> tuple[
+    list[int],
+    list[str],
+    list[tuple[int, np.ndarray]],
+    list[UiDetection],
+    dict[str, Any],
+    list[_MouseOcrPending],
+    float,
+]:
+    """Sleep, re-grab, and run deferred YOLO for empty in-hub paint lag."""
+    await asyncio.sleep(float(EMPTY_IN_HUB_YOLO_SLEEP_S))
+    monitor_indices, image_paths, captured, capture_s = await asyncio.to_thread(
+        _grab_selected_monitors, click_window
+    )
+    if callable(note_capture):
+        note_capture(captured)
+    vision = await asyncio.to_thread(
+        _finish_captured_mouse_candidates,
+        monitor_indices,
+        image_paths,
+        captured,
+        capture_s,
+        yolo_conf_threshold,
+        ocr_class_ids=ocr_class_ids,
+        refine_with_uia=False,
+        click_window=click_window,
+        caption_roi_screen=caption_roi_screen,
+        landmark_geometry=landmark_geometry,
+        defer_ocr=True,
+    )
+    (
+        monitor_indices,
+        image_paths,
+        captured,
+        yolo_detections,
+        vision_timing,
+    ) = vision
+    if callable(note_capture):
+        note_capture(captured)
+    vision_timing["vision_path"] = "uia_yolo_subtarget"
+    vision_timing["uia_first_hit"] = True
+    deferred_pendings = _extract_deferred_ocr_pendings(vision_timing)
+    return (
+        monitor_indices,
+        image_paths,
+        captured,
+        yolo_detections,
+        vision_timing,
+        deferred_pendings,
+        float(capture_s),
+    )
+
+
 def _detections_from_uia_prefetched(
     uia_prefetched: tuple[
         list[tuple[int, int, int, int]] | None,
@@ -6759,6 +6841,11 @@ def require_similarity_match() -> Iterator[None]:
 # Soft-miss UI-change retry: MAD above this on the compare ROI means the screen
 # moved under the locator and one immediate re-run is worth trying.
 UI_CHANGE_MAD_THRESHOLD = 0.05
+
+# Paint-lag: when in-hub YOLO sees no boxes under a live UIA hub, wait and
+# re-grab before soft-miss / OCR-inside miss. Extra attempts after the first.
+EMPTY_IN_HUB_YOLO_MAX_EXTRA = 2
+EMPTY_IN_HUB_YOLO_SLEEP_S = 0.3
 
 
 @dataclass(frozen=True)
@@ -7612,14 +7699,7 @@ async def _find_mouse_point_attempt(
             _note_capture(captured)
             vision_timing["vision_path"] = "uia_yolo_subtarget"
             vision_timing["uia_first_hit"] = True
-            pending_raw = vision_timing.pop("_ocr_pending", None)
-            if not (isinstance(pending_raw, list) and pending_raw):
-                pending_raw = vision_timing.pop("ocr_pending", None)
-            deferred_pendings = (
-                list(pending_raw)
-                if isinstance(pending_raw, list) and pending_raw
-                else []
-            )
+            deferred_pendings = _extract_deferred_ocr_pendings(vision_timing)
             if vision_timing.get("uia_first_pending") and not deferred_pendings:
                 _log_info(
                     "move_mouse uia_yolo_subtarget ocr deferred but "
@@ -7631,22 +7711,69 @@ async def _find_mouse_point_attempt(
             efp_subtarget_required_miss = False
             efp_fallback_det: UiDetection | None = None
             efp_gate_hub: UiDetection | None = None
+            do_in_hub_ocr = False
+            # Class set used for empty-pool paint-lag retries and EFP probing.
+            if preferred_cls is not None:
+                in_hub_probe_ids: frozenset[int] = frozenset({int(preferred_cls)})
+            elif fb_plan.ocr_class_ids:
+                in_hub_probe_ids = frozenset(
+                    int(v) for v in fb_plan.ocr_class_ids
+                )
+            else:
+                in_hub_probe_ids = frozenset(
+                    {YOLO_CLASS_TEXT, YOLO_CLASS_ELEMENT}
+                )
+            if not is_offset_click:
+                in_hub_probe = _yolo_boxes_inside_uia_for_classes(
+                    uia_first_chosen,
+                    deferred_pendings,
+                    vision_timing,
+                    in_hub_probe_ids,
+                )
+                for empty_attempt in range(1, int(EMPTY_IN_HUB_YOLO_MAX_EXTRA) + 1):
+                    if in_hub_probe:
+                        break
+                    (
+                        monitor_indices,
+                        image_paths,
+                        captured,
+                        yolo_detections,
+                        vision_timing,
+                        deferred_pendings,
+                        capture_s,
+                    ) = await _recapture_deferred_subtarget_yolo(
+                        click_window=click_window,
+                        caption_roi_screen=caption_roi_screen,
+                        landmark_geometry=ocr_fallback.landmark_geometry,
+                        yolo_conf_threshold=yolo_conf_threshold,
+                        ocr_class_ids=fb_plan.ocr_class_ids,
+                        note_capture=_note_capture,
+                    )
+                    if (
+                        vision_timing.get("uia_first_pending")
+                        and not deferred_pendings
+                    ):
+                        _log_info(
+                            "move_mouse uia_yolo_subtarget ocr deferred but "
+                            "_ocr_pending missing; using debug_layers "
+                            "for unique-box"
+                        )
+                    in_hub_probe = _yolo_boxes_inside_uia_for_classes(
+                        uia_first_chosen,
+                        deferred_pendings,
+                        vision_timing,
+                        in_hub_probe_ids,
+                    )
+                    _log_info(
+                        "move_mouse uia_yolo_subtarget empty_pool_retry "
+                        f"attempt={empty_attempt} pool={len(in_hub_probe)}"
+                    )
             if _recorded_efp_present(recorded_efp_name, recorded_efp_value):
                 # Prefer live EFP Name/Value over OCR twin text for in-pane
                 # disambiguation (e.g. 下載 vs 圖片 inside one Explorer pane).
                 # Non-offset: EFP only gates the row; OCR/unique still picks the
                 # twin glyph inside a padded leaf rect.
-                efp_class_ids: frozenset[int] | set[int]
-                if preferred_cls is not None:
-                    efp_class_ids = frozenset({preferred_cls})
-                elif fb_plan.ocr_class_ids:
-                    efp_class_ids = frozenset(
-                        int(v) for v in fb_plan.ocr_class_ids
-                    )
-                else:
-                    efp_class_ids = frozenset(
-                        {YOLO_CLASS_TEXT, YOLO_CLASS_ELEMENT}
-                    )
+                efp_class_ids = in_hub_probe_ids
                 efp_pool = _yolo_boxes_inside_uia_for_classes(
                     uia_first_chosen,
                     deferred_pendings,
@@ -7773,15 +7900,32 @@ async def _find_mouse_point_attempt(
                 pass
             elif efp_subtarget_required_miss:
                 # Recorded EFP was required and missed. When UIA-first already
-                # EFP-verified the hub (constellation / data_item name), keep
-                # that hub — do not clear into OCR twin (flaky in-hub EFP).
-                # Unverified hubs still adopt OCR-twin FindAll fallthrough.
+                # EFP-verified the hub (constellation / data_item name) or the
+                # hub came from Name FindAll, keep that hub — do not clear into
+                # OCR twin. FindAll soft-miss still tries OCR-inside under the
+                # hub; verified constellation commits the hub center.
+                # Other unverified hubs still adopt OCR-twin fallthrough.
                 uia_yolo_subtarget_chosen = None
-                if _keep_uia_first_on_subtarget_efp_soft_miss(uia_first_reason):
-                    _log_info(
-                        "move_mouse uia_yolo_subtarget_efp soft_miss; "
-                        f"keeping UIA center reason={uia_first_reason!r}"
-                    )
+                if _keep_uia_first_on_subtarget_efp_soft_miss(
+                    uia_first_reason, hub_source=hub_source
+                ):
+                    if (
+                        _normalize_hub_source(hub_source) == "findall"
+                        and not is_offset_click
+                    ):
+                        efp_fallback_det = None
+                        efp_gate_hub = None
+                        do_in_hub_ocr = True
+                        _log_info(
+                            "move_mouse uia_yolo_subtarget_efp soft_miss; "
+                            "keeping FindAll hub for OCR-inside "
+                            f"reason={uia_first_reason!r}"
+                        )
+                    else:
+                        _log_info(
+                            "move_mouse uia_yolo_subtarget_efp soft_miss; "
+                            f"keeping UIA center reason={uia_first_reason!r}"
+                        )
                 else:
                     uia_first_chosen = None
                     _log_info(
@@ -7819,6 +7963,8 @@ async def _find_mouse_point_attempt(
                     nearby_labels = list(fb_fields["nearby_labels"])
                     nearby_phrases = list(fb_fields["nearby_phrases"])
             else:
+                do_in_hub_ocr = True
+            if do_in_hub_ocr and uia_first_chosen is not None:
                 sub_hub = (
                     efp_gate_hub
                     if efp_gate_hub is not None

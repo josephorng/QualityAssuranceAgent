@@ -8461,6 +8461,196 @@ async def test_uia_hit_with_fallback_ambiguous_keeps_uia_center(
 
 
 @pytest.mark.asyncio
+async def test_findall_efp_soft_miss_empty_pool_keeps_uia_center(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FindAll leaf + poisoned CoreInput EFP + empty in-hub YOLO → keep FindAll."""
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+    from src.recorder.uia_replay_repair import (
+        YoloOcrMoveFallback,
+        bind_yolo_ocr_fallbacks,
+    )
+
+    uia_leaf = _detection_from_bbox(
+        (100, 100, 200, 40),
+        YOLO_CLASS_TEXT,
+        text="控制台 系統 12 天前",
+        source="uia",
+    )
+    finish_calls: list[int] = []
+
+    def fake_grab(*_a, **_k):
+        frame = np.zeros((400, 600, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], 0.01
+
+    def fake_finish(*_a, **_k):
+        finish_calls.append(1)
+        timing = {
+            "capture_s": 0.01,
+            "yolo_s": 0.05,
+            "line_s": 0.0,
+            "uia_input_s": 0.0,
+            "uia_scrollbar_s": 0.0,
+            "uia_text_s": 0.0,
+            "ocr_s": 0.0,
+            "icon_ocr_retry_s": 0.0,
+            "total_s": 0.05,
+            "_ocr_pending": [],
+            "debug_layers": {},
+        }
+        frame = np.zeros((400, 600, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], [], timing
+
+    monkeypatch.setattr(smt, "EMPTY_IN_HUB_YOLO_SLEEP_S", 0)
+    monkeypatch.setattr(smt, "_grab_selected_monitors", fake_grab)
+    monkeypatch.setattr(
+        smt,
+        "_uia_only_detections_for_click_window",
+        lambda *_a, **_k: [uia_leaf],
+    )
+    monkeypatch.setattr(
+        smt,
+        "_try_uia_first_unique_select",
+        lambda *_a, **_k: (uia_leaf, "hit"),
+    )
+    monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", fake_finish)
+    monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
+
+    fallback = YoloOcrMoveFallback(
+        instruction="（YOLO+OCR）將滑鼠移到「控制台」文字，並點擊滑鼠一下。",
+        hub_source="findall",
+    )
+    with bind_yolo_ocr_fallbacks([fallback]):
+        found = await smt.find_mouse_point(
+            "（UIA）將滑鼠移到「控制台 系統 12 天前」按鈕",
+            click_window={
+                "hwnd": 5,
+                "title": "搜尋",
+                "process_name": "SearchHost.exe",
+                "rect": [0, 0, 600, 400],
+            },
+            vision_mode="uia",
+            anchor_text="控制台 系統 12 天前",
+            control_type="button",
+            hub_source="findall",
+            recorded_efp_name="CoreInput",
+            recorded_efp_value="",
+        )
+    assert found is not None
+    assert found[0:2] == (uia_leaf.cx, uia_leaf.cy)
+    assert found[2]["selection_method"] == "uia_first_unique"
+    # Initial deferred YOLO + EMPTY_IN_HUB_YOLO_MAX_EXTRA recaptures.
+    assert len(finish_calls) == 1 + smt.EMPTY_IN_HUB_YOLO_MAX_EXTRA
+
+
+@pytest.mark.asyncio
+async def test_empty_in_hub_yolo_retry_then_unique_box(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """First in-hub pool empty; retry paints a unique twin text → subtarget hit."""
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+    from src.recorder.uia_replay_repair import (
+        YoloOcrMoveFallback,
+        bind_yolo_ocr_fallbacks,
+    )
+
+    uia_leaf = _detection_from_bbox(
+        (100, 100, 200, 40),
+        YOLO_CLASS_TEXT,
+        text="控制台 系統 12 天前",
+        source="uia",
+    )
+    twin_box = (110, 108, 40, 16)
+    finish_n = {"n": 0}
+
+    def fake_grab(*_a, **_k):
+        frame = np.zeros((400, 600, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], 0.01
+
+    def fake_finish(*_a, **_k):
+        finish_n["n"] += 1
+        frame = np.zeros((400, 600, 3), dtype=np.uint8)
+        if finish_n["n"] == 1:
+            timing = {
+                "capture_s": 0.01,
+                "yolo_s": 0.05,
+                "line_s": 0.0,
+                "uia_input_s": 0.0,
+                "uia_scrollbar_s": 0.0,
+                "uia_text_s": 0.0,
+                "ocr_s": 0.0,
+                "icon_ocr_retry_s": 0.0,
+                "total_s": 0.05,
+                "_ocr_pending": [],
+                "debug_layers": {},
+            }
+            return [1], ["shot.png"], [(1, frame)], [], timing
+        pending = _ocr_pending_for_boxes([(twin_box, YOLO_CLASS_TEXT)])
+        timing = {
+            "capture_s": 0.01,
+            "yolo_s": 0.05,
+            "line_s": 0.0,
+            "uia_input_s": 0.0,
+            "uia_scrollbar_s": 0.0,
+            "uia_text_s": 0.0,
+            "ocr_s": 0.0,
+            "icon_ocr_retry_s": 0.0,
+            "total_s": 0.05,
+            "_ocr_pending": [pending],
+        }
+        return [1], ["shot.png"], [(1, frame)], [], timing
+
+    monkeypatch.setattr(smt, "EMPTY_IN_HUB_YOLO_SLEEP_S", 0)
+    monkeypatch.setattr(smt, "_grab_selected_monitors", fake_grab)
+    monkeypatch.setattr(
+        smt,
+        "_uia_only_detections_for_click_window",
+        lambda *_a, **_k: [uia_leaf],
+    )
+    monkeypatch.setattr(
+        smt,
+        "_try_uia_first_unique_select",
+        lambda *_a, **_k: (uia_leaf, "hit"),
+    )
+    monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", fake_finish)
+    monkeypatch.setattr(
+        smt,
+        "_finish_deferred_ocr_pendings",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("unique in-hub text must skip OCR")
+        ),
+    )
+    monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
+
+    fallback = YoloOcrMoveFallback(
+        instruction="（YOLO+OCR）將滑鼠移到「控制台」文字，並點擊滑鼠一下。",
+        hub_source="findall",
+    )
+    with bind_yolo_ocr_fallbacks([fallback]):
+        found = await smt.find_mouse_point(
+            "（UIA）將滑鼠移到「控制台 系統 12 天前」按鈕",
+            click_window={
+                "hwnd": 5,
+                "title": "搜尋",
+                "process_name": "SearchHost.exe",
+                "rect": [0, 0, 600, 400],
+            },
+            vision_mode="uia",
+            anchor_text="控制台 系統 12 天前",
+            control_type="button",
+            hub_source="findall",
+        )
+    assert found is not None
+    assert found[0:2] == (130, 116)  # center of twin_box
+    assert found[2]["selection_method"] == "uia_yolo_subtarget"
+    assert finish_n["n"] == 2  # empty first, then retry paints boxes
+
+
+@pytest.mark.asyncio
 async def test_uia_hit_with_fallback_unique_element_skips_ocr_despite_text_nearby(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

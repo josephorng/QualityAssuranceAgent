@@ -181,12 +181,20 @@ flowchart TD
 flowchart TD
   A[Parse fallback anchor e.g. 「展開節點」圖示] --> B[YOLO defer_ocr=True on captured frames]
   B --> C[preferred_cls from wrapper]
-  C --> D{recorded EFP present?}
+  C --> P{in-hub pool empty?}
+  P -->|yes non-offset| R[Empty-pool retry<br/>up to 2 recaptures]
+  R --> P2{pool non-empty?}
+  P2 -->|yes| D
+  P2 -->|still empty| D
+  P -->|no| D{recorded EFP present?}
   D -->|yes| E[Probe in-hub YOLO boxes vs Name/Value]
   E -->|hit non-offset| F[Keep efp_fallback + padded leaf gate]
   F --> I
   E -->|hit offset| Os[uia_yolo_subtarget_efp / _efp_synth commit]
   E -->|miss + verified hub| G[Keep UIA center]
+  E -->|miss + findall hub| Fi[OCR/unique inside FindAll hub]
+  Fi -->|hit| M
+  Fi -->|miss| G
   E -->|miss + unverified| H[Clear UIA → adopt twin → full YOLO]
   D -->|no| I{exactly one preferred_cls box in hub/gate?}
   I -->|yes| J[unique_box_skip_ocr<br/>NO OCR]
@@ -207,6 +215,16 @@ Non-offset recorded-EFP **hit** is a **row gate**, not the click chooser:
 - Unique OCR/icon match → `uia_yolo_subtarget_efp_ocr`.
 - Not unique → fall back to the Name/Value pool det (`uia_yolo_subtarget_efp`) so Explorer-style pane disambiguation still works.
 - Offset / synth empty-space clicks still commit EFP immediately.
+
+### Empty in-hub YOLO retry (paint lag)
+
+When the preferred-class in-hub pool is **empty** after the first deferred YOLO (and the click is not a relative-offset empty-space target), wait ~300 ms and re-grab / re-run deferred YOLO up to **2** extra times (`EMPTY_IN_HUB_YOLO_MAX_EXTRA`). Stop early when boxes appear. This is **not** the post-failure MAD `ui_change_retry` (that path only re-runs when the click-window ROI changed a lot).
+
+If the pool stays empty, continue into soft-miss / OCR-inside as below — FindAll hubs keep the UIA leaf instead of clearing into twin fallthrough.
+
+### Soft-miss: keep FindAll
+
+`_keep_uia_first_on_subtarget_efp_soft_miss` is true for EFP-verified UIA-first reasons **and** for `hub_source=findall`. FindAll soft-miss keeps the Name leaf and still tries OCR/unique **inside** that hub; if OCR also misses, commit the FindAll center. Only non-FindAll, non-verified hubs clear into full OCR-twin YOLO fallthrough.
 
 ### In-hub YOLO pool
 
@@ -235,7 +253,7 @@ Triggers:
 
 - UIA-first miss after retry + twin → rewrite select fields from twin, then YOLO+OCR
 - Empty UIA snapshot, no twin → force `vision_mode=yolo_ocr`
-- Subtarget EFP soft-miss cleared UIA hub → twin already adopted
+- Subtarget EFP soft-miss cleared UIA hub (non-FindAll, non-verified) → twin already adopted
 - Pure `vision_mode=yolo_ocr` from the start (`allow_uia_select=False`)
 
 May still run same-run `attempt_uia_replay_repair` for a remaining `（YOLO+OCR）` step and promote a unique in-repair-box YOLO leaf → `uia_yolo_subtarget`.

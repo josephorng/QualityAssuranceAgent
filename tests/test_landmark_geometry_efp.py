@@ -1869,6 +1869,21 @@ def test_keep_uia_first_on_subtarget_efp_soft_miss_reasons() -> None:
     assert _keep_uia_first_on_subtarget_efp_soft_miss("hit") is False
     assert _keep_uia_first_on_subtarget_efp_soft_miss("uia_first_unique") is False
     assert _keep_uia_first_on_subtarget_efp_soft_miss("") is False
+    # FindAll hubs keep the Name leaf even on plain hit / unique soft-miss.
+    assert (
+        _keep_uia_first_on_subtarget_efp_soft_miss("hit", hub_source="findall")
+        is True
+    )
+    assert (
+        _keep_uia_first_on_subtarget_efp_soft_miss(
+            "uia_first_unique", hub_source="findall"
+        )
+        is True
+    )
+    assert (
+        _keep_uia_first_on_subtarget_efp_soft_miss("hit", hub_source="uia_efp")
+        is False
+    )
 
 
 def test_pad_bbox_and_efp_gate_hub() -> None:

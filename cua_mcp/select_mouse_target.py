@@ -4951,6 +4951,26 @@ def _pad_bbox_xywh(
     return (x - p, y - p, w + 2 * p, h + 2 * p)
 
 
+def _intersect_bbox_xywh(
+    a: tuple[int, int, int, int],
+    b: tuple[int, int, int, int],
+) -> tuple[int, int, int, int] | None:
+    """Return ``(x, y, w, h)`` intersection of two boxes, or ``None`` if empty."""
+    ax, ay, aw, ah = (int(v) for v in a)
+    bx, by, bw, bh = (int(v) for v in b)
+    if aw <= 0 or ah <= 0 or bw <= 0 or bh <= 0:
+        return None
+    x1 = max(ax, bx)
+    y1 = max(ay, by)
+    x2 = min(ax + aw, bx + bw)
+    y2 = min(ay + ah, by + bh)
+    w = x2 - x1
+    h = y2 - y1
+    if w <= 0 or h <= 0:
+        return None
+    return (x1, y1, w, h)
+
+
 def _subtarget_hub_for_efp_gate(
     *,
     leaf_bbox: tuple[int, int, int, int] | None,
@@ -4972,6 +4992,37 @@ def _subtarget_hub_for_efp_gate(
         YOLO_CLASS_TEXT,
         source="uia",
     )
+
+
+def _findall_efp_intersect_gate(
+    *,
+    leaf_bbox: tuple[int, int, int, int] | None,
+    uia_hub: UiDetection,
+    efp_fallback: UiDetection | None,
+    pad: int = _EFP_SUBTARGET_GATE_PAD_PX,
+) -> tuple[UiDetection | None, UiDetection | None]:
+    """FindAll∩EFP leaf gate; clear fallback when outside intersection.
+
+    Returns ``(gate_or_None, efp_fallback_or_None)``. Empty intersection means
+    no EFP gate and no pane fallback — caller OCRs inside the FindAll hub.
+    Optional ``pad`` expands only the intersection result (YOLO margin).
+    """
+    if leaf_bbox is None:
+        return None, None
+    inter = _intersect_bbox_xywh(tuple(int(v) for v in uia_hub.bbox), leaf_bbox)
+    if inter is None:
+        return None, None
+    gate = _detection_from_bbox(
+        _pad_bbox_xywh(inter, pad),
+        YOLO_CLASS_TEXT,
+        source="uia",
+    )
+    kept_fallback = efp_fallback
+    if kept_fallback is not None and not _leaf_bbox_contains_point(
+        gate.bbox, int(kept_fallback.cx), int(kept_fallback.cy)
+    ):
+        kept_fallback = None
+    return gate, kept_fallback
 
 
 def _choose_uia_yolo_subtarget_in_hub(
@@ -6177,6 +6228,31 @@ def _subtarget_should_force_ocr_finish(
 ) -> bool:
     """True when multi in-hub boxes need OCR but deferred pending is missing."""
     return int(in_hub_count) >= 2 and int(pending_count) == 0
+
+
+def _subtarget_must_ocr_before_efp_fallback(
+    *,
+    preferred_cls: int | None,
+    unique_box: UiDetection | None,
+    efp_fallback: UiDetection | None,
+    pending_count: int,
+    in_hub_count: int,
+    ocr_already_finished: bool,
+) -> bool:
+    """True when twin OCR must run before committing an EFP ocr_miss fallback."""
+    if ocr_already_finished:
+        return False
+    if unique_box is not None:
+        return False
+    if preferred_cls is None:
+        return False
+    if efp_fallback is None and int(in_hub_count) < 1:
+        return False
+    # Need labels whenever unique-box is impossible and we still have geometry
+    # (or an EFP fallback that would otherwise win unlabeled).
+    if int(pending_count) > 0:
+        return False  # caller finishes deferred pendings instead
+    return int(in_hub_count) >= 1 or efp_fallback is not None
 
 
 def _unique_yolo_box_inside_uia(
@@ -7860,25 +7936,49 @@ async def _find_mouse_point_attempt(
                     )
                     if efp_reason != "miss" and efp_det is not None:
                         # Gate only — do not commit pool det; OCR/unique picks
-                        # the twin inside the padded leaf.
+                        # the twin inside the padded leaf. FindAll hubs clamp
+                        # to intersection(FindAll, EFP leaf) so parent panes
+                        # like CoreInput cannot replace the Name leaf.
                         efp_fallback_det = efp_det
                         _leaf_name, _leaf_value, leaf_bbox = _probe_efp_leaf_at(
                             int(efp_det.cx), int(efp_det.cy)
                         )
-                        efp_gate_hub = _subtarget_hub_for_efp_gate(
-                            leaf_bbox=leaf_bbox,
-                            uia_hub=uia_first_chosen,
-                        )
-                        _log_info(
-                            "move_mouse uia_yolo_subtarget_efp gate "
-                            f"fallback_center=[{efp_det.cx},{efp_det.cy}] "
-                            f"gate={list(efp_gate_hub.bbox)!r} "
-                            f"leaf_bbox="
-                            f"{list(leaf_bbox) if leaf_bbox else None!r} "
-                            f"pool={len(efp_pool)} "
-                            f"recorded_name={recorded_efp_name!r} "
-                            f"recorded_value={recorded_efp_value!r}"
-                        )
+                        if _normalize_hub_source(hub_source) == "findall":
+                            efp_gate_hub, efp_fallback_det = (
+                                _findall_efp_intersect_gate(
+                                    leaf_bbox=leaf_bbox,
+                                    uia_hub=uia_first_chosen,
+                                    efp_fallback=efp_fallback_det,
+                                )
+                            )
+                            _log_info(
+                                "move_mouse uia_yolo_subtarget_efp "
+                                "gate_intersect "
+                                f"findall={list(uia_first_chosen.bbox)!r} "
+                                f"efp_leaf="
+                                f"{list(leaf_bbox) if leaf_bbox else None!r} "
+                                f"gate="
+                                f"{list(efp_gate_hub.bbox) if efp_gate_hub else None!r} "
+                                f"fallback_kept={efp_fallback_det is not None} "
+                                f"pool={len(efp_pool)} "
+                                f"recorded_name={recorded_efp_name!r} "
+                                f"recorded_value={recorded_efp_value!r}"
+                            )
+                        else:
+                            efp_gate_hub = _subtarget_hub_for_efp_gate(
+                                leaf_bbox=leaf_bbox,
+                                uia_hub=uia_first_chosen,
+                            )
+                            _log_info(
+                                "move_mouse uia_yolo_subtarget_efp gate "
+                                f"fallback_center=[{efp_det.cx},{efp_det.cy}] "
+                                f"gate={list(efp_gate_hub.bbox)!r} "
+                                f"leaf_bbox="
+                                f"{list(leaf_bbox) if leaf_bbox else None!r} "
+                                f"pool={len(efp_pool)} "
+                                f"recorded_name={recorded_efp_name!r} "
+                                f"recorded_value={recorded_efp_value!r}"
+                            )
                     else:
                         efp_subtarget_required_miss = True
                         _log_info(
@@ -8023,6 +8123,7 @@ async def _find_mouse_point_attempt(
                         if force_cls_ids
                         else []
                     )
+                    ocr_finished_for_subtarget = False
                     if deferred_pendings:
                         yolo_detections, vision_timing = await asyncio.to_thread(
                             _finish_deferred_ocr_pendings,
@@ -8032,20 +8133,32 @@ async def _find_mouse_point_attempt(
                         capture_s = float(vision_timing.get("capture_s", 0.0))
                         vision_timing["vision_path"] = "uia_yolo_subtarget"
                         vision_timing["uia_first_hit"] = True
+                        ocr_finished_for_subtarget = True
                     elif (
                         preferred_cls is not None
-                        and _subtarget_should_force_ocr_finish(
-                            pending_count=0,
-                            in_hub_count=len(in_hub_pool),
+                        and (
+                            _subtarget_should_force_ocr_finish(
+                                pending_count=0,
+                                in_hub_count=len(in_hub_pool),
+                            )
+                            or _subtarget_must_ocr_before_efp_fallback(
+                                preferred_cls=preferred_cls,
+                                unique_box=None,
+                                efp_fallback=efp_fallback_det,
+                                pending_count=0,
+                                in_hub_count=len(in_hub_pool),
+                                ocr_already_finished=False,
+                            )
                         )
                     ):
-                        # Pending lost but debug_layers still shows 2+ boxes —
-                        # re-finish capture so twin OCR (e.g. 展開節點) can run.
+                        # Pending lost / unlabeled geometry — re-finish so twin
+                        # OCR can run before any EFP ocr_miss pane fallback.
                         _log_info(
                             "move_mouse uia_yolo_subtarget force_ocr "
                             "multi_box pending_missing "
                             f"n={len(in_hub_pool)} "
-                            f"class_id={int(preferred_cls)}"
+                            f"class_id={int(preferred_cls)} "
+                            f"efp_fallback={efp_fallback_det is not None}"
                         )
                         force_vision = await asyncio.to_thread(
                             _finish_captured_mouse_candidates,
@@ -8092,12 +8205,38 @@ async def _find_mouse_point_attempt(
                         vision_timing["vision_path"] = "uia_yolo_subtarget"
                         vision_timing["uia_first_hit"] = True
                         vision_timing["uia_yolo_subtarget_force_ocr"] = True
+                        ocr_finished_for_subtarget = True
+                    # FindAll: never commit an EFP pane fallback that sits
+                    # outside the FindAll hub (intersection already cleared
+                    # most cases; belt-and-suspenders here).
+                    choose_efp_fallback = efp_fallback_det
+                    if (
+                        choose_efp_fallback is not None
+                        and _normalize_hub_source(hub_source) == "findall"
+                        and not _leaf_bbox_contains_point(
+                            tuple(int(v) for v in uia_first_chosen.bbox),
+                            int(choose_efp_fallback.cx),
+                            int(choose_efp_fallback.cy),
+                        )
+                    ):
+                        choose_efp_fallback = None
+                    # Refuse unlabeled EFP ocr_miss when OCR never ran.
+                    if (
+                        choose_efp_fallback is not None
+                        and not ocr_finished_for_subtarget
+                        and preferred_cls is not None
+                    ):
+                        _log_info(
+                            "move_mouse uia_yolo_subtarget skip_efp_fallback; "
+                            "OCR not finished for preferred twin"
+                        )
+                        choose_efp_fallback = None
                     chosen, method = _choose_uia_yolo_subtarget_in_hub(
                         hub=sub_hub,
                         labeled_detections=yolo_detections,
                         anchor=fb_anchor,
                         preferred_cls=preferred_cls,
-                        efp_fallback=efp_fallback_det,
+                        efp_fallback=choose_efp_fallback,
                         ocr_class_ids=fb_plan.ocr_class_ids,
                     )
                     uia_yolo_subtarget_chosen = chosen

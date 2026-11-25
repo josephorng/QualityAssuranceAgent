@@ -8461,6 +8461,130 @@ async def test_uia_hit_with_fallback_ambiguous_keeps_uia_center(
 
 
 @pytest.mark.asyncio
+async def test_findall_efp_hit_coreinput_intersect_keeps_findall_center(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FindAll∩CoreInput gate; OCR miss must not click pane center."""
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+    from src.recorder.uia_replay_repair import (
+        YoloOcrMoveFallback,
+        bind_yolo_ocr_fallbacks,
+    )
+
+    uia_leaf = _detection_from_bbox(
+        (697, 114, 788, 56),
+        YOLO_CLASS_TEXT,
+        text="控制台 系統 12 天前",
+        source="uia",
+    )
+    # Two TEXT boxes → unique-box impossible; OCR labels miss twin.
+    text_a = (760, 127, 42, 14)
+    text_b = (760, 146, 25, 12)
+    pane_fallback = _detection_from_bbox(
+        (675, 49, 832, 810),
+        YOLO_CLASS_TEXT,
+        text="CoreInput",
+        source="uia",
+    )
+
+    def fake_grab(*_a, **_k):
+        frame = np.zeros((920, 1918, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], 0.01
+
+    def fake_finish(*_a, **_k):
+        frame = np.zeros((920, 1918, 3), dtype=np.uint8)
+        pending = _ocr_pending_for_boxes(
+            [(text_a, YOLO_CLASS_TEXT), (text_b, YOLO_CLASS_TEXT)]
+        )
+        timing = {
+            "capture_s": 0.01,
+            "yolo_s": 0.05,
+            "line_s": 0.0,
+            "uia_input_s": 0.0,
+            "uia_scrollbar_s": 0.0,
+            "uia_text_s": 0.0,
+            "ocr_s": 0.0,
+            "icon_ocr_retry_s": 0.0,
+            "total_s": 0.05,
+            "_ocr_pending": [pending],
+            "debug_layers": {
+                "yolo": [
+                    {"bbox": list(text_a), "class_name": "text"},
+                    {"bbox": list(text_b), "class_name": "text"},
+                ]
+            },
+        }
+        return [1], ["shot.png"], [(1, frame)], [], timing
+
+    def fake_verify(pool, *, synth, geom_det, recorded_name, recorded_value):
+        # Return a det whose center will be snapped via leaf probe to pane.
+        return pane_fallback, (pane_fallback.cx, pane_fallback.cy), "hit"
+
+    def fake_probe(x: int, y: int):
+        return ("CoreInput", "", (675, 49, 832, 810))
+
+    monkeypatch.setattr(smt, "EMPTY_IN_HUB_YOLO_SLEEP_S", 0)
+    monkeypatch.setattr(smt, "_grab_selected_monitors", fake_grab)
+    monkeypatch.setattr(
+        smt,
+        "_uia_only_detections_for_click_window",
+        lambda *_a, **_k: [uia_leaf],
+    )
+    monkeypatch.setattr(
+        smt,
+        "_try_uia_first_unique_select",
+        lambda *_a, **_k: (uia_leaf, "hit"),
+    )
+    monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", fake_finish)
+    monkeypatch.setattr(
+        smt,
+        "_finish_deferred_ocr_pendings",
+        lambda pendings, *, timing_base: (
+            [
+                _detection_from_bbox(
+                    text_a, YOLO_CLASS_TEXT, text="系統", source="ocr"
+                ),
+                _detection_from_bbox(
+                    text_b, YOLO_CLASS_TEXT, text="天前", source="ocr"
+                ),
+            ],
+            {**timing_base, "ocr_s": 0.02},
+        ),
+    )
+    monkeypatch.setattr(smt, "_verify_geometry_candidates_with_efp", fake_verify)
+    monkeypatch.setattr(smt, "_probe_efp_leaf_at", fake_probe)
+    monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
+
+    fallback = YoloOcrMoveFallback(
+        instruction="（YOLO+OCR）將滑鼠移到「控制台」文字，並點擊滑鼠一下。",
+        hub_source="findall",
+    )
+    with bind_yolo_ocr_fallbacks([fallback]):
+        found = await smt.find_mouse_point(
+            "（UIA）將滑鼠移到「控制台 系統 12 天前」按鈕",
+            click_window={
+                "hwnd": 5,
+                "title": "搜尋",
+                "process_name": "SearchHost.exe",
+                "rect": [662, 36, 858, 884],
+            },
+            vision_mode="uia",
+            anchor_text="控制台 系統 12 天前",
+            control_type="button",
+            hub_source="findall",
+            recorded_efp_name="CoreInput",
+            recorded_efp_value="",
+        )
+    assert found is not None
+    # Must keep FindAll leaf center — not CoreInput pane [1091, 454].
+    assert found[0:2] == (uia_leaf.cx, uia_leaf.cy)
+    assert found[2]["selection_method"] == "uia_first_unique"
+    assert found[1] != 454
+
+
+@pytest.mark.asyncio
 async def test_findall_efp_soft_miss_empty_pool_keeps_uia_center(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -188,7 +188,9 @@ flowchart TD
   P2 -->|still empty| D
   P -->|no| D{recorded EFP present?}
   D -->|yes| E[Probe in-hub YOLO boxes vs Name/Value]
-  E -->|hit non-offset| F[Keep efp_fallback + padded leaf gate]
+  E -->|hit non-offset findall| Fx[Gate = FindAll intersect EFP leaf]
+  Fx --> I
+  E -->|hit non-offset other| F[Keep efp_fallback + padded leaf gate]
   F --> I
   E -->|hit offset| Os[uia_yolo_subtarget_efp / _efp_synth commit]
   E -->|miss + verified hub| G[Keep UIA center]
@@ -198,22 +200,26 @@ flowchart TD
   E -->|miss + unverified| H[Clear UIA → adopt twin → full YOLO]
   D -->|no| I{exactly one preferred_cls box in hub/gate?}
   I -->|yes| J[unique_box_skip_ocr<br/>NO OCR]
-  I -->|no 2+ boxes| K{deferred_pendings?}
+  I -->|no| K{deferred_pendings?}
   K -->|yes| Finish[Finish deferred OCR]
-  K -->|no pending + pool n>=2| Force[Re-finish capture defer_ocr=False]
+  K -->|no + need labels| Force[Force re-finish defer_ocr=False]
   Finish --> L[Match twin anchor inside hub/gate]
   Force --> L
   L -->|n==1| M[uia_yolo_subtarget or _efp_ocr]
-  L -->|else + efp_fallback| N[uia_yolo_subtarget_efp]
+  L -->|else + in-gate efp| N[uia_yolo_subtarget_efp]
+  L -->|else findall| G
   L -->|else| G
 ```
 
 Non-offset recorded-EFP **hit** is a **row gate**, not the click chooser:
 
 - Build a padded leaf rect (12px; fall back to padded UIA-first bbox).
+- **`hub_source=findall`:** gate = **intersection(FindAll hub, EFP leaf)** (optional 12px pad on the intersection only). Never substitute `pad(FindAll)` alone. Empty intersection → no EFP gate; clear pane fallback; OCR/unique inside FindAll hub.
+- Keep EFP pool fallback only when its center lies inside that gate (drops oversized parent panes like `CoreInput`).
 - Still run unique-box / OCR for the twin anchor **inside that gate**.
 - Unique OCR/icon match → `uia_yolo_subtarget_efp_ocr`.
-- Not unique → fall back to the Name/Value pool det (`uia_yolo_subtarget_efp`) so Explorer-style pane disambiguation still works.
+- Not unique → after OCR has finished, fall back to the Name/Value pool det (`uia_yolo_subtarget_efp`) when still in-gate; on findall hubs prefer **FindAll center** over an out-of-hub pane det.
+- **Ensure OCR** before EFP `ocr_miss` when unique-box is impossible and preferred twin needs labels (finish deferred pending, or force re-finish when pending is missing).
 - Offset / synth empty-space clicks still commit EFP immediately.
 
 ### Empty in-hub YOLO retry (paint lag)

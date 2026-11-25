@@ -17,7 +17,9 @@ from cua_mcp.select_mouse_target import (
     _efp_gate_required_for_hub,
     _efp_name_value_matches,
     _filter_yolo_for_near_synth_pool,
+    _findall_efp_intersect_gate,
     _findall_pool_near_synth,
+    _intersect_bbox_xywh,
     _keep_uia_first_on_subtarget_efp_soft_miss,
     _label_similarity,
     _leaf_bbox_contains_point,
@@ -32,6 +34,7 @@ from cua_mcp.select_mouse_target import (
     _scan_efp_neighbors_for_name,
     _should_run_constellation_efp,
     _subtarget_hub_for_efp_gate,
+    _subtarget_must_ocr_before_efp_fallback,
     _subtarget_should_force_ocr_finish,
     _subtarget_yolo_boxes_in_hub,
     _try_uia_first_unique_select,
@@ -1904,6 +1907,123 @@ def test_pad_bbox_and_efp_gate_hub() -> None:
         leaf_bbox=None, uia_hub=uia_hub, pad=12
     )
     assert gate_fallback.bbox == (216, 96, 149, 48)
+
+
+def test_intersect_bbox_xywh_cases() -> None:
+    assert _intersect_bbox_xywh((10, 10, 100, 50), (10, 10, 100, 50)) == (
+        10,
+        10,
+        100,
+        50,
+    )
+    # FindAll button contained in CoreInput pane → intersection = button.
+    findall = (697, 114, 788, 56)
+    core = (675, 49, 832, 810)
+    assert _intersect_bbox_xywh(findall, core) == findall
+    # Partial overlap.
+    assert _intersect_bbox_xywh((0, 0, 50, 50), (25, 25, 50, 50)) == (
+        25,
+        25,
+        25,
+        25,
+    )
+    assert _intersect_bbox_xywh((0, 0, 10, 10), (20, 20, 10, 10)) is None
+
+
+def test_findall_efp_intersect_gate_clears_pane_fallback() -> None:
+    findall = UiDetection(
+        bbox=(697, 114, 788, 56),
+        cx=1091,
+        cy=142,
+        class_id=YOLO_CLASS_TEXT,
+        class_name="text",
+        text="控制台 系統 12 天前",
+        source="uia",
+    )
+    pane = UiDetection(
+        bbox=(675, 49, 832, 810),
+        cx=1091,
+        cy=454,
+        class_id=YOLO_CLASS_TEXT,
+        class_name="text",
+        text="CoreInput",
+        source="uia",
+    )
+    gate, kept = _findall_efp_intersect_gate(
+        leaf_bbox=pane.bbox,
+        uia_hub=findall,
+        efp_fallback=pane,
+        pad=12,
+    )
+    assert gate is not None
+    # Padded intersection ≈ padded FindAll button, not full pane.
+    assert gate.bbox == _pad_bbox_xywh(findall.bbox, 12)
+    assert gate.bbox[2] < 900
+    assert gate.bbox[3] < 100
+    # Pane center is outside the intersection gate → fallback cleared.
+    assert kept is None
+
+
+def test_findall_efp_intersect_gate_empty_clears_all() -> None:
+    findall = UiDetection(
+        bbox=(0, 0, 40, 20),
+        cx=20,
+        cy=10,
+        class_id=YOLO_CLASS_TEXT,
+        class_name="text",
+        source="uia",
+    )
+    pane = UiDetection(
+        bbox=(100, 100, 50, 50),
+        cx=125,
+        cy=125,
+        class_id=YOLO_CLASS_TEXT,
+        class_name="text",
+        source="uia",
+    )
+    gate, kept = _findall_efp_intersect_gate(
+        leaf_bbox=pane.bbox,
+        uia_hub=findall,
+        efp_fallback=pane,
+    )
+    assert gate is None
+    assert kept is None
+
+
+def test_subtarget_must_ocr_before_efp_fallback() -> None:
+    assert (
+        _subtarget_must_ocr_before_efp_fallback(
+            preferred_cls=YOLO_CLASS_TEXT,
+            unique_box=None,
+            efp_fallback=_det(100, 100, text="CoreInput"),
+            pending_count=0,
+            in_hub_count=0,
+            ocr_already_finished=False,
+        )
+        is True
+    )
+    assert (
+        _subtarget_must_ocr_before_efp_fallback(
+            preferred_cls=YOLO_CLASS_TEXT,
+            unique_box=None,
+            efp_fallback=None,
+            pending_count=0,
+            in_hub_count=1,
+            ocr_already_finished=False,
+        )
+        is True
+    )
+    assert (
+        _subtarget_must_ocr_before_efp_fallback(
+            preferred_cls=YOLO_CLASS_TEXT,
+            unique_box=None,
+            efp_fallback=_det(100, 100),
+            pending_count=0,
+            in_hub_count=3,
+            ocr_already_finished=True,
+        )
+        is False
+    )
 
 
 def test_efp_gate_ocr_picks_expand_node_not_nearer_folder() -> None:

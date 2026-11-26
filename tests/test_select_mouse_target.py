@@ -6699,6 +6699,85 @@ def test_try_uia_first_snapshot_hit_skips_bring_into_view() -> None:
     assert bring_calls == []
 
 
+def test_try_uia_first_bring_into_view_skips_mismatched_efp_value() -> None:
+    """Details-cell EFP Value must not filter list_item Name recovery."""
+    from cua_mcp.select_mouse_target import _try_uia_first_unique_select
+    from src.common.nearby_side import normalize_nearby_hints
+    from src.recorder.uia_input_boxes import _UIA_LISTITEM_CONTROL_TYPE_ID
+
+    snapshot = [
+        _detection_from_bbox(
+            (10, 10, 40, 16), YOLO_CLASS_TEXT, text="組織圖", source="uia"
+        ),
+    ]
+    refreshed = (400, 500, 120, 24)
+    bring_calls: list[tuple[str, str, int | None]] = []
+
+    def fake_bring(
+        name: str, value: str, control_type_id: int | None
+    ) -> tuple[tuple[int, int, int, int], str, str, str]:
+        bring_calls.append((name, value, control_type_id))
+        return (refreshed, "活頁簿1.xlsx", "", "list_item")
+
+    chosen, reason = _try_uia_first_unique_select(
+        snapshot,
+        anchor="活頁簿1.xlsx",
+        nearby_hints=normalize_nearby_hints([]),
+        nearby_labels=[],
+        nearby_phrases=[],
+        filter_by_control_type=True,
+        control_type_token="list_item",
+        recorded_anchor=True,
+        recorded_efp_name="名稱",
+        recorded_efp_value="活頁簿1.xlsx",
+        bring_into_view_fn=fake_bring,
+    )
+    assert reason == "name_findall_hit"
+    assert chosen is not None
+    assert chosen.bbox == refreshed
+    assert bring_calls == [
+        ("活頁簿1.xlsx", "", _UIA_LISTITEM_CONTROL_TYPE_ID)
+    ]
+
+
+def test_try_uia_first_bring_into_view_keeps_matching_efp_value() -> None:
+    """When EFP Name equals hub Name, borrow EFP Value for disambiguation."""
+    from cua_mcp.select_mouse_target import _try_uia_first_unique_select
+    from src.common.nearby_side import normalize_nearby_hints
+
+    snapshot = [
+        _detection_from_bbox(
+            (10, 10, 40, 16), YOLO_CLASS_TEXT, text="組織圖", source="uia"
+        ),
+    ]
+    refreshed = (228, 108, 125, 24)
+    bring_calls: list[tuple[str, str, int | None]] = []
+
+    def fake_bring(
+        name: str, value: str, control_type_id: int | None
+    ) -> tuple[tuple[int, int, int, int], str, str, str]:
+        bring_calls.append((name, value, control_type_id))
+        return (refreshed, "龜速的網域 (3)", "1", "tree_item")
+
+    chosen, reason = _try_uia_first_unique_select(
+        snapshot,
+        anchor="龜速的網域 (3)",
+        nearby_hints=normalize_nearby_hints([]),
+        nearby_labels=[],
+        nearby_phrases=[],
+        filter_by_control_type=True,
+        control_type_token="text",
+        recorded_anchor=True,
+        recorded_efp_name="龜速的網域 (3)",
+        recorded_efp_value="1",
+        bring_into_view_fn=fake_bring,
+    )
+    assert reason == "name_findall_hit"
+    assert chosen is not None
+    assert chosen.bbox == refreshed
+    assert bring_calls == [("龜速的網域 (3)", "1", None)]
+
+
 def test_try_uia_first_name_findall_duplicate_stays_not_unique() -> None:
     """Name FindAll must not silent-pick the first of two same-Name hits."""
     from cua_mcp.select_mouse_target import _try_uia_first_unique_select

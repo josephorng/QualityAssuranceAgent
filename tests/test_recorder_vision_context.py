@@ -47,6 +47,7 @@ from src.recorder.vision_context import (
     owning_scrollbar_screen_xyxy,
     press_scrollbar_screen_xyxy,
     recording_uia_detections_sufficient,
+    recording_uia_findall_hub_label_at_point,
     recording_uia_skip_reason,
     recording_uia_snapshot_ready_at_point,
     resolve_event_screenshot_path,
@@ -1600,6 +1601,34 @@ def test_recording_uia_snapshot_ready_at_point_list_items() -> None:
     )
     # Far from every list item: still UIA-ready via unique nearest-hub synth.
     assert recording_uia_snapshot_ready_at_point(snapshot, screen_xy=(10, 10))
+
+
+def test_recording_uia_findall_hub_label_prefers_nested_leaf() -> None:
+    """LED FA / analysis hub: smaller covering leaf beats larger parent tile."""
+    snapshot = {
+        "window": [500, 100, 800, 900],
+        "inputs": [],
+        "scrollbars": [],
+        "texts": [
+            {
+                "bbox": [872, 507, 1092, 791],
+                "text": "Top apps",
+                "control_type": "hyperlink",
+            },
+            {
+                "bbox": [882, 559, 996, 670],
+                "text": "Launch 檔案總管",
+                "control_type": "hyperlink",
+            },
+        ],
+    }
+    assert (
+        recording_uia_findall_hub_label_at_point(
+            snapshot, screen_xy=(942, 626)
+        )
+        == "Launch 檔案總管"
+    )
+    assert recording_uia_findall_hub_label_at_point(None, screen_xy=(942, 626)) == ""
 
 
 def test_recording_uia_snapshot_ready_at_point_empty_texts() -> None:

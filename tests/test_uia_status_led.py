@@ -1037,7 +1037,7 @@ def test_efp_payload_looks_like_scrollbar() -> None:
     )
 
 
-def test_findall_cover_label_at_cursor_prefers_shortest() -> None:
+def test_findall_cover_label_at_cursor_prefers_analysis_hub() -> None:
     session = RecordingSession(runs_root=None)  # type: ignore[arg-type]
     snap = {
         "hwnd": 1,
@@ -1045,17 +1045,25 @@ def test_findall_cover_label_at_cursor_prefers_shortest() -> None:
         "inputs": [],
         "scrollbars": [],
         "texts": [
-            # Longer host chrome still covers the point.
-            {"bbox": [0, 0, 300, 80], "text": "Quick access navigation"},
-            # Shortest covering leaf wins for the LED strip.
-            {"bbox": [10, 5, 100, 25], "text": "文件"},
+            # Larger parent tile also covers the point (shorter string).
+            {
+                "bbox": [0, 0, 300, 200],
+                "text": "Top apps",
+                "control_type": "hyperlink",
+            },
+            # Smaller nested leaf — same pick as analysis hub_source=findall.
+            {
+                "bbox": [10, 5, 100, 80],
+                "text": "Launch 檔案總管",
+                "control_type": "hyperlink",
+            },
         ],
     }
     with (
         patch.object(session, "_click_window_payload_at", return_value=object()),
         patch.object(session, "_cached_uia_before", return_value=snap),
     ):
-        assert session._findall_cover_label_at_cursor((20, 10)) == "文件"
+        assert session._findall_cover_label_at_cursor((20, 10)) == "Launch 檔案總管"
     with (
         patch.object(session, "_click_window_payload_at", return_value=object()),
         patch.object(session, "_cached_uia_before", return_value=None),

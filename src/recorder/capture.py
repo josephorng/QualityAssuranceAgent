@@ -2015,11 +2015,13 @@ class RecordingSession:
     def _findall_cover_label_at_cursor(
         self, cursor_xy: tuple[int, int] | None
     ) -> str:
-        """Usable FindAll leaf text covering ``cursor_xy``, or ``""``.
+        """FindAll hub text analysis would pick at ``cursor_xy``, or ``""``.
 
-        Prefers the shortest covering label (usually the most specific leaf).
-        Must not be called while holding ``_lock`` (cache lookup takes the lock).
-        Never raises — LED callers treat miss as empty.
+        Same covering primary as analysis ``_pick_uia_click_primary`` (nested
+        leaf over larger parent), so the LED FA strip matches
+        ``hub_source=findall`` anchors. Must not be called while holding
+        ``_lock`` (cache lookup takes the lock). Never raises — LED callers
+        treat miss as empty.
         """
         if cursor_xy is None:
             return ""
@@ -2031,16 +2033,14 @@ class RecordingSession:
             snapshot = self._findall_led_snapshot_at_cursor((x, y))
             if not isinstance(snapshot, dict):
                 return ""
-            from src.recorder.uia_replay_repair import snapshot_usable_covering_labels
+            from src.recorder.vision_context import (
+                recording_uia_findall_hub_label_at_point,
+            )
 
-            covering = [
-                str(label).strip()
-                for label in snapshot_usable_covering_labels(snapshot, (x, y))
-                if str(label).strip()
-            ]
-            if not covering:
-                return ""
-            return min(covering, key=lambda label: (len(label), label))
+            return recording_uia_findall_hub_label_at_point(
+                snapshot,
+                screen_xy=(x, y),
+            )
         except Exception:
             return ""
 

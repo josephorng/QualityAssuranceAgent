@@ -4243,20 +4243,21 @@ def recording_uia_detections_sufficient(
     )
 
 
-def recording_uia_snapshot_ready_at_point(
+def _recording_uia_detections_at_screen_xy(
     snapshot: dict[str, Any] | None,
     *,
     screen_xy: tuple[int, int],
     monitor_offset: tuple[int, int] | None = None,
-) -> bool:
-    """True when this FindAll snapshot would record a UIA vision path at ``screen_xy``.
+) -> tuple[list[UiDetection], int, int] | None:
+    """Build FindAll detections + image-local click for a screen point.
 
-    Uses the same ``recording_uia_skip_reason`` gate as analysis. Snapshot boxes
-    are screen xyxy (window is screen xywh). When ``monitor_offset`` is omitted,
-    the snapshot window origin is used so idle overlay checks need no screenshot.
+    Same snapshot→detection path as analysis readiness. Returns
+    ``(detections, local_x, local_y)``, or ``None`` when ``snapshot`` is unusable.
+    Snapshot boxes are screen xyxy (window is screen xywh). When
+    ``monitor_offset`` is omitted, the snapshot window origin is used.
     """
     if not isinstance(snapshot, dict):
-        return False
+        return None
     window_raw = snapshot.get("window")
     if monitor_offset is None:
         if isinstance(window_raw, (list, tuple)) and len(window_raw) == 4:
@@ -4305,11 +4306,65 @@ def recording_uia_snapshot_ready_at_point(
         window_screen_xywh=None,
     )
     detections = _detections_from_uia_prefetched(prefetched)
+    return detections, local_x, local_y
+
+
+def recording_uia_snapshot_ready_at_point(
+    snapshot: dict[str, Any] | None,
+    *,
+    screen_xy: tuple[int, int],
+    monitor_offset: tuple[int, int] | None = None,
+) -> bool:
+    """True when this FindAll snapshot would record a UIA vision path at ``screen_xy``.
+
+    Uses the same ``recording_uia_skip_reason`` gate as analysis. Snapshot boxes
+    are screen xyxy (window is screen xywh). When ``monitor_offset`` is omitted,
+    the snapshot window origin is used so idle overlay checks need no screenshot.
+    """
+    built = _recording_uia_detections_at_screen_xy(
+        snapshot,
+        screen_xy=screen_xy,
+        monitor_offset=monitor_offset,
+    )
+    if built is None:
+        return False
+    detections, local_x, local_y = built
     return recording_uia_detections_sufficient(
         detections,
         local_x=local_x,
         local_y=local_y,
     )
+
+
+def recording_uia_findall_hub_label_at_point(
+    snapshot: dict[str, Any] | None,
+    *,
+    screen_xy: tuple[int, int],
+    monitor_offset: tuple[int, int] | None = None,
+) -> str:
+    """FindAll hub text analysis would pick at ``screen_xy``, or ``\"\"``.
+
+    Uses the same covering primary as ``_pick_uia_click_primary`` (FindAll
+    detections only — no press EFP injection). Recording LED FA strip calls
+    this so nested leaves (e.g. ``Launch 檔案總管``) win over larger parents
+    (``Top apps``) the same way analysis sets ``hub_source=findall``.
+    """
+    built = _recording_uia_detections_at_screen_xy(
+        snapshot,
+        screen_xy=screen_xy,
+        monitor_offset=monitor_offset,
+    )
+    if built is None:
+        return ""
+    detections, local_x, local_y = built
+    primary = _pick_uia_click_primary(
+        detections,
+        point_x=local_x,
+        point_y=local_y,
+    )
+    if primary is None or not _is_usable_uia_text_detection(primary):
+        return ""
+    return str(primary.text or "").strip()
 
 
 def mark_recorded_side_repaired_to_uia(

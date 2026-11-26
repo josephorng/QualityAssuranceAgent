@@ -14,9 +14,21 @@ from src.common.monitor_prompt import (
 )
 from src.common.settings import (
     BACKEND_PRESETS,
+    UIA_FINDALL_MAX_HITS_DEFAULT,
+    UIA_FINDALL_MAX_HITS_MAX,
+    UIA_FINDALL_MAX_HITS_MIN,
+    UIA_FINDALL_MAX_NODES_DEFAULT,
+    UIA_FINDALL_MAX_NODES_MAX,
+    UIA_FINDALL_MAX_NODES_MIN,
+    UIA_FINDALL_MAX_SECONDS_DEFAULT,
+    UIA_FINDALL_MAX_SECONDS_MAX,
+    UIA_FINDALL_MAX_SECONDS_MIN,
     VISION_BACKEND_PRESETS,
     canonicalize_llm_backend,
     canonicalize_vision_backend,
+    clamp_uia_findall_max_hits,
+    clamp_uia_findall_max_nodes,
+    clamp_uia_findall_max_seconds,
     load_agent_settings_dict,
     preset_for_backend,
     preset_for_vision_backend,
@@ -132,11 +144,12 @@ def open_agent_settings_dialog(
     inner = ctk.CTkFrame(dialog, fg_color="transparent")
     inner.pack(fill="both", expand=True, padx=22, pady=22)
 
-    tabs = ctk.CTkTabview(inner, width=560, height=340)
+    tabs = ctk.CTkTabview(inner, width=560, height=380)
     tabs.pack(fill="both", expand=True, pady=(0, 12))
     tab_agent = tabs.add("代理設定")
     tab_script = tabs.add("腳本編輯器")
     tab_monitor = tabs.add("螢幕畫面")
+    tab_findall = tabs.add("FindAll 走訪")
 
     backend_var = ctk.StringVar(value=_backend_to_label(backend_initial))
     vision_var = ctk.StringVar(value=_vision_backend_to_label(vision_initial))
@@ -348,6 +361,79 @@ def open_agent_settings_dialog(
         text_color=("gray30", "gray70"),
     ).pack(anchor="w", pady=(4, 0))
 
+    # ── Tab: FindAll 走訪 ───────────────────────────────────────────
+    ctk.CTkLabel(
+        tab_findall,
+        text=(
+            "預算化 ControlView 走訪在命中數、節點數、時間三者中最先達到的上限停止。"
+            "較慢的 VM 可提高時間並降低命中／節點以減輕負擔。"
+        ),
+        font=ctk.CTkFont(size=12),
+        text_color=("gray30", "gray70"),
+        wraplength=500,
+        justify="left",
+        anchor="w",
+    ).pack(anchor="w", pady=(8, 12))
+
+    initial_findall_seconds = clamp_uia_findall_max_seconds(
+        initial.get("uia_findall_max_seconds", UIA_FINDALL_MAX_SECONDS_DEFAULT)
+    )
+    initial_findall_hits = clamp_uia_findall_max_hits(
+        initial.get("uia_findall_max_hits", UIA_FINDALL_MAX_HITS_DEFAULT)
+    )
+    initial_findall_nodes = clamp_uia_findall_max_nodes(
+        initial.get("uia_findall_max_nodes", UIA_FINDALL_MAX_NODES_DEFAULT)
+    )
+
+    findall_seconds_var = ctk.StringVar(value=str(initial_findall_seconds))
+    findall_hits_var = ctk.StringVar(value=str(initial_findall_hits))
+    findall_nodes_var = ctk.StringVar(value=str(initial_findall_nodes))
+
+    def _findall_entry_row(
+        parent: Any,
+        *,
+        label: str,
+        variable: Any,
+        hint: str,
+    ) -> None:
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", pady=(0, 10))
+        ctk.CTkLabel(row, text=label, width=140, anchor="w").pack(side="left")
+        ctk.CTkEntry(row, textvariable=variable, width=120).pack(side="left")
+        ctk.CTkLabel(
+            row,
+            text=hint,
+            font=ctk.CTkFont(size=11),
+            text_color=("gray40", "gray60"),
+            anchor="w",
+        ).pack(side="left", padx=(10, 0))
+
+    _findall_entry_row(
+        tab_findall,
+        label="最長時間（秒）",
+        variable=findall_seconds_var,
+        hint=f"{UIA_FINDALL_MAX_SECONDS_MIN:g}–{UIA_FINDALL_MAX_SECONDS_MAX:g}",
+    )
+    _findall_entry_row(
+        tab_findall,
+        label="最大命中數",
+        variable=findall_hits_var,
+        hint=f"{UIA_FINDALL_MAX_HITS_MIN}–{UIA_FINDALL_MAX_HITS_MAX}",
+    )
+    _findall_entry_row(
+        tab_findall,
+        label="最大節點數",
+        variable=findall_nodes_var,
+        hint=f"{UIA_FINDALL_MAX_NODES_MIN}–{UIA_FINDALL_MAX_NODES_MAX}",
+    )
+
+    ctk.CTkLabel(
+        tab_findall,
+        text="儲存後下一次 FindAll 即生效（無需重啟）。",
+        font=ctk.CTkFont(size=12),
+        text_color=("gray30", "gray70"),
+    ).pack(anchor="w", pady=(4, 0))
+
     btn_row = ctk.CTkFrame(inner, fg_color="transparent")
     btn_row.pack(fill="x")
 
@@ -365,6 +451,15 @@ def open_agent_settings_dialog(
             vision_backend = _label_to_vision_backend(vision_var.get())
             payload.update(preset_for_vision_backend(vision_backend))
             payload["vision_backend"] = vision_backend
+            payload["uia_findall_max_seconds"] = clamp_uia_findall_max_seconds(
+                findall_seconds_var.get()
+            )
+            payload["uia_findall_max_hits"] = clamp_uia_findall_max_hits(
+                findall_hits_var.get()
+            )
+            payload["uia_findall_max_nodes"] = clamp_uia_findall_max_nodes(
+                findall_nodes_var.get()
+            )
             validated = validate_agent_settings_dict(payload)
             save_agent_settings_dict(validated)
         except ValueError as e:

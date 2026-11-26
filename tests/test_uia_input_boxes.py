@@ -1481,6 +1481,137 @@ def test_default_walk_budgets_match_short_limits() -> None:
     assert _SNAPSHOT_UIA_ENRICH_TIMEOUT_S == 15.0
 
 
+def test_default_walk_budgets_reads_agent_settings(monkeypatch) -> None:
+    from src.recorder.uia_input_boxes import default_walk_budgets
+
+    monkeypatch.setattr(
+        "src.common.settings.findall_walk_settings",
+        lambda: {"max_seconds": 10.0, "max_hits": 350, "max_nodes": 2500},
+    )
+    budgets = default_walk_budgets()
+    assert budgets.max_seconds == 10.0
+    assert budgets.max_hits == 350
+    assert budgets.max_nodes == 2500
+
+
+def test_hover_walk_budgets_cap_below_settle_settings(monkeypatch) -> None:
+    from src.recorder.uia_input_boxes import (
+        _HOVER_WALK_MAX_HITS,
+        _HOVER_WALK_MAX_NODES,
+        _HOVER_WALK_MAX_SECONDS,
+        hover_walk_budgets,
+    )
+
+    monkeypatch.setattr(
+        "src.common.settings.findall_walk_settings",
+        lambda: {"max_seconds": 30.0, "max_hits": 2000, "max_nodes": 20000},
+    )
+    budgets = hover_walk_budgets()
+    assert budgets.max_hits == _HOVER_WALK_MAX_HITS
+    assert budgets.max_nodes == _HOVER_WALK_MAX_NODES
+    assert budgets.max_seconds == _HOVER_WALK_MAX_SECONDS
+
+
+def test_hover_walk_budgets_respect_lower_settle_settings(monkeypatch) -> None:
+    from src.recorder.uia_input_boxes import hover_walk_budgets
+
+    monkeypatch.setattr(
+        "src.common.settings.findall_walk_settings",
+        lambda: {"max_seconds": 1.5, "max_hits": 80, "max_nodes": 500},
+    )
+    budgets = hover_walk_budgets()
+    assert budgets.max_hits == 80
+    assert budgets.max_nodes == 500
+    assert budgets.max_seconds == 1.5
+
+
+def test_cursor_roi_clip_xyxy_clamps_to_root() -> None:
+    from src.recorder.uia_input_boxes import cursor_roi_clip_xyxy
+
+    roi = cursor_roi_clip_xyxy(
+        (100, 100),
+        half_px=50,
+        clamp_to=(80, 80, 120, 120),
+    )
+    assert roi == (80, 80, 120, 120)
+
+
+def test_budgeted_priority_walk_skips_children_outside_clip() -> None:
+    from src.recorder.uia_input_boxes import WalkBudgets, run_budgeted_priority_walk
+
+    boxes = {
+        0: (0, 0, 20, 20),
+        1: (5, 5, 10, 10),  # inside clip
+        2: (500, 500, 510, 510),  # outside clip — should not enqueue
+    }
+    children = {0: [1, 2], 1: [], 2: []}
+    matched: list[int] = []
+    released: list[int] = []
+
+    result = run_budgeted_priority_walk(
+        [0],
+        node_bbox=lambda n: boxes[n],
+        node_matches=lambda n: n != 0,
+        on_match=lambda n: matched.append(n),
+        node_children=lambda n: list(children[n]),
+        release_node=lambda n: released.append(n),
+        clip=(0, 0, 50, 50),
+        cursor_xy=(8, 8),
+        budgets=WalkBudgets(
+            max_hits=50,
+            max_nodes=50,
+            max_seconds=5.0,
+            max_children_per_parent=80,
+        ),
+    )
+    assert result.stop_reason == "complete"
+    assert matched == [1]
+    assert 2 in released
+    assert 2 not in matched
+
+
+def test_snapshot_uia_hover_subtree_uses_hover_budgets_and_roi(monkeypatch) -> None:
+    from src.recorder import uia_input_boxes as uia
+
+    captured: dict = {}
+
+    def _fake_snap(hwnd, **kwargs):
+        captured.update(kwargs)
+        captured["hwnd"] = hwnd
+        return {"window": [0, 0, 10, 10], "inputs": [], "scrollbars": [], "texts": []}
+
+    monkeypatch.setattr(uia, "snapshot_uia_screen", _fake_snap)
+    monkeypatch.setattr(
+        uia,
+        "hover_walk_budgets",
+        lambda: uia.WalkBudgets(
+            max_hits=120, max_nodes=1000, max_seconds=2.0, max_children_per_parent=80
+        ),
+    )
+    out = uia.snapshot_uia_hover_subtree(55, 100, 200)
+    assert out is not None
+    assert captured["hwnd"] == 55
+    assert captured["cursor_xy"] == (100, 200)
+    assert captured["wait"] is False
+    assert captured["cursor_roi_half_px"] == uia._HOVER_CURSOR_ROI_HALF_PX
+    assert captured["budgets"].max_hits == 120
+    assert captured["budgets"].max_nodes == 1000
+    assert captured["budgets"].max_seconds == 2.0
+
+
+def test_snapshot_uia_timeouts_derived_from_budgets() -> None:
+    from src.recorder.uia_input_boxes import (
+        WalkBudgets,
+        snapshot_uia_timeouts_for_budgets,
+    )
+
+    budgets = WalkBudgets(max_seconds=10.0, max_hits=300, max_nodes=2000)
+    assert snapshot_uia_timeouts_for_budgets(budgets, enrich=False) == 10.5
+    assert snapshot_uia_timeouts_for_budgets(budgets, enrich=True) == 20.0
+    short = WalkBudgets(max_seconds=5.0, max_hits=500, max_nodes=4000)
+    assert snapshot_uia_timeouts_for_budgets(short, enrich=True) == 15.0
+
+
 def test_snapshot_uia_screen_wait_false_skips_when_busy() -> None:
     from src.recorder import uia_input_boxes as uia
 

@@ -5,6 +5,11 @@ from src.common.settings import (
     apply_startup_vllm_host_probe,
     canonicalize_llm_backend,
     canonicalize_vision_backend,
+    clamp_uia_findall_max_hits,
+    clamp_uia_findall_max_nodes,
+    clamp_uia_findall_max_seconds,
+    default_agent_settings_dict,
+    findall_walk_settings,
     normalize_agent_settings_dict,
     probe_llm_backend,
     probe_vision_backend,
@@ -244,3 +249,87 @@ def test_load_settings_runs_dir_is_absolute(monkeypatch) -> None:
     assert Path(settings.recordings_dir) == (
         application_root() / "recordings"
     ).resolve()
+
+
+def test_default_agent_settings_include_findall_budgets() -> None:
+    data = default_agent_settings_dict()
+    assert data["uia_findall_max_seconds"] == 5.0
+    assert data["uia_findall_max_hits"] == 500
+    assert data["uia_findall_max_nodes"] == 4000
+
+
+def test_normalize_clamps_findall_budgets() -> None:
+    out = normalize_agent_settings_dict(
+        {
+            "llm_backend": "vllm_server",
+            "uia_findall_max_seconds": 999,
+            "uia_findall_max_hits": 1,
+            "uia_findall_max_nodes": 50_000,
+        }
+    )
+    assert out["uia_findall_max_seconds"] == 60.0
+    assert out["uia_findall_max_hits"] == 50
+    assert out["uia_findall_max_nodes"] == 20_000
+
+
+def test_normalize_preserves_findall_budgets() -> None:
+    out = normalize_agent_settings_dict(
+        {
+            "llm_backend": "vllm_server",
+            "uia_findall_max_seconds": 10,
+            "uia_findall_max_hits": 350,
+            "uia_findall_max_nodes": 2500,
+        }
+    )
+    assert out["uia_findall_max_seconds"] == 10.0
+    assert out["uia_findall_max_hits"] == 350
+    assert out["uia_findall_max_nodes"] == 2500
+
+
+def test_clamp_uia_findall_helpers() -> None:
+    assert clamp_uia_findall_max_seconds("nope") == 5.0
+    assert clamp_uia_findall_max_hits("x") == 500
+    assert clamp_uia_findall_max_nodes(None) == 4000
+
+
+def test_findall_walk_settings_reads_agent_dict(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.common.settings.load_agent_settings_dict",
+        lambda: {
+            "llm_backend": "vllm_server",
+            "brain_lm": "google/gemma-4-26B-A4B-it",
+            "ollama_host": "http://192.168.4.134:8000",
+            "vision_backend": "triton_192_168_0_17",
+            "triton_http_url": "http://192.168.0.17:9000",
+            "uia_findall_max_seconds": 8.0,
+            "uia_findall_max_hits": 300,
+            "uia_findall_max_nodes": 2000,
+        },
+    )
+    cfg = findall_walk_settings()
+    assert cfg == {"max_seconds": 8.0, "max_hits": 300, "max_nodes": 2000}
+
+
+def test_overlay_findall_keys_from_json(tmp_path: Path, monkeypatch) -> None:
+    from src.common.io_utils import write_json
+    from src.common.settings import load_agent_settings_dict
+
+    path = tmp_path / "agent_settings.json"
+    write_json(
+        path,
+        {
+            "llm_backend": "vllm_server",
+            "brain_lm": "google/gemma-4-26B-A4B-it",
+            "ollama_host": "http://192.168.4.134:8000",
+            "vision_backend": "triton_192_168_0_17",
+            "triton_http_url": "http://192.168.0.17:9000",
+            "uia_findall_max_seconds": 12,
+            "uia_findall_max_hits": 400,
+            "uia_findall_max_nodes": 2200,
+        },
+    )
+    monkeypatch.setattr("src.common.settings.agent_settings_path", lambda: path)
+    data = load_agent_settings_dict()
+    assert data["uia_findall_max_seconds"] == 12.0
+    assert data["uia_findall_max_hits"] == 400
+    assert data["uia_findall_max_nodes"] == 2200

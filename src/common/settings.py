@@ -17,11 +17,35 @@ AGENT_SETTINGS_KEYS = (
     "ollama_host",
     "vision_backend",
     "triton_http_url",
+    "uia_findall_max_seconds",
+    "uia_findall_max_hits",
+    "uia_findall_max_nodes",
 )
 
 AGENT_SETTINGS_SCHEMA: tuple[tuple[str, str, str], ...] = (
     ("llm_backend", "LLM 後端", "option"),
     ("vision_backend", "Vision 後端", "option"),
+    ("uia_findall_max_seconds", "FindAll 最長時間（秒）", "number"),
+    ("uia_findall_max_hits", "FindAll 最大命中數", "number"),
+    ("uia_findall_max_nodes", "FindAll 最大節點數", "number"),
+)
+
+# Recording FindAll / budgeted ControlView walk (agent_settings.json).
+UIA_FINDALL_MAX_SECONDS_DEFAULT = 5.0
+UIA_FINDALL_MAX_SECONDS_MIN = 1.0
+UIA_FINDALL_MAX_SECONDS_MAX = 60.0
+UIA_FINDALL_MAX_HITS_DEFAULT = 500
+UIA_FINDALL_MAX_HITS_MIN = 50
+UIA_FINDALL_MAX_HITS_MAX = 2000
+UIA_FINDALL_MAX_NODES_DEFAULT = 4000
+UIA_FINDALL_MAX_NODES_MIN = 200
+UIA_FINDALL_MAX_NODES_MAX = 20_000
+_UIA_FINDALL_NUMERIC_KEYS = frozenset(
+    {
+        "uia_findall_max_seconds",
+        "uia_findall_max_hits",
+        "uia_findall_max_nodes",
+    }
 )
 
 VISION_BACKEND_CHOICES = frozenset({"triton_192_168_0_17"})
@@ -242,12 +266,53 @@ def preset_for_backend(backend: str) -> dict[str, Any]:
     return dict(BACKEND_PRESETS[key])
 
 
+def clamp_uia_findall_max_seconds(value: Any) -> float:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        seconds = float(UIA_FINDALL_MAX_SECONDS_DEFAULT)
+    if seconds != seconds:  # NaN
+        seconds = float(UIA_FINDALL_MAX_SECONDS_DEFAULT)
+    return max(
+        float(UIA_FINDALL_MAX_SECONDS_MIN),
+        min(float(UIA_FINDALL_MAX_SECONDS_MAX), float(seconds)),
+    )
+
+
+def clamp_uia_findall_max_hits(value: Any) -> int:
+    try:
+        hits = int(round(float(value)))
+    except (TypeError, ValueError):
+        hits = int(UIA_FINDALL_MAX_HITS_DEFAULT)
+    return max(int(UIA_FINDALL_MAX_HITS_MIN), min(int(UIA_FINDALL_MAX_HITS_MAX), hits))
+
+
+def clamp_uia_findall_max_nodes(value: Any) -> int:
+    try:
+        nodes = int(round(float(value)))
+    except (TypeError, ValueError):
+        nodes = int(UIA_FINDALL_MAX_NODES_DEFAULT)
+    return max(
+        int(UIA_FINDALL_MAX_NODES_MIN),
+        min(int(UIA_FINDALL_MAX_NODES_MAX), nodes),
+    )
+
+
+def default_uia_findall_settings() -> dict[str, Any]:
+    return {
+        "uia_findall_max_seconds": float(UIA_FINDALL_MAX_SECONDS_DEFAULT),
+        "uia_findall_max_hits": int(UIA_FINDALL_MAX_HITS_DEFAULT),
+        "uia_findall_max_nodes": int(UIA_FINDALL_MAX_NODES_DEFAULT),
+    }
+
+
 def default_agent_settings_dict() -> dict[str, Any]:
     """Built-in defaults for agent settings (no file required)."""
     base = Settings()
     data = preset_for_backend(base.llm_backend)
     data["vision_backend"] = base.vision_backend
     data["triton_http_url"] = preset_for_vision_backend(base.vision_backend)["triton_http_url"]
+    data.update(default_uia_findall_settings())
     return data
 
 
@@ -275,6 +340,8 @@ def _overlay_agent_keys(target: dict[str, Any], raw: Any) -> dict[str, Any]:
         if key in ("llm_backend", "brain_lm", "ollama_host", "vision_backend", "triton_http_url"):
             if isinstance(value, str) and value.strip():
                 out[key] = value.strip()
+        elif key in _UIA_FINDALL_NUMERIC_KEYS:
+            out[key] = value
     if isinstance(raw, dict):
         legacy_host = raw.get("vllm_host")
         if isinstance(legacy_host, str) and legacy_host.strip():
@@ -294,7 +361,30 @@ def normalize_agent_settings_dict(data: dict[str, Any]) -> dict[str, Any]:
     vision_preset = preset_for_vision_backend(vision_key)
     out["vision_backend"] = vision_key
     out["triton_http_url"] = normalize_triton_http_url(vision_preset["triton_http_url"])
+    defaults = default_uia_findall_settings()
+    out["uia_findall_max_seconds"] = clamp_uia_findall_max_seconds(
+        data.get(
+            "uia_findall_max_seconds",
+            defaults["uia_findall_max_seconds"],
+        )
+    )
+    out["uia_findall_max_hits"] = clamp_uia_findall_max_hits(
+        data.get("uia_findall_max_hits", defaults["uia_findall_max_hits"])
+    )
+    out["uia_findall_max_nodes"] = clamp_uia_findall_max_nodes(
+        data.get("uia_findall_max_nodes", defaults["uia_findall_max_nodes"])
+    )
     return out
+
+
+def findall_walk_settings() -> dict[str, float | int]:
+    """Clamped FindAll walk budgets from agent settings (live read)."""
+    data = load_agent_settings_dict()
+    return {
+        "max_seconds": float(data["uia_findall_max_seconds"]),
+        "max_hits": int(data["uia_findall_max_hits"]),
+        "max_nodes": int(data["uia_findall_max_nodes"]),
+    }
 
 
 def vllm_host_responds(host: str, *, timeout_seconds: float = _LLM_PROBE_TIMEOUT_SECONDS) -> bool:

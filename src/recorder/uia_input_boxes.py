@@ -149,6 +149,12 @@ _VT_BSTR = 8
 # the top-level window area (or Window/Document / hwnd root).
 _HOVER_SUBTREE_AREA_FRAC = 0.15
 _HOVER_SUBTREE_MAX_CLIMB = 12
+# Hover-only caps (also min'd with agent-settings settle budgets).
+_HOVER_WALK_MAX_HITS = 120
+_HOVER_WALK_MAX_NODES = 1000
+_HOVER_WALK_MAX_SECONDS = 2.0
+# Keep / visit leaves inside this half-extent around the cursor (screen px).
+_HOVER_CURSOR_ROI_HALF_PX = 400
 
 # Budgeted ControlView walk (replaces unbounded FindAllBuildCache).
 _DEFAULT_WALK_MAX_HITS = 500
@@ -1556,6 +1562,7 @@ def _refetch_and_enrich_uia_snapshot(
     *,
     cursor_xy: tuple[int, int],
     budgets: WalkBudgets | None,
+    cursor_roi_half_px: int | None = None,
 ) -> dict[str, Any] | None:
     """One cursor-climbed FindAll refetch on EFP miss, then optional EFP ROI scan.
 
@@ -1581,6 +1588,7 @@ def _refetch_and_enrich_uia_snapshot(
                     int(hwnd),
                     cursor_xy=(cx, cy),
                     budgets=budgets,
+                    cursor_roi_half_px=cursor_roi_half_px,
                 )
             timed = attach_findall_timing(
                 refetched if isinstance(refetched, dict) else None,
@@ -2578,7 +2586,67 @@ def _use_legacy_findall() -> bool:
 
 
 def default_walk_budgets() -> WalkBudgets:
-    return WalkBudgets()
+    """Walk limits from agent settings when available; else module defaults."""
+    try:
+        from src.common.settings import findall_walk_settings
+
+        cfg = findall_walk_settings()
+        return WalkBudgets(
+            max_hits=int(cfg["max_hits"]),
+            max_nodes=int(cfg["max_nodes"]),
+            max_seconds=float(cfg["max_seconds"]),
+            max_children_per_parent=_DEFAULT_WALK_MAX_CHILDREN_PER_PARENT,
+        )
+    except Exception:
+        return WalkBudgets()
+
+
+def hover_walk_budgets() -> WalkBudgets:
+    """Tighter caps for idle hover FindAll (never above settle settings)."""
+    base = default_walk_budgets()
+    return WalkBudgets(
+        max_hits=min(int(base.max_hits), int(_HOVER_WALK_MAX_HITS)),
+        max_nodes=min(int(base.max_nodes), int(_HOVER_WALK_MAX_NODES)),
+        max_seconds=min(float(base.max_seconds), float(_HOVER_WALK_MAX_SECONDS)),
+        max_children_per_parent=int(base.max_children_per_parent),
+    )
+
+
+def cursor_roi_clip_xyxy(
+    cursor_xy: tuple[int, int],
+    *,
+    half_px: int = _HOVER_CURSOR_ROI_HALF_PX,
+    clamp_to: ScreenXyxy | None = None,
+) -> ScreenXyxy:
+    """Axis-aligned ROI around ``cursor_xy``, optionally intersected with ``clamp_to``."""
+    half = max(1, int(half_px))
+    cx, cy = int(cursor_xy[0]), int(cursor_xy[1])
+    roi: ScreenXyxy = (cx - half, cy - half, cx + half, cy + half)
+    if clamp_to is None:
+        return roi
+    left = max(int(roi[0]), int(clamp_to[0]))
+    top = max(int(roi[1]), int(clamp_to[1]))
+    right = min(int(roi[2]), int(clamp_to[2]))
+    bottom = min(int(roi[3]), int(clamp_to[3]))
+    if right <= left or bottom <= top:
+        # Degenerate intersection — keep a 1px box at the cursor clamped inside.
+        x = min(max(cx, int(clamp_to[0])), max(int(clamp_to[0]), int(clamp_to[2]) - 1))
+        y = min(max(cy, int(clamp_to[1])), max(int(clamp_to[1]), int(clamp_to[3]) - 1))
+        return (x, y, x + 1, y + 1)
+    return (left, top, right, bottom)
+
+
+def snapshot_uia_timeouts_for_budgets(
+    budgets: WalkBudgets | None,
+    *,
+    enrich: bool,
+) -> float:
+    """Outer ``uia_call`` wait derived from walk ``max_seconds``."""
+    limits = budgets or default_walk_budgets()
+    max_seconds = max(0.0, float(limits.max_seconds))
+    if enrich:
+        return max(max_seconds + 10.0, float(_SNAPSHOT_UIA_ENRICH_TIMEOUT_S))
+    return max_seconds + 0.5
 
 
 def chebyshev_distance_point_to_xyxy(
@@ -2705,8 +2773,17 @@ def run_budgeted_priority_walk(
                     continue
                 ranked: list[tuple[float, int, _TNode]] = []
                 for index, child in enumerate(children):
+                    child_box = node_bbox(child)
+                    # Skip known boxes fully outside the walk clip (hover ROI /
+                    # window). Unknown bboxes still enqueue.
+                    if (
+                        child_box is not None
+                        and _xyxy_intersection_area(child_box, clip) <= 0
+                    ):
+                        release_node(child)
+                        continue
                     child_score = walk_visit_score(
-                        node_bbox(child), clip=clip, cursor_xy=cursor_xy
+                        child_box, clip=clip, cursor_xy=cursor_xy
                     )
                     ranked.append((float(child_score), int(index), child))
                 ranked.sort(key=lambda item: (item[0], item[1]))
@@ -2928,6 +3005,7 @@ def _enumerate_via_budgeted_walk(
     automation: ctypes.c_void_p,
     cursor_xy: tuple[int, int] | None,
     budgets: WalkBudgets | None,
+    clip_xyxy: ScreenXyxy | None = None,
 ) -> tuple[list[ScreenXyxy], list[ScreenXyxy], list[LabeledScreenXyxy], list[str]]:
     empty: tuple[
         list[ScreenXyxy], list[ScreenXyxy], list[LabeledScreenXyxy], list[str]
@@ -2942,7 +3020,18 @@ def _enumerate_via_budgeted_walk(
     scrollbar_thumbs: list[ScreenXyxy] = []
     scrollbar_line_buttons: list[tuple[ScreenXyxy, str]] = []
     labeled: list[LabeledScreenXyxy] = []
-    clip = _clip_xyxy_for_root(root, int(hwnd))
+    root_clip = _clip_xyxy_for_root(root, int(hwnd))
+    if clip_xyxy is None:
+        clip = root_clip
+    else:
+        left = max(int(clip_xyxy[0]), int(root_clip[0]))
+        top = max(int(clip_xyxy[1]), int(root_clip[1]))
+        right = min(int(clip_xyxy[2]), int(root_clip[2]))
+        bottom = min(int(clip_xyxy[3]), int(root_clip[3]))
+        if right > left and bottom > top:
+            clip = (left, top, right, bottom)
+        else:
+            clip = root_clip
     try:
         seeds = _walker_children(walker, root)
 
@@ -2955,6 +3044,8 @@ def _enumerate_via_budgeted_walk(
                 return False
             box = _element_bounding_xyxy(node, cached=False)
             if box is None:
+                return False
+            if _xyxy_intersection_area(box, clip) <= 0:
                 return False
             # Thumb/line-button filters may reject; probe classify without append.
             if control_type == _UIA_THUMB_CONTROL_TYPE_ID:
@@ -2978,6 +3069,8 @@ def _enumerate_via_budgeted_walk(
             box = _element_bounding_xyxy(node, cached=False)
             control_type = _element_control_type(node, cached=False)
             if box is None or control_type is None:
+                return
+            if _xyxy_intersection_area(box, clip) <= 0:
                 return
             _classify_enumerated_element(
                 node,
@@ -3152,6 +3245,7 @@ def enumerate_edit_document_scrollbar_screen(
     automation: ctypes.c_void_p | None = None,
     cursor_xy: tuple[int, int] | None = None,
     budgets: WalkBudgets | None = None,
+    clip_xyxy: ScreenXyxy | None = None,
 ) -> tuple[list[ScreenXyxy], list[ScreenXyxy], list[LabeledScreenXyxy], list[str]]:
     """Budgeted ControlView walk (or legacy FindAll) for inputs/scrollbars/texts.
 
@@ -3161,6 +3255,7 @@ def enumerate_edit_document_scrollbar_screen(
     When ``automation`` / ``root_element`` are provided the caller owns them (not
     released here). Otherwise a top-level ``ElementFromHandle(hwnd)`` root is used.
     ``cursor_xy`` biases visit order toward the pointer when set.
+    ``clip_xyxy`` (screen xyxy) intersects the walk root clip — used by hover ROI.
     """
     empty: tuple[
         list[ScreenXyxy], list[ScreenXyxy], list[LabeledScreenXyxy], list[str]
@@ -3195,6 +3290,7 @@ def enumerate_edit_document_scrollbar_screen(
             automation=automation_ptr,
             cursor_xy=cursor_xy,
             budgets=budgets,
+            clip_xyxy=clip_xyxy,
         )
     except Exception:
         return empty
@@ -3712,8 +3808,13 @@ def _snapshot_uia_screen_impl(
     *,
     cursor_xy: tuple[int, int] | None = None,
     budgets: WalkBudgets | None = None,
+    cursor_roi_half_px: int | None = None,
 ) -> dict[str, object] | None:
-    """Climb from cursor when given, then budgeted walk under the local root."""
+    """Climb from cursor when given, then budgeted walk under the local root.
+
+    When ``cursor_roi_half_px`` is set with ``cursor_xy``, the walk clip is
+    intersected with a cursor-centered ROI (hover warm path).
+    """
     if os.name != "nt" or not int(hwnd or 0):
         return None
     ole32, initialized_here = _coinitialize_uia()
@@ -3748,6 +3849,14 @@ def _snapshot_uia_screen_impl(
             climb_root = root
         if root is None:
             return None
+        clip_xyxy: ScreenXyxy | None = None
+        if point is not None and cursor_roi_half_px is not None:
+            root_clip = _clip_xyxy_for_root(root, int(hwnd))
+            clip_xyxy = cursor_roi_clip_xyxy(
+                point,
+                half_px=int(cursor_roi_half_px),
+                clamp_to=root_clip,
+            )
         inputs, scrollbars, labeled, input_labels = (
             enumerate_edit_document_scrollbar_screen(
                 int(hwnd),
@@ -3755,6 +3864,7 @@ def _snapshot_uia_screen_impl(
                 automation=automation,
                 cursor_xy=point,
                 budgets=budgets,
+                clip_xyxy=clip_xyxy,
             )
         )
         return _snapshot_dict_from_lists(
@@ -4568,6 +4678,7 @@ def snapshot_uia_screen(
     budgets: WalkBudgets | None = None,
     enrich: bool = True,
     wait: bool = True,
+    cursor_roi_half_px: int | None = None,
 ) -> dict[str, object] | None:
     """Budgeted UIA walk under ``hwnd`` (optional cursor climb) for analysis.
 
@@ -4589,17 +4700,30 @@ def snapshot_uia_screen(
     ``_snapshot_uia_screen_impl`` directly so it does not re-enter this gate;
     a UIA-worker call that somehow re-enters while busy runs without
     re-acquiring the lock.
+
+    ``cursor_roi_half_px`` (hover) intersects the walk clip with a cursor ROI.
     """
     if os.name != "nt" or not int(hwnd or 0):
         return None
     from src.recorder.uia_thread import uia_call, uia_worker_is_current_thread
+
+    effective_budgets = budgets or default_walk_budgets()
+    use_enrich = bool(enrich and cursor_xy is not None)
+    roi_half = (
+        int(cursor_roi_half_px)
+        if cursor_roi_half_px is not None
+        else None
+    )
 
     def _run() -> dict[str, object] | None:
         started = time.perf_counter()
         with bind_findall_timing() as samples:
             if cursor_xy is not None:
                 snap = _snapshot_uia_screen_impl(
-                    int(hwnd), cursor_xy=cursor_xy, budgets=budgets
+                    int(hwnd),
+                    cursor_xy=cursor_xy,
+                    budgets=effective_budgets,
+                    cursor_roi_half_px=roi_half,
                 )
             else:
                 try:
@@ -4607,7 +4731,7 @@ def snapshot_uia_screen(
                         enumerate_edit_document_scrollbar_screen(
                             int(hwnd),
                             cursor_xy=None,
-                            budgets=budgets,
+                            budgets=effective_budgets,
                         )
                     )
                 except Exception:
@@ -4621,23 +4745,19 @@ def snapshot_uia_screen(
             samples,
             wall_s=time.perf_counter() - started,
         )
-        if (
-            enrich
-            and cursor_xy is not None
-            and isinstance(timed, dict)
-        ):
+        if use_enrich and isinstance(timed, dict):
             return _refetch_and_enrich_uia_snapshot(
                 int(hwnd),
                 timed,
                 cursor_xy=(int(cursor_xy[0]), int(cursor_xy[1])),
-                budgets=budgets,
+                budgets=effective_budgets,
+                cursor_roi_half_px=roi_half,
             )
         return timed
 
-    timeout_s = (
-        float(_SNAPSHOT_UIA_ENRICH_TIMEOUT_S)
-        if enrich and cursor_xy is not None
-        else float(_SNAPSHOT_UIA_TIMEOUT_S)
+    timeout_s = snapshot_uia_timeouts_for_budgets(
+        effective_budgets,
+        enrich=use_enrich,
     )
 
     global _SNAPSHOT_FINDALL_BUSY
@@ -4674,13 +4794,18 @@ def snapshot_uia_hover_subtree(
 ) -> dict[str, object] | None:
     """Hover warm-up: ElementFromPoint climb, then budgeted ControlView walk.
 
-    Snapshot ``window`` / boxes stay in screen space under the top-level
-    ``hwnd``. Returns ``None`` when UIA cannot be created, another FindAll is
-    already in flight (``wait=False``), or the outer walk times out; an empty
-    tree is still a snapshot dict.
+    Uses tighter hover hit/node/time caps and a cursor-centered ROI clip so
+    idle warm-ups stay fast. Snapshot ``window`` / boxes stay in screen space
+    under the top-level ``hwnd``. Returns ``None`` when UIA cannot be created,
+    another FindAll is already in flight (``wait=False``), or the outer walk
+    times out; an empty tree is still a snapshot dict.
     """
     return snapshot_uia_screen(
-        int(hwnd), cursor_xy=(int(x), int(y)), wait=False
+        int(hwnd),
+        cursor_xy=(int(x), int(y)),
+        budgets=hover_walk_budgets(),
+        cursor_roi_half_px=int(_HOVER_CURSOR_ROI_HALF_PX),
+        wait=False,
     )
 
 

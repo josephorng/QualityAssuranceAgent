@@ -50,10 +50,12 @@ _UIA_LED_PULSE_COLORS = {
 }
 _UIA_LED_SIZE = 14
 _UIA_STATUS_PULSE_MS = 350
-# Dual FA + EFP (+ parent) strip needs more room than a single Name/Value label.
-_UIA_EFP_LABEL_WIDTH = 128
+# Dual FA + EFP (+ parent) strip; keep generous so the plate can grow to fit.
+_UIA_EFP_LABEL_WIDTH = 256
 _UIA_BG_LABEL_WIDTH = 36
 _UIA_BG_LABEL_COLOR = "#f39c12"
+_UIA_STATUS_MIN_WIDTH = 240
+_UIA_STATUS_MIN_HEIGHT = 32
 
 _EDGE_TRIGGER_PX = 4
 _HIDE_DELAY_MS = 450
@@ -690,8 +692,9 @@ class RecordingUiaStatusOverlay:
         self._destroyed = False
         self._placed_monitor_key: tuple[int, int, int, int] | None = None
         self._placed_slot = "center"
-        self._last_width = 240
-        self._last_height = 32
+        self._last_width = _UIA_STATUS_MIN_WIDTH
+        self._last_height = _UIA_STATUS_MIN_HEIGHT
+        self._efp_text = "—"
         self._build(master)
 
     def _build(self, master: Any) -> None:
@@ -757,19 +760,43 @@ class RecordingUiaStatusOverlay:
         except Exception:
             return None
 
-    def _measure(self) -> tuple[int, int]:
+    def _measure(self, mon: dict[str, int] | None = None) -> tuple[int, int]:
         win = self._window
         if win is None:
             return self._last_width, self._last_height
         try:
             win.update_idletasks()
-            width = max(int(win.winfo_reqwidth()), 240)
-            height = max(int(win.winfo_reqheight()), 32)
+            width = max(int(win.winfo_reqwidth()), _UIA_STATUS_MIN_WIDTH)
+            height = max(int(win.winfo_reqheight()), _UIA_STATUS_MIN_HEIGHT)
+            if mon is not None:
+                # Keep the plate on-screen; long dual FA|EFP strips can exceed a
+                # narrow monitor once the label is fully expanded.
+                max_w = max(
+                    _UIA_STATUS_MIN_WIDTH,
+                    int(mon["width"]) - 2 * _OVERLAY_MARGIN,
+                )
+                if width > max_w:
+                    width = max_w
             self._last_width = width
             self._last_height = height
         except Exception:
             pass
         return self._last_width, self._last_height
+
+    def _refit_to_content(self) -> None:
+        """Grow/shrink the plate after label text changes; no-op when size holds."""
+        if self._destroyed or self._window is None:
+            return
+        prev_w, prev_h = self._last_width, self._last_height
+        width, height = self._measure()
+        if (
+            width == prev_w
+            and height == prev_h
+            and self._placed_monitor_key is not None
+        ):
+            return
+        self._placed_monitor_key = None
+        self.ensure_visible(force=True)
 
     def _place_on_monitor(
         self,
@@ -783,7 +810,7 @@ class RecordingUiaStatusOverlay:
         if win is None:
             return False
         key = _monitor_key(mon)
-        width, height = self._measure()
+        width, height = self._measure(mon)
         if cursor is None:
             slot = "center"
         else:
@@ -966,10 +993,15 @@ class RecordingUiaStatusOverlay:
             text = "—"
         if len(text) > _UIA_EFP_LABEL_WIDTH:
             text = text[: _UIA_EFP_LABEL_WIDTH - 1] + "…"
+        if text == getattr(self, "_efp_text", None):
+            return
+        self._efp_text = text
         try:
             self._label.configure(text=text)
         except Exception:
             pass
+        # Reqwidth grows with the dual FA|EFP strip; remeasure the plate.
+        self._refit_to_content()
 
     def set_bg_activities(self, activities: list[str] | tuple[str, ...] | None) -> None:
         """Show active background UIA work (EFP / FindAll:settle / …) beside the LED."""
@@ -1000,8 +1032,7 @@ class RecordingUiaStatusOverlay:
         except Exception:
             pass
         # Geometry may grow/shrink; re-place on the current monitor.
-        self._placed_monitor_key = None
-        self.ensure_visible(force=True)
+        self._refit_to_content()
 
     def apply_status(self, payload: dict[str, Any] | None) -> None:
         """Apply a RecordingSession UIA status payload on the Tk thread."""

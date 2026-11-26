@@ -5842,18 +5842,6 @@ class RecordingSession:
             )
         if snapshot.get("findall_refetch"):
             extra += " refetch=1"
-        raw_scan = snapshot.get("efp_scan_s")
-        if raw_scan is not None:
-            try:
-                scan_s = float(raw_scan)
-            except (TypeError, ValueError):
-                scan_s = None
-            if scan_s is not None:
-                try:
-                    added = int(snapshot.get("efp_scan_added") or 0)
-                except (TypeError, ValueError):
-                    added = 0
-                extra += f" efp_scan_s={scan_s:.3f} efp_scan_added={added}"
         with self._lock:
             run_dir = self._run_dir
         if run_dir is None:

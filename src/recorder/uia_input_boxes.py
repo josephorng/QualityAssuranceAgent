@@ -165,13 +165,9 @@ _DEFAULT_WALK_MAX_CHILDREN_PER_PARENT = 80
 _WALK_OFFSCREEN_SCORE_BASE = 1_000_000_000.0
 _WALK_MISSING_BBOX_SCORE = 1_000_000_000_000.0
 
-# Sparse FindAll → cursor refetch / EFP ROI enrich (recording).
+# Sparse FindAll label floor (analysis YOLO nearby merge uses the same idea).
 _SPARSE_LABELED_TEXT_FLOOR = 8
-_EFP_SCAN_ROI_HALF_PX = 300
-_EFP_SCAN_STEP_PX = 28
-_EFP_SCAN_MAX_PROBES = 80
-_EFP_SCAN_MAX_SECONDS = 1.0
-# Outer uia_call waits (must cover walk budget; enrich stacks refetch + EFP scan).
+# Outer uia_call waits (must cover walk budget; cursor enrich may stack a refetch).
 _SNAPSHOT_UIA_TIMEOUT_S = 5.5
 _SNAPSHOT_UIA_ENRICH_TIMEOUT_S = 15.0
 # One FindAll snapshot at a time across seed/settle/hover callers.
@@ -679,7 +675,7 @@ def resolve_usable_uia_probe_label(
 
 
 # EFP leaves that can green the recording LED / open the UIA analysis path
-# without a covering FindAll walk (cells + concrete labeled chrome).
+# without a covering FindAll walk (cells + concrete labeled chrome / tree).
 _EFP_USABLE_LABELED_LEAF_CONTROL_TYPES = frozenset(
     {
         "data_item",
@@ -692,6 +688,7 @@ _EFP_USABLE_LABELED_LEAF_CONTROL_TYPES = frozenset(
         "check_box",
         "radio_button",
         "text",
+        "tree_item",
         "custom",
         "header",
         "header_item",
@@ -720,15 +717,14 @@ def efp_payload_screen_bbox_xywh(
 def efp_payload_is_usable_labeled_leaf(payload: dict[str, Any] | None) -> bool:
     """True when idle/press EFP alone can green the UIA LED for a labeled leaf.
 
-    Covers Excel ``data_item`` cells and concrete chrome (button/tab/…) that
+    Covers Excel ``data_item`` cells, concrete chrome (button/tab/tree/…), and
+    untyped Name|Value leaves (some UltraTree peers omit ControlType) that
     analysis injects as ``uia_efp`` peers. Rejects weak hubs and WinForms
     ``Position`` thumbs.
     """
     if not isinstance(payload, dict):
         return False
     control_type = str(payload.get("control_type") or "").strip()
-    if control_type not in _EFP_USABLE_LABELED_LEAF_CONTROL_TYPES:
-        return False
     name = str(payload.get("name") or "").strip()
     if is_winforms_scrollbar_thumb_efp_name(name):
         return False
@@ -742,6 +738,10 @@ def efp_payload_is_usable_labeled_leaf(payload: dict[str, Any] | None) -> bool:
         or is_weak_efp_hub_label(label)
     ):
         return False
+    if control_type and control_type not in _EFP_USABLE_LABELED_LEAF_CONTROL_TYPES:
+        return False
+    # Empty control_type: still usable when Name|Value + bbox clear the gates
+    # (matches analysis peer injection for untyped WinForms tree leaves).
     return efp_payload_screen_bbox_xywh(payload) is not None
 
 
@@ -1443,119 +1443,6 @@ def _merge_findall_timing_fields(
     return out
 
 
-def enrich_uia_snapshot_with_efp_scan(
-    snapshot: dict[str, Any] | None,
-    *,
-    cursor_xy: tuple[int, int],
-    max_probes: int = _EFP_SCAN_MAX_PROBES,
-    max_seconds: float = _EFP_SCAN_MAX_SECONDS,
-    step_px: int = _EFP_SCAN_STEP_PX,
-    roi_half_px: int = _EFP_SCAN_ROI_HALF_PX,
-) -> dict[str, Any] | None:
-    """Merge unique EFP leaves from a cursor-centered grid into ``texts``.
-
-    Must run on the UIA worker thread (uses ``uia_text_element_at_point``).
-    """
-    if not isinstance(snapshot, dict):
-        return snapshot
-    try:
-        cx, cy = int(cursor_xy[0]), int(cursor_xy[1])
-    except (TypeError, ValueError, IndexError):
-        return snapshot
-    window = _snapshot_window_xywh(snapshot)
-    if window is None:
-        return snapshot
-    wx, wy, ww, wh = window
-    if ww <= 0 or wh <= 0:
-        return snapshot
-    half = max(1, int(roi_half_px))
-    step = max(8, int(step_px))
-    x0 = max(wx, cx - half)
-    y0 = max(wy, cy - half)
-    x1 = min(wx + ww - 1, cx + half)
-    y1 = min(wy + wh - 1, cy + half)
-    if x1 < x0 or y1 < y0:
-        return snapshot
-
-    out = dict(snapshot)
-    texts = list(out.get("texts") or []) if isinstance(out.get("texts"), list) else []
-    occupied: list[tuple[int, int, int, int]] = []
-    seen_keys: set[tuple[str, int, int, int, int]] = set()
-
-    def _occupy_xywh(box: tuple[int, int, int, int] | None) -> None:
-        if box is None:
-            return
-        occupied.append(box)
-
-    def _is_occupied(x: int, y: int) -> bool:
-        return any(point_in_rect_xywh(int(x), int(y), box) for box in occupied)
-
-    for row in texts:
-        xyxy = _text_row_screen_xyxy(row)
-        if xyxy is None or not isinstance(row, dict):
-            continue
-        x1b, y1b, x2b, y2b = xyxy
-        _occupy_xywh((x1b, y1b, x2b - x1b, y2b - y1b))
-        label = str(row.get("text") or "").strip()
-        if label:
-            seen_keys.add((label.casefold(), x1b, y1b, x2b, y2b))
-
-    started = time.perf_counter()
-    added = 0
-    probes = 0
-    # Cursor first, then grid.
-    points: list[tuple[int, int]] = [(cx, cy)]
-    for gy in range(y0, y1 + 1, step):
-        for gx in range(x0, x1 + 1, step):
-            if gx == cx and gy == cy:
-                continue
-            points.append((gx, gy))
-
-    for px, py in points:
-        if probes >= int(max_probes):
-            break
-        if time.perf_counter() - started >= float(max_seconds):
-            break
-        if _is_occupied(px, py):
-            continue
-        probes += 1
-        payload = _element_from_point_name_value_impl(int(px), int(py))
-        label = efp_cover_label_from_payload(payload)
-        if not label:
-            bbox = efp_payload_screen_bbox_xywh(payload)
-            _occupy_xywh(bbox)
-            continue
-        bbox = efp_payload_screen_bbox_xywh(payload)
-        if bbox is None:
-            continue
-        bx, by, bw, bh = bbox
-        xyxy = (bx, by, bx + bw, by + bh)
-        key = (label.casefold(), xyxy[0], xyxy[1], xyxy[2], xyxy[3])
-        if key in seen_keys:
-            _occupy_xywh(bbox)
-            continue
-        if window is not None and is_oversized_uia_rect(bbox, window):
-            _occupy_xywh(bbox)
-            continue
-        entry: dict[str, object] = {
-            "bbox": [int(v) for v in xyxy],
-            "text": label,
-        }
-        control_type = str(payload.get("control_type") or "").strip()
-        if control_type:
-            entry["control_type"] = control_type
-        texts.append(entry)
-        seen_keys.add(key)
-        _occupy_xywh(bbox)
-        added += 1
-
-    out["texts"] = texts
-    out["efp_scan_s"] = round(time.perf_counter() - started, 3)
-    out["efp_scan_added"] = int(added)
-    out["efp_scan_probes"] = int(probes)
-    return out
-
-
 def _refetch_and_enrich_uia_snapshot(
     hwnd: int,
     snapshot: dict[str, Any] | None,
@@ -1564,9 +1451,11 @@ def _refetch_and_enrich_uia_snapshot(
     budgets: WalkBudgets | None,
     cursor_roi_half_px: int | None = None,
 ) -> dict[str, Any] | None:
-    """One cursor-climbed FindAll refetch on EFP miss, then optional EFP ROI scan.
+    """One cursor-climbed FindAll refetch when EFP names an uncovered leaf.
 
-    Runs on the UIA worker thread only.
+    Sparse nearby landmarks are filled at analysis via YOLO/OCR peer merge,
+    not by folding EFP probes into FindAll ``texts``. Runs on the UIA worker
+    thread only.
     """
     if not isinstance(snapshot, dict):
         return snapshot
@@ -1603,15 +1492,6 @@ def _refetch_and_enrich_uia_snapshot(
                         merged[key] = timed[key]
                 merged["findall_refetch"] = 1
                 out = merged
-            covered = snapshot_efp_label_covered(out, (cx, cy), efp_label)
-
-        need_scan = (not covered) or (
-            not uia_snapshot_has_rich_labels(out)
-        )
-        if need_scan:
-            enriched = enrich_uia_snapshot_with_efp_scan(out, cursor_xy=(cx, cy))
-            if isinstance(enriched, dict):
-                out = enriched
     return out
 
 
@@ -4691,8 +4571,8 @@ def snapshot_uia_screen(
     truncated walks also stamp ``walk_truncated`` / ``walk_stop_reason``.
 
     When ``cursor_xy`` is set and ``enrich`` is true, an EFP cover miss triggers
-    one cursor-climbed FindAll refetch, then a bounded EFP ROI scan when still
-    uncovered or sparse (``findall_refetch`` / ``efp_scan_*`` fields).
+    one cursor-climbed FindAll refetch (``findall_refetch=1``). Sparse nearby
+    fill is left to analysis YOLO/OCR peer merge, not recording-time EFP scans.
 
     Only one gated FindAll runs at a time. ``wait=True`` (settle/seed/typing)
     blocks until the lock is free. ``wait=False`` (hover) returns ``None``

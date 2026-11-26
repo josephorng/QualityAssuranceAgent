@@ -30,7 +30,7 @@ from src.recorder.uia_input_boxes import (
     compose_uia_input_landmark_label,
     control_type_token_from_id,
     element_from_point_name_value,
-    enrich_uia_snapshot_with_efp_scan,
+    efp_payload_is_usable_labeled_leaf,
     filter_uia_input_rects,
     filter_uia_scrollbar_rects,
     control_type_id_from_token,
@@ -474,60 +474,11 @@ def test_snapshot_efp_cover_ignores_pane_inputs_requires_agreeing_text() -> None
     assert not uia_snapshot_has_rich_labels(sparse)
 
 
-def test_enrich_uia_snapshot_with_efp_scan_merges_unique_leaves(monkeypatch) -> None:
-    calls: list[tuple[int, int]] = []
-
-    def _probe(x: int, y: int) -> dict:
-        calls.append((int(x), int(y)))
-        if int(x) == 150 and int(y) == 110:
-            return {
-                "element_from_point_s": 0.01,
-                "name": "龜速的網域 (3)",
-                "value": "1",
-                "bbox": [100, 100, 120, 24],
-                "control_type": "tree_item",
-            }
-        if 160 <= int(x) <= 200 and 140 <= int(y) <= 180:
-            return {
-                "element_from_point_s": 0.01,
-                "name": "新竹公司 (17)",
-                "value": "1",
-                "bbox": [100, 140, 110, 24],
-                "control_type": "tree_item",
-            }
-        return {"element_from_point_s": 0.01}
-
-    monkeypatch.setattr(
-        "src.recorder.uia_input_boxes._element_from_point_name_value_impl",
-        _probe,
-    )
-    snap = {
-        "window": [0, 0, 400, 300],
-        "inputs": [[0, 0, 400, 300]],
-        "scrollbars": [],
-        "texts": [{"bbox": [350, 280, 390, 295], "text": "遠方分頁"}],
-    }
-    out = enrich_uia_snapshot_with_efp_scan(
-        snap,
-        cursor_xy=(150, 110),
-        max_probes=20,
-        max_seconds=1.0,
-        step_px=40,
-        roi_half_px=80,
-    )
-    assert out is not None
-    labels = {str(row.get("text") or "") for row in out["texts"]}
-    assert "龜速的網域 (3)|1" in labels
-    assert "新竹公司 (17)|1" in labels
-    assert out.get("efp_scan_added", 0) >= 1
-    assert isinstance(out.get("efp_scan_s"), float)
-    assert calls[0] == (150, 110)
-
-
 def test_snapshot_uia_screen_refetch_on_efp_cover_miss(monkeypatch) -> None:
     walks: list[tuple[int, tuple[int, int] | None]] = []
 
-    def _impl(hwnd: int, *, cursor_xy=None, budgets=None):
+    def _impl(hwnd: int, *, cursor_xy=None, budgets=None, cursor_roi_half_px=None):
+        del budgets, cursor_roi_half_px
         walks.append((int(hwnd), cursor_xy))
         if len(walks) == 1:
             return {
@@ -564,9 +515,51 @@ def test_snapshot_uia_screen_refetch_on_efp_cover_miss(monkeypatch) -> None:
             "control_type": "tree_item",
         },
     )
+
+    class _OsStub:
+        name = "nt"
+
+    monkeypatch.setattr("src.recorder.uia_input_boxes.os", _OsStub())
+    snap = snapshot_uia_screen(99, cursor_xy=(150, 110))
+    assert snap is not None
+    assert snap.get("findall_refetch") == 1
+    assert snap.get("efp_scan_added") is None
+    assert len(walks) == 2
+    assert walks[0][1] == (150, 110)
+    assert walks[1][1] == (150, 110)
+    assert any(
+        str(row.get("text") or "") == "龜速的網域 (3)|1"
+        for row in snap.get("texts") or []
+    )
+
+
+def test_snapshot_uia_screen_refetch_miss_stays_without_efp_scan(monkeypatch) -> None:
+    """Uncovered EFP after refetch does not invent FindAll texts via EFP scan."""
+    walks: list[tuple[int, tuple[int, int] | None]] = []
+
+    def _impl(hwnd: int, *, cursor_xy=None, budgets=None, cursor_roi_half_px=None):
+        del budgets, cursor_roi_half_px
+        walks.append((int(hwnd), cursor_xy))
+        return {
+            "window": [0, 0, 400, 300],
+            "inputs": [[0, 0, 400, 300]],
+            "scrollbars": [],
+            "texts": [{"bbox": [350, 280, 390, 295], "text": "遠方分頁"}],
+        }
+
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes.enrich_uia_snapshot_with_efp_scan",
-        lambda snap, **_kwargs: snap,
+        "src.recorder.uia_input_boxes._snapshot_uia_screen_impl",
+        _impl,
+    )
+    monkeypatch.setattr(
+        "src.recorder.uia_input_boxes._element_from_point_name_value_impl",
+        lambda x, y: {
+            "element_from_point_s": 0.01,
+            "name": "龜速的網域 (3)",
+            "value": "1",
+            "bbox": [100, 100, 120, 24],
+            "control_type": "tree_item",
+        },
     )
 
     class _OsStub:
@@ -577,12 +570,9 @@ def test_snapshot_uia_screen_refetch_on_efp_cover_miss(monkeypatch) -> None:
     assert snap is not None
     assert snap.get("findall_refetch") == 1
     assert len(walks) == 2
-    assert walks[0][1] == (150, 110)
-    assert walks[1][1] == (150, 110)
-    assert any(
-        str(row.get("text") or "") == "龜速的網域 (3)|1"
-        for row in snap.get("texts") or []
-    )
+    labels = {str(row.get("text") or "") for row in snap.get("texts") or []}
+    assert "龜速的網域 (3)|1" not in labels
+    assert snap.get("efp_scan_added") is None
 
 
 def test_snapshot_uia_screen_keeps_expanded_labeled_control_types(monkeypatch) -> None:
@@ -1157,8 +1147,6 @@ def test_efp_payload_is_usable_data_item() -> None:
 
 
 def test_efp_payload_is_usable_labeled_leaf() -> None:
-    from src.recorder.uia_input_boxes import efp_payload_is_usable_labeled_leaf
-
     assert efp_payload_is_usable_labeled_leaf(
         {
             "name": "G8",
@@ -1183,6 +1171,21 @@ def test_efp_payload_is_usable_labeled_leaf() -> None:
             "bbox": [100, 10, 48, 22],
         }
     )
+    assert efp_payload_is_usable_labeled_leaf(
+        {
+            "name": "龜速的網域 (3)",
+            "value": "1",
+            "control_type": "tree_item",
+            "bbox": [228, 108, 125, 24],
+        }
+    )
+    assert efp_payload_is_usable_labeled_leaf(
+        {
+            "name": "龜速的網域 (3)",
+            "value": "1",
+            "bbox": [228, 108, 125, 24],
+        }
+    )
     assert not efp_payload_is_usable_labeled_leaf(
         {"name": "Position", "control_type": "button", "bbox": [1, 1, 10, 10]}
     )
@@ -1194,6 +1197,9 @@ def test_efp_payload_is_usable_labeled_leaf() -> None:
     )
     assert not efp_payload_is_usable_labeled_leaf(
         {"name": "檔案", "control_type": "button"}
+    )
+    assert not efp_payload_is_usable_labeled_leaf(
+        {"name": "Position", "value": "50", "bbox": [1, 1, 10, 10]}
     )
 
 

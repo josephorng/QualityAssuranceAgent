@@ -171,8 +171,8 @@ def _com_release(ptr: ctypes.c_void_p | None) -> None:
     release(ptr)
 
 
-def _uia_focused_screen_rect() -> ScreenRect | None:
-    """Return the focused UIA element's bounding rect in screen coordinates."""
+def _uia_focused_screen_rect_impl() -> ScreenRect | None:
+    """Worker-thread focused UIA element bounding rect (screen coordinates)."""
     if os.name != "nt":
         return None
 
@@ -241,6 +241,28 @@ def _uia_focused_screen_rect() -> ScreenRect | None:
                 ole32.CoUninitialize()
             except Exception:
                 pass
+
+
+def _uia_focused_screen_rect() -> ScreenRect | None:
+    """Return the focused UIA element's bounding rect in screen coordinates.
+
+    Marshals onto the UIA worker thread.
+    """
+    if os.name != "nt":
+        return None
+    from src.recorder.uia_thread import uia_call
+
+    try:
+        result = uia_call(_uia_focused_screen_rect_impl, timeout_s=2.5)
+    except Exception:
+        return None
+    if (
+        isinstance(result, tuple)
+        and len(result) == 4
+        and all(isinstance(v, int) for v in result)
+    ):
+        return result  # type: ignore[return-value]
+    return None
 
 
 def resolve_typing_focus(

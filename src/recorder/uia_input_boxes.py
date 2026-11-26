@@ -1535,13 +1535,32 @@ def uia_text_element_at_point(
     ``ElementFromPoint`` can see a control that ``FindAll`` on the top-level
     hwnd does not return (Word's start page is one of those). The third value is
     a ``UIA_CONTROL_TYPE_SUFFIX`` token (``button``, ``text``, …) or ``""``.
-    Name and Value are the raw UIA strings before composition.
+    Name and Value are the raw UIA strings before composition. Marshals onto
+    the UIA worker thread.
     """
+    from src.recorder.uia_thread import uia_call
+
     started = time.perf_counter()
     try:
-        return _uia_text_element_at_point_impl(x, y)
+        result = uia_call(
+            _uia_text_element_at_point_impl,
+            int(x),
+            int(y),
+            timeout_s=2.5,
+        )
+    except Exception:
+        return None
     finally:
         _note_element_from_point_elapsed(time.perf_counter() - started)
+    if (
+        isinstance(result, tuple)
+        and len(result) == 5
+        and isinstance(result[0], str)
+        and isinstance(result[1], tuple)
+        and len(result[1]) == 4
+    ):
+        return result  # type: ignore[return-value]
+    return None
 
 
 def _element_parent_signature(
@@ -3289,14 +3308,8 @@ def _with_uia_focused_element(
                 pass
 
 
-def uia_focused_element_snapshot() -> dict[str, Any] | None:
-    """Post-settle GetFocusedElement payload for recording.
-
-    Returns ``{"name", "value", "bbox", "control_type", "automation_id"}`` when
-    the focused leaf has a usable screen box. ``bbox`` is screen xywh (same as
-    press-time ``element_from_point``). Empty name/value/type/id fields are
-    omitted. Returns ``None`` when UIA focus is unavailable.
-    """
+def _uia_focused_element_snapshot_impl() -> dict[str, Any] | None:
+    """Worker-thread GetFocusedElement payload (see ``uia_focused_element_snapshot``)."""
 
     def _read(element: ctypes.c_void_p) -> dict[str, Any] | None:
         bounds = _element_bounding_xyxy(element)
@@ -3329,6 +3342,24 @@ def uia_focused_element_snapshot() -> dict[str, Any] | None:
     return result if isinstance(result, dict) else None
 
 
+def uia_focused_element_snapshot() -> dict[str, Any] | None:
+    """Post-settle GetFocusedElement payload for recording.
+
+    Returns ``{"name", "value", "bbox", "control_type", "automation_id"}`` when
+    the focused leaf has a usable screen box. ``bbox`` is screen xywh (same as
+    press-time ``element_from_point``). Empty name/value/type/id fields are
+    omitted. Returns ``None`` when UIA focus is unavailable. Marshals onto the
+    UIA worker thread.
+    """
+    from src.recorder.uia_thread import uia_call
+
+    try:
+        result = uia_call(_uia_focused_element_snapshot_impl, timeout_s=2.5)
+    except Exception:
+        return None
+    return result if isinstance(result, dict) else None
+
+
 def focused_element_focus_rect(
     payload: dict[str, Any] | None,
 ) -> tuple[int, int, int, int] | None:
@@ -3347,8 +3378,8 @@ def focused_element_focus_rect(
     return (x, y, x + w, y + h)
 
 
-def _focused_ocr_clip_field_screen_xyxy() -> ScreenXyxy | None:
-    """Focused UIA Edit/Document/ComboBox/Pane bounds when control type matches."""
+def _focused_ocr_clip_field_screen_xyxy_impl() -> ScreenXyxy | None:
+    """Worker-thread focused Edit/Document/ComboBox/Pane bounds."""
 
     def _read(element: ctypes.c_void_p) -> ScreenXyxy | None:
         control_type = _element_control_type(element)
@@ -3366,8 +3397,25 @@ def _focused_ocr_clip_field_screen_xyxy() -> ScreenXyxy | None:
     return None
 
 
-def enumerate_ocr_clip_field_screen_xyxy(hwnd: int) -> list[ScreenXyxy]:
-    """FindAll Edit|Document|ComboBox|Pane under ``hwnd`` (screen xyxy)."""
+def _focused_ocr_clip_field_screen_xyxy() -> ScreenXyxy | None:
+    """Focused UIA Edit/Document/ComboBox/Pane bounds when control type matches."""
+    from src.recorder.uia_thread import uia_call
+
+    try:
+        result = uia_call(_focused_ocr_clip_field_screen_xyxy_impl, timeout_s=2.5)
+    except Exception:
+        return None
+    if (
+        isinstance(result, tuple)
+        and len(result) == 4
+        and all(isinstance(v, int) for v in result)
+    ):
+        return result  # type: ignore[return-value]
+    return None
+
+
+def _enumerate_ocr_clip_field_screen_xyxy_impl(hwnd: int) -> list[ScreenXyxy]:
+    """Worker-thread FindAll Edit|Document|ComboBox|Pane under ``hwnd``."""
     if os.name != "nt" or not hwnd:
         return []
 
@@ -3484,6 +3532,28 @@ def enumerate_ocr_clip_field_screen_xyxy(hwnd: int) -> list[ScreenXyxy]:
                 ole32.CoUninitialize()
             except Exception:
                 pass
+
+
+def enumerate_ocr_clip_field_screen_xyxy(hwnd: int) -> list[ScreenXyxy]:
+    """FindAll Edit|Document|ComboBox|Pane under ``hwnd`` (screen xyxy).
+
+    Marshals onto the UIA worker thread.
+    """
+    if os.name != "nt" or not hwnd:
+        return []
+    from src.recorder.uia_thread import uia_call
+
+    try:
+        result = uia_call(
+            _enumerate_ocr_clip_field_screen_xyxy_impl,
+            int(hwnd),
+            timeout_s=2.5,
+        )
+    except Exception:
+        return []
+    if isinstance(result, list):
+        return result
+    return []
 
 
 def select_uia_field_clip_containing_point(

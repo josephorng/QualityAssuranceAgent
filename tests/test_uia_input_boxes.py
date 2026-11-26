@@ -1683,3 +1683,69 @@ def test_snapshot_uia_screen_wait_false_skips_when_busy() -> None:
         assert uia.snapshot_uia_hover_subtree(1, 10, 20) is None
     finally:
         uia._SNAPSHOT_FINDALL_LOCK.release()
+
+
+def test_uia_text_element_at_point_marshals_impl(monkeypatch) -> None:
+    from src.recorder import uia_input_boxes as uia_mod
+    from src.recorder.uia_input_boxes import (
+        _uia_text_element_at_point_impl,
+        uia_text_element_at_point,
+    )
+
+    monkeypatch.setattr(uia_mod, "os", type("O", (), {"name": "nt"})())
+    expected = ("Label", (10, 20, 30, 40), "text", "Label", "")
+    calls: list[tuple] = []
+
+    def fake_uia_call(fn, *args, timeout_s=2.5):
+        calls.append((fn, args, timeout_s))
+        assert fn is _uia_text_element_at_point_impl
+        assert args == (11, 22)
+        return expected
+
+    monkeypatch.setattr("src.recorder.uia_thread.uia_call", fake_uia_call)
+    assert uia_text_element_at_point(11, 22) == expected
+    assert len(calls) == 1
+
+
+def test_uia_focused_element_snapshot_marshals_impl(monkeypatch) -> None:
+    from src.recorder import uia_input_boxes as uia_mod
+    from src.recorder.uia_input_boxes import (
+        _uia_focused_element_snapshot_impl,
+        uia_focused_element_snapshot,
+    )
+
+    monkeypatch.setattr(uia_mod, "os", type("O", (), {"name": "nt"})())
+    expected = {"name": "Docs", "bbox": [1, 2, 3, 4], "control_type": "tree_item"}
+    calls: list[tuple] = []
+
+    def fake_uia_call(fn, *args, timeout_s=2.5):
+        calls.append((fn, args, timeout_s))
+        assert fn is _uia_focused_element_snapshot_impl
+        assert args == ()
+        return expected
+
+    monkeypatch.setattr("src.recorder.uia_thread.uia_call", fake_uia_call)
+    assert uia_focused_element_snapshot() == expected
+    assert len(calls) == 1
+
+
+def test_enumerate_ocr_clip_field_screen_xyxy_marshals_impl(monkeypatch) -> None:
+    from src.recorder import uia_input_boxes as uia_mod
+    from src.recorder.uia_input_boxes import (
+        _enumerate_ocr_clip_field_screen_xyxy_impl,
+        enumerate_ocr_clip_field_screen_xyxy,
+    )
+
+    monkeypatch.setattr(uia_mod, "os", type("O", (), {"name": "nt"})())
+    expected = [(10, 20, 30, 40), (50, 60, 70, 80)]
+    calls: list[tuple] = []
+
+    def fake_uia_call(fn, *args, timeout_s=2.5):
+        calls.append((fn, args, timeout_s))
+        assert fn is _enumerate_ocr_clip_field_screen_xyxy_impl
+        assert args == (99,)
+        return expected
+
+    monkeypatch.setattr("src.recorder.uia_thread.uia_call", fake_uia_call)
+    assert enumerate_ocr_clip_field_screen_xyxy(99) == expected
+    assert len(calls) == 1

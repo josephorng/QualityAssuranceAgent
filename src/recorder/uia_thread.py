@@ -7,6 +7,7 @@ pre-click loops (avoids RPC_E_WRONG_THREAD / AV storms).
 
 from __future__ import annotations
 
+import ctypes
 import queue
 import threading
 from typing import Any, Callable, TypeVar
@@ -14,6 +15,7 @@ from typing import Any, Callable, TypeVar
 _T = TypeVar("_T")
 
 _UIA_CALL_TIMEOUT_S = 2.5
+_COINIT_MULTITHREADED = 0x0
 
 
 class _UiaJob:
@@ -56,6 +58,12 @@ class UiaWorker:
 
     def _loop(self) -> None:
         self._thread_id = threading.get_ident()
+        # Pin an MTA for this thread's lifetime so _impl CoInitializeEx sees
+        # S_FALSE and must not CoUninitialize between jobs.
+        try:
+            ctypes.windll.ole32.CoInitializeEx(None, _COINIT_MULTITHREADED)
+        except Exception:
+            pass
         while True:
             job = self._jobs.get()
             if job is None:

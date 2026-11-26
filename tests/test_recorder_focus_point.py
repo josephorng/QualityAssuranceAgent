@@ -150,3 +150,36 @@ def test_focused_element_focus_rect_from_bbox_xywh() -> None:
     ) == (53, 294, 87, 326)
     assert focused_element_focus_rect(None) is None
     assert focused_element_focus_rect({"bbox": [1, 2, 0, 4]}) is None
+
+
+def test_uia_focused_screen_rect_marshals_impl(monkeypatch) -> None:
+    """Default UIA path for resolve_typing_focus goes through uia_call."""
+    import src.recorder.focus_point as focus_mod
+    from src.recorder.focus_point import (
+        _uia_focused_screen_rect,
+        _uia_focused_screen_rect_impl,
+    )
+
+    monkeypatch.setattr(focus_mod, "os", type("O", (), {"name": "nt"})())
+    expected = (10, 20, 110, 60)
+    calls: list[tuple] = []
+
+    def fake_uia_call(fn, *args, timeout_s=2.5):
+        calls.append((fn, args, timeout_s))
+        assert fn is _uia_focused_screen_rect_impl
+        assert args == ()
+        return expected
+
+    monkeypatch.setattr("src.recorder.uia_thread.uia_call", fake_uia_call)
+    assert _uia_focused_screen_rect() == expected
+    assert len(calls) == 1
+
+    # Default resolve_typing_focus uses the marshaled wrapper when caret missing.
+    focus = resolve_typing_focus(
+        last_click_xy=None,
+        mouse_xy=(1, 1),
+        caret_rect_fn=lambda: None,
+    )
+    assert focus.rect == expected
+    assert focus.point == (60, 40)
+    assert len(calls) == 2

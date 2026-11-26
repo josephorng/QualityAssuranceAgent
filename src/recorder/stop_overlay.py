@@ -941,10 +941,11 @@ class RecordingUiaStatusOverlay:
         findall_nearby: str | None = None,
         pending: bool = False,
     ) -> None:
-        """Paint dual FindAll + EFP strip; EFP-only uses ``FA … | EFP …``.
+        """Paint dual FindAll + EFP strip (always both sides).
 
-        Parent tokens append as ``· ⌂{parent}``. Qualified FindAll landmark
-        count appends on the FA side as ``· n12``.
+        Missing non-pending sides use ``(empty)``; an in-flight EFP probe uses
+        ``…``. Parent tokens append as ``· ⌂{parent}``. Qualified FindAll
+        landmark count appends on the FA side as ``· n12``.
         """
         if self._destroyed or self._label is None:
             return
@@ -976,21 +977,21 @@ class RecordingUiaStatusOverlay:
             efp_text = f"{efp_text} · {scroll_s}"
         if efp_parent_s and efp_text and efp_text != "…":
             efp_text = f"{efp_text} · ⌂{efp_parent_s}"
-        fa_display = fa_s if fa_s else ("…" if efp_text or nearby_s else "")
+        fa_display = fa_s
         if fa_s and fa_parent_s:
             fa_display = f"{fa_s} · ⌂{fa_parent_s}"
         if fa_display and nearby_s:
             fa_display = f"{fa_display} · n{nearby_s}"
         elif nearby_s and not fa_display:
-            fa_display = f"… · n{nearby_s}"
-        if fa_display and efp_text:
-            text = f"FA {fa_display} | EFP {efp_text}"
-        elif fa_display:
-            text = f"FA {fa_display}" if not pending else f"FA {fa_display} | EFP …"
-        elif efp_text:
-            text = f"FA … | EFP {efp_text}"
+            fa_display = f"(empty) · n{nearby_s}"
+        fa_out = fa_display if fa_display else "(empty)"
+        if efp_text:
+            efp_out = efp_text
+        elif pending:
+            efp_out = "…"
         else:
-            text = "—"
+            efp_out = "(empty)"
+        text = f"FA {fa_out} | EFP {efp_out}"
         if len(text) > _UIA_EFP_LABEL_WIDTH:
             text = text[: _UIA_EFP_LABEL_WIDTH - 1] + "…"
         if text == getattr(self, "_efp_text", None):

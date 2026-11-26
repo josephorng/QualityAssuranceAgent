@@ -1001,7 +1001,7 @@ def test_recording_uia_status_overlay_apply_status() -> None:
         )
         assert str(overlay._bg_label.cget("text")) == ""
         assert str(overlay._label.cget("text")) == (
-            "FA … | EFP data_item · Position · V37%"
+            "FA (empty) | EFP data_item · Position · V37%"
         )
         overlay.destroy()
     finally:
@@ -1213,8 +1213,38 @@ def test_recording_uia_status_overlay_dual_fa_efp_disagree() -> None:
         }
     )
     assert overlay._label.cget("text") == (
-        "FA … · n8 | EFP list_item · 文件 · ⌂ProperTreeHost"
+        "FA (empty) · n8 | EFP list_item · 文件 · ⌂ProperTreeHost"
     )
+    overlay.apply_status(
+        {
+            "state": "red",
+            "efp_name": "",
+            "efp_value": "",
+            "efp_control_type": "",
+            "findall_label": "關閉",
+            "findall_parent": "",
+            "efp_parent": "",
+            "findall_nearby": "",
+            "efp_pending": False,
+            "bg": [],
+        }
+    )
+    assert overlay._label.cget("text") == "FA 關閉 | EFP (empty)"
+    overlay.apply_status(
+        {
+            "state": "red",
+            "efp_name": "",
+            "efp_value": "",
+            "efp_control_type": "",
+            "findall_label": "",
+            "findall_parent": "",
+            "efp_parent": "",
+            "findall_nearby": "",
+            "efp_pending": False,
+            "bg": [],
+        }
+    )
+    assert overlay._label.cget("text") == "FA (empty) | EFP (empty)"
 
 
 def test_emit_uia_status_tracks_bg_activities() -> None:

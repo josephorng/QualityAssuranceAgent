@@ -3662,6 +3662,103 @@ def _detection_to_dict(
     return payload
 
 
+def _attach_findall_hub_parent(
+    candidates: list[dict[str, Any]],
+    *,
+    element_from_point: dict[str, Any] | None,
+    monitor_offset: tuple[int, int],
+) -> None:
+    """Attach ``hub_parent`` on FindAll primary ``candidates[0]`` (in place).
+
+    Reuses press-time EFP ``parent`` when the primary soft-agrees with EFP and
+    the press point lies in the primary box; otherwise probes parent at the
+    primary screen center.
+    """
+    if not candidates:
+        return
+    primary = candidates[0]
+    if not isinstance(primary, dict):
+        return
+    if str(primary.get("source") or "").strip().lower() != "uia":
+        return
+    from src.recorder.uia_input_boxes import (
+        _normalize_parent_signature,
+        ocr_uia_labels_soft_agree,
+        parent_signature_at_point,
+        resolve_usable_uia_probe_label,
+    )
+
+    efp = element_from_point if isinstance(element_from_point, dict) else None
+    efp_parent = (
+        _normalize_parent_signature(efp.get("parent")) if efp is not None else {}
+    )
+    reuse = False
+    if efp is not None and efp_parent:
+        efp_name = str(efp.get("name") or "").strip()
+        efp_value = str(efp.get("value") or "").strip()
+        efp_label = resolve_usable_uia_probe_label(name=efp_name, value=efp_value)
+        primary_text = _visible_text(primary.get("text"))
+        label_ok = bool(efp_label) and (
+            primary_text.casefold() == efp_label.casefold()
+            or ocr_uia_labels_soft_agree(primary_text, efp_label)
+        )
+        center = primary.get("center")
+        bbox = primary.get("bbox")
+        press_in_box = False
+        if (
+            isinstance(bbox, (list, tuple))
+            and len(bbox) == 4
+            and isinstance(efp.get("bbox"), (list, tuple))
+            and len(efp.get("bbox")) == 4
+        ):
+            try:
+                ex, ey, ew, eh = (int(v) for v in efp["bbox"][:4])
+                press_cx = ex + ew // 2
+                press_cy = ey + eh // 2
+                left, top = int(monitor_offset[0]), int(monitor_offset[1])
+                local_px = press_cx - left
+                local_py = press_cy - top
+                press_in_box = point_in_rect_xywh(
+                    local_px, local_py, tuple(int(v) for v in bbox[:4])
+                )
+            except (TypeError, ValueError):
+                press_in_box = False
+        if not press_in_box and isinstance(center, (list, tuple)) and len(center) >= 2:
+            # Centers within ~24px count as the same leaf for parent reuse.
+            try:
+                left, top = int(monitor_offset[0]), int(monitor_offset[1])
+                if isinstance(efp.get("bbox"), (list, tuple)) and len(efp["bbox"]) == 4:
+                    ex, ey, ew, eh = (int(v) for v in efp["bbox"][:4])
+                    efp_cx = ex + ew // 2 - left
+                    efp_cy = ey + eh // 2 - top
+                    dx = abs(int(center[0]) - efp_cx)
+                    dy = abs(int(center[1]) - efp_cy)
+                    press_in_box = dx <= 24 and dy <= 24
+            except (TypeError, ValueError):
+                press_in_box = False
+        reuse = bool(label_ok and press_in_box)
+
+    if reuse:
+        primary["hub_parent"] = dict(efp_parent)
+        return
+
+    center = primary.get("center")
+    if not (isinstance(center, (list, tuple)) and len(center) >= 2):
+        return
+    try:
+        screen_x = int(center[0]) + int(monitor_offset[0])
+        screen_y = int(center[1]) + int(monitor_offset[1])
+    except (TypeError, ValueError):
+        return
+    try:
+        probed = parent_signature_at_point(screen_x, screen_y)
+    except Exception:
+        probed = {}
+    hub_parent = _normalize_parent_signature(probed)
+    if hub_parent:
+        primary["hub_parent"] = hub_parent
+
+
 VISION_PATH_REPAIR_REASON = "重播修復改為 UIA"
 VISION_PATH_UIA_NOT_UNIQUE_REASON = "UIA 地標無法唯一鎖定目標"
 VISION_PATH_WEAK_EFP_OCR_DISAGREE_REASON = "弱 EFP 且 OCR 與 UIA 目標不一致"
@@ -5119,6 +5216,11 @@ def build_vision_context_at_point(
         )
         for det in nearest
     ]
+    _attach_findall_hub_parent(
+        candidate_dicts,
+        element_from_point=efp_payload,
+        monitor_offset=screenshot_offset,
+    )
     if all_detections and candidate_dicts:
         _annotate_clicked_char_target(bgr, candidate_dicts, local_x, local_y)
     payload: dict[str, Any] = {

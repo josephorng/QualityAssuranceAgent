@@ -265,20 +265,26 @@ def _nearby_object_phrases(instruction: str) -> list[str] | None:
 
 def _element_from_point_args(
     element_from_point: dict[str, Any] | None,
-) -> dict[str, str]:
-    """Copy press-time ElementFromPoint Name/Value into tool args (EFP channel).
+) -> dict[str, Any]:
+    """Copy press-time ElementFromPoint Name/Value/parent into tool args.
 
     These are separate from FindAll hub identity (`instruction` / `anchor_text`).
-    Replay uses ``name``/``value`` only for live EFP verify — never as the
+    Replay uses ``name``/``value`` for live EFP verify — never as the
     FindAll/OCR similarity query, and never to overwrite the hub label.
+    Optional ``parent`` is the ControlView parent fingerprint of the EFP leaf.
     """
     if not isinstance(element_from_point, dict):
         return {}
-    out: dict[str, str] = {}
+    out: dict[str, Any] = {}
     if "name" in element_from_point:
         out["name"] = str(element_from_point.get("name") or "")
     if "value" in element_from_point:
         out["value"] = str(element_from_point.get("value") or "")
+    from src.recorder.uia_input_boxes import _normalize_parent_signature
+
+    parent = _normalize_parent_signature(element_from_point.get("parent"))
+    if parent:
+        out["parent"] = parent
     return out
 
 
@@ -301,6 +307,22 @@ def _hub_source_from_vision(vision: dict[str, Any] | None) -> str | None:
     if source == "uia_efp":
         return "uia_efp"
     return None
+
+
+def _hub_parent_from_vision(vision: dict[str, Any] | None) -> dict[str, str] | None:
+    """Copy FindAll primary ``hub_parent`` when present."""
+    if not isinstance(vision, dict):
+        return None
+    candidates = vision.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        return None
+    primary = candidates[0]
+    if not isinstance(primary, dict):
+        return None
+    from src.recorder.uia_input_boxes import _normalize_parent_signature
+
+    parent = _normalize_parent_signature(primary.get("hub_parent"))
+    return parent or None
 
 
 def _move_mouse_call(
@@ -333,6 +355,10 @@ def _move_mouse_call(
     hub_source = _hub_source_from_vision(vision)
     if hub_source is not None:
         args["hub_source"] = hub_source
+    if hub_source == "findall":
+        hub_parent = _hub_parent_from_vision(vision)
+        if hub_parent is not None:
+            args["hub_parent"] = hub_parent
     nearby = _nearby_object_phrases(instruction)
     if nearby:
         args["nearby_objects"] = nearby

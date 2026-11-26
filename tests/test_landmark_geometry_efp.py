@@ -1595,6 +1595,135 @@ def test_uia_first_findall_hub_source_skips_constellation_efp() -> None:
     assert chosen is hub
 
 
+def test_uia_first_findall_hub_parent_agree_keeps_hit() -> None:
+    hub = UiDetection(
+        bbox=(60, 290, 40, 30),
+        cx=80,
+        cy=305,
+        class_id=YOLO_CLASS_TEXT,
+        class_name="text",
+        text="文件",
+        source="uia",
+        uia_control_type="text",
+    )
+    tree_parent = {
+        "control_type": "tree",
+        "name": "導覽",
+        "automation_id": "ProperTreeHost",
+    }
+
+    def parent_probe(x: int, y: int):
+        return dict(tree_parent)
+
+    chosen, reason = _try_uia_first_unique_select(
+        [hub],
+        anchor="文件",
+        nearby_hints=[],
+        nearby_labels=[],
+        nearby_phrases=[],
+        filter_by_control_type=False,
+        control_type_token="text",
+        recorded_anchor=True,
+        hub_source="findall",
+        recorded_hub_parent=tree_parent,
+        parent_probe_fn=parent_probe,
+    )
+    assert reason == "hit"
+    assert chosen is hub
+
+
+def test_uia_first_findall_hub_parent_disagree_efp_recovery_hit() -> None:
+    breadcrumb = UiDetection(
+        bbox=(550, 40, 40, 36),
+        cx=570,
+        cy=58,
+        class_id=YOLO_CLASS_TEXT,
+        class_name="text",
+        text="文件",
+        source="uia",
+        uia_control_type="menu_item",
+    )
+    tree_parent = {
+        "control_type": "tree",
+        "automation_id": "ProperTreeHost",
+    }
+    crumb_parent = {"control_type": "tool_bar", "name": "位址列"}
+    efp_parent = dict(tree_parent)
+
+    def parent_probe(x: int, y: int):
+        if int(y) < 100:
+            return dict(crumb_parent)
+        return dict(tree_parent)
+
+    def bring_into_view(name: str, value: str, control_type_id):
+        assert name == "文件 (已釘選)"
+        return ((64, 290, 34, 32), "文件 (已釘選)", "文件 (已釘選)", "tree_item")
+
+    chosen, reason = _try_uia_first_unique_select(
+        [breadcrumb],
+        anchor="文件",
+        nearby_hints=[],
+        nearby_labels=[],
+        nearby_phrases=[],
+        filter_by_control_type=False,
+        control_type_token="text",
+        recorded_anchor=True,
+        hub_source="findall",
+        recorded_efp_name="文件 (已釘選)",
+        recorded_efp_value="文件 (已釘選)",
+        recorded_hub_parent=tree_parent,
+        recorded_efp_parent=efp_parent,
+        parent_probe_fn=parent_probe,
+        bring_into_view_fn=bring_into_view,
+    )
+    assert reason == "efp_parent_recovery_hit"
+    assert chosen is not None
+    assert chosen.cx == 64 + 34 // 2
+    assert chosen.cy == 290 + 32 // 2
+
+
+def test_uia_first_findall_hub_parent_disagree_efp_recovery_miss() -> None:
+    breadcrumb = UiDetection(
+        bbox=(550, 40, 40, 36),
+        cx=570,
+        cy=58,
+        class_id=YOLO_CLASS_TEXT,
+        class_name="text",
+        text="文件",
+        source="uia",
+        uia_control_type="menu_item",
+    )
+    tree_parent = {
+        "control_type": "tree",
+        "automation_id": "ProperTreeHost",
+    }
+    crumb_parent = {"control_type": "tool_bar", "name": "位址列"}
+
+    def parent_probe(x: int, y: int):
+        return dict(crumb_parent)
+
+    chosen, reason = _try_uia_first_unique_select(
+        [breadcrumb],
+        anchor="文件",
+        nearby_hints=[],
+        nearby_labels=[],
+        nearby_phrases=[],
+        filter_by_control_type=False,
+        control_type_token="text",
+        recorded_anchor=True,
+        hub_source="findall",
+        recorded_efp_name="文件 (已釘選)",
+        recorded_efp_value="文件 (已釘選)",
+        recorded_hub_parent=tree_parent,
+        recorded_efp_parent=tree_parent,
+        parent_probe_fn=parent_probe,
+        bring_into_view_fn=lambda *_a, **_k: None,
+        name_findall_fn=lambda *_a, **_k: [],
+    )
+    assert chosen is None
+    assert reason == "parent_signature_miss"
+
+
 def test_uia_first_findall_input_hub_source_no_hard_constellation_efp() -> None:
     """findall input hub must not hard-commit via poisoned constellation-EFP."""
     geom = _simple_landmark_geometry(

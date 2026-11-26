@@ -199,6 +199,8 @@ async def move_mouse(
     name: str | None = None,
     value: str | None = None,
     hub_source: str | None = None,
+    parent: dict | None = None,
+    hub_parent: dict | None = None,
 ):
     '''
     Take a screenshot, detect UI targets (text, element, input, scrollbar), and move
@@ -230,6 +232,9 @@ async def move_mouse(
     value: optional recorded ElementFromPoint UIA Value (feasibility; not used for match).
     hub_source: optional "findall" or "uia_efp" — recorded primary provenance; gates
     hard constellation-EFP (only ``uia_efp``). Missing falls back to EFP↔hub agree.
+    parent: optional ControlView parent fingerprint of the EFP leaf
+    ({control_type, name, automation_id}).
+    hub_parent: optional ControlView parent fingerprint of the FindAll hub leaf.
     '''
     duration: float = 0.0
     result = await _move_mouse(
@@ -244,6 +249,8 @@ async def move_mouse(
         name=name,
         value=value,
         hub_source=hub_source,
+        parent=parent,
+        hub_parent=hub_parent,
     )
     result["instruction"] = instruction
     return result

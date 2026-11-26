@@ -1651,30 +1651,263 @@ def uia_text_element_at_point(
         _note_element_from_point_elapsed(time.perf_counter() - started)
 
 
-def _element_from_point_name_value_impl(x: int, y: int) -> dict[str, Any]:
-    started = time.perf_counter()
-    probed = uia_text_element_at_point(int(x), int(y))
-    elapsed_s = round(time.perf_counter() - started, 3)
-    out: dict[str, Any] = {"element_from_point_s": elapsed_s}
-    if not isinstance(probed, tuple) or len(probed) < 5:
+def _element_parent_signature(
+    automation: ctypes.c_void_p, element: ctypes.c_void_p
+) -> dict[str, str]:
+    """Lightweight ControlView parent fingerprint (omit empty keys).
+
+    Shape: ``{control_type?, name?, automation_id?}`` — same spirit as
+    :func:`uia_focused_element_snapshot`. One parent climb only.
+    """
+    parent = _control_view_parent(automation, element)
+    if parent is None:
+        return {}
+    try:
+        out: dict[str, str] = {}
+        control_type = control_type_token_from_id(_element_control_type(parent))
+        if control_type:
+            out["control_type"] = control_type
+        name = canonicalize_uia_shell_status_label(
+            str(_element_current_name(parent) or "").strip()
+        )
+        if name:
+            out["name"] = name
+        automation_id = str(_element_automation_id(parent) or "").strip()
+        if automation_id:
+            out["automation_id"] = automation_id
         return out
-    name = str(probed[3] or "").strip()
-    value = str(probed[4] or "").strip()
-    if name or value:
-        out["name"] = name
-        out["value"] = value
-    raw_box = probed[1]
-    if isinstance(raw_box, (list, tuple)) and len(raw_box) == 4:
-        try:
-            bbox = [int(v) for v in raw_box]
-        except (TypeError, ValueError):
-            bbox = []
-        if len(bbox) == 4 and bbox[2] > 0 and bbox[3] > 0:
-            out["bbox"] = bbox
-    control_type = str(probed[2] or "").strip()
-    if control_type:
-        out["control_type"] = control_type
+    finally:
+        _com_release(parent)
+
+
+def _normalize_parent_signature(raw: Any) -> dict[str, str]:
+    """Copy a parent signature dict, dropping empty keys."""
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key in ("control_type", "name", "automation_id"):
+        text = str(raw.get(key) or "").strip()
+        if text:
+            out[key] = text
     return out
+
+
+def parent_signature_usable(signature: Any) -> bool:
+    """True when a recorded parent fingerprint can gate replay.
+
+    Weak chrome (empty, or generic pane/group/custom with no name and no
+    AutomationId) does not unlock the gate or EFP recovery.
+    """
+    sig = _normalize_parent_signature(signature)
+    if not sig:
+        return False
+    control_type = str(sig.get("control_type") or "").strip().lower()
+    name = str(sig.get("name") or "").strip()
+    automation_id = str(sig.get("automation_id") or "").strip()
+    if name or automation_id:
+        return True
+    # Type-only: reject generic containers that cannot disambiguate leaves.
+    if control_type in ("pane", "group", "custom", "window", "document"):
+        return False
+    return bool(control_type)
+
+
+def parent_signatures_agree(recorded: Any, live: Any) -> bool:
+    """True when live parent soft-agrees with a usable recorded signature."""
+    if not parent_signature_usable(recorded):
+        return True
+    rec = _normalize_parent_signature(recorded)
+    liv = _normalize_parent_signature(live)
+    if not liv:
+        return False
+    rec_type = str(rec.get("control_type") or "").strip().lower()
+    live_type = str(liv.get("control_type") or "").strip().lower()
+    if rec_type and live_type and rec_type != live_type:
+        return False
+    rec_id = str(rec.get("automation_id") or "").strip()
+    live_id = str(liv.get("automation_id") or "").strip()
+    if rec_id and live_id and rec_id != live_id:
+        return False
+    rec_name = canonicalize_uia_shell_status_label(str(rec.get("name") or ""))
+    live_name = canonicalize_uia_shell_status_label(str(liv.get("name") or ""))
+    if rec_name and live_name and rec_name.casefold() != live_name.casefold():
+        return False
+    # Recorded had a usable fingerprint; require at least one overlapping field.
+    if rec_type and live_type and rec_type == live_type:
+        return True
+    if rec_id and live_id and rec_id == live_id:
+        return True
+    if rec_name and live_name and rec_name.casefold() == live_name.casefold():
+        return True
+    return False
+
+
+def _parent_signature_at_point_impl(x: int, y: int) -> dict[str, str]:
+    """ElementFromPoint + one parent climb; returns ``{}`` on failure."""
+    if os.name != "nt":
+        return {}
+    ole32 = ctypes.windll.ole32
+    initialized_here = False
+    hr = ole32.CoInitializeEx(None, _COINIT_MULTITHREADED)
+    if hr == _S_OK:
+        initialized_here = True
+    elif hr not in (_S_OK, _S_FALSE) and (hr & 0xFFFFFFFF) != 0x80010106:
+        return {}
+
+    class _POINT(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+    automation: ctypes.c_void_p | None = None
+    element: ctypes.c_void_p | None = None
+    try:
+        clsid = _guid_from_string(_CLSID_CUIAutomation)
+        iid = _guid_from_string(_IID_IUIAutomation)
+        automation_ptr = ctypes.c_void_p()
+        hr = ole32.CoCreateInstance(
+            ctypes.byref(clsid),
+            None,
+            _CLSCTX_INPROC_SERVER,
+            ctypes.byref(iid),
+            ctypes.byref(automation_ptr),
+        )
+        if hr != _S_OK or not automation_ptr:
+            return {}
+        automation = automation_ptr
+        element_from_point = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+            _POINT,
+            ctypes.POINTER(ctypes.c_void_p),
+        )(
+            _com_vtable(automation, _UIA_ELEMENT_FROM_POINT + 1)[
+                _UIA_ELEMENT_FROM_POINT
+            ]
+        )
+        element_ptr = ctypes.c_void_p()
+        hr = element_from_point(
+            automation,
+            _POINT(int(x), int(y)),
+            ctypes.byref(element_ptr),
+        )
+        if hr != _S_OK or not element_ptr:
+            return {}
+        element = element_ptr
+        return _element_parent_signature(automation, element)
+    except Exception:
+        return {}
+    finally:
+        _com_release(element)
+        _com_release(automation)
+        if initialized_here:
+            try:
+                ole32.CoUninitialize()
+            except Exception:
+                pass
+
+
+def parent_signature_at_point(x: int, y: int) -> dict[str, str]:
+    """ControlView parent fingerprint under a screen point (UIA worker)."""
+    from src.recorder.uia_thread import uia_call
+
+    try:
+        result = uia_call(
+            _parent_signature_at_point_impl,
+            int(x),
+            int(y),
+            timeout_s=2.5,
+        )
+    except Exception:
+        return {}
+    return _normalize_parent_signature(result)
+
+
+def _element_from_point_name_value_impl(x: int, y: int) -> dict[str, Any]:
+    """EFP Name/Value/bbox/type plus optional parent signature (same leaf)."""
+    started = time.perf_counter()
+    out: dict[str, Any] = {}
+    if os.name != "nt":
+        out["element_from_point_s"] = round(time.perf_counter() - started, 3)
+        return out
+
+    ole32 = ctypes.windll.ole32
+    initialized_here = False
+    hr = ole32.CoInitializeEx(None, _COINIT_MULTITHREADED)
+    if hr == _S_OK:
+        initialized_here = True
+    elif hr not in (_S_OK, _S_FALSE) and (hr & 0xFFFFFFFF) != 0x80010106:
+        out["element_from_point_s"] = round(time.perf_counter() - started, 3)
+        return out
+
+    class _POINT(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+    automation: ctypes.c_void_p | None = None
+    element: ctypes.c_void_p | None = None
+    try:
+        clsid = _guid_from_string(_CLSID_CUIAutomation)
+        iid = _guid_from_string(_IID_IUIAutomation)
+        automation_ptr = ctypes.c_void_p()
+        hr = ole32.CoCreateInstance(
+            ctypes.byref(clsid),
+            None,
+            _CLSCTX_INPROC_SERVER,
+            ctypes.byref(iid),
+            ctypes.byref(automation_ptr),
+        )
+        if hr != _S_OK or not automation_ptr:
+            return out
+        automation = automation_ptr
+        element_from_point = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+            _POINT,
+            ctypes.POINTER(ctypes.c_void_p),
+        )(
+            _com_vtable(automation, _UIA_ELEMENT_FROM_POINT + 1)[
+                _UIA_ELEMENT_FROM_POINT
+            ]
+        )
+        element_ptr = ctypes.c_void_p()
+        hr = element_from_point(
+            automation,
+            _POINT(int(x), int(y)),
+            ctypes.byref(element_ptr),
+        )
+        if hr != _S_OK or not element_ptr:
+            return out
+        element = element_ptr
+        _label, name, value = _element_label_parts(element)
+        name = str(name or "").strip()
+        value = str(value or "").strip()
+        if name or value:
+            out["name"] = name
+            out["value"] = value
+        bounds = _element_bounding_xyxy(element)
+        if bounds is not None:
+            left, top, right, bottom = bounds
+            width = int(right) - int(left)
+            height = int(bottom) - int(top)
+            if width > 0 and height > 0:
+                out["bbox"] = [int(left), int(top), width, height]
+        control_type = control_type_token_from_id(_element_control_type(element))
+        if control_type:
+            out["control_type"] = control_type
+        parent = _element_parent_signature(automation, element)
+        if parent:
+            out["parent"] = parent
+        return out
+    except Exception:
+        return out
+    finally:
+        out["element_from_point_s"] = round(time.perf_counter() - started, 3)
+        _com_release(element)
+        _com_release(automation)
+        if initialized_here:
+            try:
+                ole32.CoUninitialize()
+            except Exception:
+                pass
+        _note_element_from_point_elapsed(float(out.get("element_from_point_s") or 0.0))
 
 
 def element_from_point_name_value(x: int, y: int) -> dict[str, Any]:
@@ -1683,7 +1916,9 @@ def element_from_point_name_value(x: int, y: int) -> dict[str, Any]:
     Always returns ``{"element_from_point_s": float}`` for the wall time of
     the probe. When Name and/or Value are non-empty, also includes
     ``"name"`` / ``"value"``. When the live leaf has a box, also includes
-    screen ``"bbox"`` xywh and ``"control_type"`` (UIA suffix token). Used to
+    screen ``"bbox"`` xywh and ``"control_type"`` (UIA suffix token). When the
+    ControlView parent is readable, also includes ``"parent"`` with
+    ``control_type`` / ``name`` / ``automation_id`` (empty keys omitted). Used to
     stash ElementFromPoint results on recorded pointer steps without requiring
     FindAll to expose the same leaf; analysis may inject the leaf as a
     FindAll-shaped peer for instruction naming. Marshals onto the UIA worker.

@@ -136,7 +136,15 @@ def test_compile_click_copies_element_from_point_name_value() -> None:
     event = _event(
         kind="click",
         click_count=1,
-        element_from_point={"name": "展開", "value": "1"},
+        element_from_point={
+            "name": "展開",
+            "value": "1",
+            "parent": {
+                "control_type": "tool_bar",
+                "name": "功能區",
+                "automation_id": "Ribbon",
+            },
+        },
     )
     instruction = "將滑鼠移到「展開」按鈕，並點擊滑鼠一下。"
     calls = compile_tool_calls(event, instruction)
@@ -144,6 +152,11 @@ def test_compile_click_copies_element_from_point_name_value() -> None:
     assert calls[0]["name"] == "move_mouse"
     assert calls[0]["arguments"]["name"] == "展開"
     assert calls[0]["arguments"]["value"] == "1"
+    assert calls[0]["arguments"]["parent"] == {
+        "control_type": "tool_bar",
+        "name": "功能區",
+        "automation_id": "Ribbon",
+    }
 
 
 def test_compile_hub_source_findall_from_uia_primary() -> None:
@@ -157,6 +170,11 @@ def test_compile_hub_source_findall_from_uia_primary() -> None:
                 "text": "WinMaster7 Console",
                 "uia_control_type": "list_item",
                 "source": "uia",
+                "hub_parent": {
+                    "control_type": "tree",
+                    "name": "導覽",
+                    "automation_id": "ProperTreeHost",
+                },
             }
         ],
         "local_cursor": [172, 67],
@@ -164,6 +182,11 @@ def test_compile_hub_source_findall_from_uia_primary() -> None:
     calls = compile_tool_calls(event, instruction, vision=vision)
     assert calls is not None
     assert calls[0]["arguments"]["hub_source"] == "findall"
+    assert calls[0]["arguments"]["hub_parent"] == {
+        "control_type": "tree",
+        "name": "導覽",
+        "automation_id": "ProperTreeHost",
+    }
 
 
 def test_compile_hub_source_uia_efp_from_efp_primary() -> None:

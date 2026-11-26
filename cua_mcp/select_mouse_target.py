@@ -3617,10 +3617,11 @@ def _anchor_type_suffix(anchor: str) -> str | None:
 _EFP_VERIFIED_UIA_FIRST_REASONS = frozenset(
     {
         "landmark_efp_hit",
-        "landmark_efp_synth_hit",
-        "landmark_efp_neighbor_hit",
-        "uia_data_item_name_hit",
-    }
+    "landmark_efp_synth_hit",
+    "landmark_efp_neighbor_hit",
+    "uia_data_item_name_hit",
+    "efp_parent_recovery_hit",
+}
 )
 
 
@@ -5599,7 +5600,10 @@ def _try_uia_first_unique_select(
     recorded_efp_name: str | None = None,
     recorded_efp_value: str | None = None,
     hub_source: str | None = None,
+    recorded_hub_parent: dict[str, str] | None = None,
+    recorded_efp_parent: dict[str, str] | None = None,
     point_probe_fn: Any | None = None,
+    parent_probe_fn: Any | None = None,
     data_item_lookup_fn: Any | None = None,
     name_findall_fn: Any | None = None,
     bring_into_view_fn: Any | None = None,
@@ -5620,14 +5624,195 @@ def _try_uia_first_unique_select(
     that keeps zero-size hits, ScrollIntoView/SetFocus, then a refreshed
     positive bbox (``name_findall_hit``). Legacy ``name_findall_fn`` remains a
     fallback when bring-into-view is unset.
+
+    For ``hub_source=findall``, a usable recorded ``hub_parent`` must agree with
+    the live ControlView parent at the unique leaf before ``hit`` /
+    ``name_findall_hit``. On disagree (or empty shortlist), when recorded EFP
+    Name/Value and ``recorded_efp_parent`` are usable, Name FindAll by EFP
+    identity + EFP parent agree may still commit as ``efp_parent_recovery_hit``.
     """
     from src.recorder.uia_input_boxes import (
+        _normalize_parent_signature,
         control_type_id_from_token,
+        parent_signature_at_point,
+        parent_signature_usable,
+        parent_signatures_agree,
         split_uia_name_value_label,
         uia_label_combine_name_value,
     )
 
     token = (control_type_token or "").strip().lower()
+    hub_parent = _normalize_parent_signature(recorded_hub_parent)
+    efp_parent = _normalize_parent_signature(recorded_efp_parent)
+
+    def _probe_parent_at(det: UiDetection) -> dict[str, str]:
+        if parent_probe_fn is not None:
+            try:
+                return _normalize_parent_signature(
+                    parent_probe_fn(int(det.cx), int(det.cy))
+                )
+            except Exception:
+                return {}
+        try:
+            return _normalize_parent_signature(
+                parent_signature_at_point(int(det.cx), int(det.cy))
+            )
+        except Exception:
+            return {}
+
+    def _try_efp_parent_recovery() -> UiDetection | None:
+        """Name FindAll by EFP identity + require EFP parent agree."""
+        if not parent_signature_usable(efp_parent):
+            return None
+        if not _recorded_efp_present(recorded_efp_name, recorded_efp_value):
+            return None
+        efp_name = str(recorded_efp_name or "").strip()
+        efp_value = str(recorded_efp_value or "").strip()
+        if not efp_name and not efp_value:
+            return None
+        type_id = control_type_id_from_token(token)
+        brought = None
+        if bring_into_view_fn is not None and efp_name:
+            try:
+                brought = bring_into_view_fn(efp_name, efp_value, type_id)
+            except Exception as exc:
+                brought = None
+                _log_info(
+                    "move_mouse uia_first efp_parent_recovery bring_into_view "
+                    f"error name={efp_name!r} value={efp_value!r} err={exc!r}"
+                )
+        if (
+            isinstance(brought, tuple)
+            and len(brought) >= 3
+            and isinstance(brought[0], (list, tuple))
+            and len(brought[0]) == 4
+        ):
+            try:
+                sx, sy, sw, sh = (int(v) for v in brought[0][:4])
+            except (TypeError, ValueError):
+                sx = sy = sw = sh = 0
+            if sw > 0 and sh > 0:
+                live_name = str(brought[1] or "").strip()
+                live_value = (
+                    str(brought[2] or "").strip() if len(brought) > 2 else ""
+                )
+                live_ct = (
+                    str(brought[3] or "").strip() if len(brought) > 3 else ""
+                ) or None
+                label = uia_label_combine_name_value(
+                    live_name, live_value
+                ).strip() or live_name or efp_name
+                cand = _detection_from_bbox(
+                    (sx, sy, sw, sh),
+                    YOLO_CLASS_TEXT,
+                    text=label,
+                    source="uia",
+                    uia_control_type=live_ct or token or None,
+                )
+                live_parent = _probe_parent_at(cand)
+                if parent_signatures_agree(efp_parent, live_parent):
+                    _log_info(
+                        "move_mouse uia_first efp_parent_recovery_hit "
+                        f"center=[{cand.cx},{cand.cy}] name={live_name!r} "
+                        f"parent={live_parent!r}"
+                    )
+                    return cand
+                _log_info(
+                    "move_mouse uia_first efp_parent_recovery parent_miss "
+                    f"center=[{cand.cx},{cand.cy}] "
+                    f"recorded={efp_parent!r} live={live_parent!r}"
+                )
+                return None
+        if name_findall_fn is not None and efp_name:
+            try:
+                hits = name_findall_fn(efp_name, type_id)
+            except Exception as exc:
+                hits = []
+                _log_info(
+                    "move_mouse uia_first efp_parent_recovery name_findall "
+                    f"error name={efp_name!r} err={exc!r}"
+                )
+            recovered: list[UiDetection] = []
+            if isinstance(hits, list):
+                for hit in hits:
+                    if not (
+                        isinstance(hit, tuple)
+                        and len(hit) >= 3
+                        and isinstance(hit[0], (list, tuple))
+                        and len(hit[0]) == 4
+                    ):
+                        continue
+                    try:
+                        sx, sy, sw, sh = (int(v) for v in hit[0][:4])
+                    except (TypeError, ValueError):
+                        continue
+                    if sw <= 0 or sh <= 0:
+                        continue
+                    live_name = str(hit[1] or "").strip()
+                    live_value = (
+                        str(hit[2] or "").strip() if len(hit) > 2 else ""
+                    )
+                    # Name must match; Value only when the live leaf exposes one
+                    # (empty live Value is common for tree/list items).
+                    if live_name != efp_name:
+                        continue
+                    if efp_value and live_value and live_value != efp_value:
+                        continue
+                    live_ct = (
+                        str(hit[3] or "").strip() if len(hit) > 3 else ""
+                    ) or None
+                    label = uia_label_combine_name_value(
+                        live_name, live_value
+                    ).strip() or live_name or efp_name
+                    recovered.append(
+                        _detection_from_bbox(
+                            (sx, sy, sw, sh),
+                            YOLO_CLASS_TEXT,
+                            text=label,
+                            source="uia",
+                            uia_control_type=live_ct or token or None,
+                        )
+                    )
+            parent_ok = [
+                det
+                for det in recovered
+                if parent_signatures_agree(efp_parent, _probe_parent_at(det))
+            ]
+            if len(parent_ok) == 1:
+                cand = parent_ok[0]
+                _log_info(
+                    "move_mouse uia_first efp_parent_recovery_hit "
+                    f"center=[{cand.cx},{cand.cy}] text={cand.text!r} "
+                    f"hits={len(recovered)}"
+                )
+                return cand
+            _log_info(
+                "move_mouse uia_first efp_parent_recovery miss "
+                f"name={efp_name!r} hits={len(recovered)} "
+                f"parent_ok={len(parent_ok)}"
+            )
+        return None
+
+    def _finalize_findall_unique(
+        chosen: UiDetection, reason: str
+    ) -> tuple[UiDetection | None, str]:
+        """Hub-parent gate for findall unique commits; EFP recovery on disagree."""
+        if _normalize_hub_source(hub_source) != "findall":
+            return chosen, reason
+        if not parent_signature_usable(hub_parent):
+            return chosen, reason
+        live_parent = _probe_parent_at(chosen)
+        if parent_signatures_agree(hub_parent, live_parent):
+            return chosen, reason
+        _log_info(
+            "move_mouse uia_first parent_signature_miss "
+            f"reason={reason!r} center=[{chosen.cx},{chosen.cy}] "
+            f"text={chosen.text!r} recorded={hub_parent!r} live={live_parent!r}"
+        )
+        recovered = _try_efp_parent_recovery()
+        if recovered is not None:
+            return recovered, "efp_parent_recovery_hit"
+        return None, "parent_signature_miss"
 
     def _data_item_target_name() -> str:
         name = str(recorded_efp_name or "").strip()
@@ -5946,8 +6131,13 @@ def _try_uia_first_unique_select(
             raw_name = str(
                 split_uia_name_value_label(str(recorded_efp_name))[0] or ""
             ).strip() or str(recorded_efp_name or "").strip()
+        # Borrow EFP Value only when EFP Name is the same leaf as the hub Name.
+        # Unrelated EFP (e.g. Details cell Name="名稱", Value=filename) must not
+        # filter ListItem/TreeItem Name FindAll recovery.
         if not raw_value and recorded_efp_value:
-            raw_value = str(recorded_efp_value or "").strip()
+            efp_name = str(recorded_efp_name or "").strip()
+            if efp_name and efp_name == raw_name:
+                raw_value = str(recorded_efp_value or "").strip()
         if raw_name:
             type_id = control_type_id_from_token(token)
             if bring_into_view_fn is not None:
@@ -5994,7 +6184,7 @@ def _try_uia_first_unique_select(
                             f"center=[{chosen.cx},{chosen.cy}] "
                             f"control_type_id={type_id!r}"
                         )
-                        return chosen, "name_findall_hit"
+                        return _finalize_findall_unique(chosen, "name_findall_hit")
                 _log_info(
                     "move_mouse uia_first name_findall bring_into_view fail "
                     f"name={raw_name!r} value={raw_value!r} "
@@ -6095,6 +6285,11 @@ def _try_uia_first_unique_select(
         return None, reason
 
     if not anchor_matches:
+        # Empty Name shortlist: try EFP Name+parent recovery before miss.
+        if _normalize_hub_source(hub_source) == "findall":
+            recovered = _try_efp_parent_recovery()
+            if recovered is not None:
+                return recovered, "efp_parent_recovery_hit"
         return _name_path_miss("no_anchor")
 
     before_nearby = len(anchor_matches)
@@ -6118,7 +6313,7 @@ def _try_uia_first_unique_select(
         f"center=[{chosen.cx},{chosen.cy}] text={chosen.text!r} "
         f"source={chosen.source!r}"
     )
-    return chosen, "hit"
+    return _finalize_findall_unique(chosen, "hit")
 
 
 def _yolo_subtargets_inside_uia(
@@ -7179,6 +7374,8 @@ async def find_mouse_point(
     recorded_efp_name: str | None = None,
     recorded_efp_value: str | None = None,
     hub_source: str | None = None,
+    recorded_hub_parent: dict[str, str] | None = None,
+    recorded_efp_parent: dict[str, str] | None = None,
 ) -> tuple[int, int, dict[str, Any]] | None:
     """
     Capture selected monitor(s), build YOLO+OCR candidates, filter and pick via LLM.
@@ -7261,6 +7458,8 @@ async def find_mouse_point(
         recorded_efp_name=recorded_efp_name,
         recorded_efp_value=recorded_efp_value,
         hub_source=hub_source,
+        recorded_hub_parent=recorded_hub_parent,
+        recorded_efp_parent=recorded_efp_parent,
         ocr_fallback=ocr_fallback,
     )
     if result is not None:
@@ -7304,6 +7503,8 @@ async def find_mouse_point(
         recorded_efp_name=recorded_efp_name,
         recorded_efp_value=recorded_efp_value,
         hub_source=hub_source,
+        recorded_hub_parent=recorded_hub_parent,
+        recorded_efp_parent=recorded_efp_parent,
         ocr_fallback=ocr_fallback,
     )
     if result2 is None:
@@ -7333,6 +7534,8 @@ async def _find_mouse_point_attempt(
     recorded_efp_name: str | None = None,
     recorded_efp_value: str | None = None,
     hub_source: str | None = None,
+    recorded_hub_parent: dict[str, str] | None = None,
+    recorded_efp_parent: dict[str, str] | None = None,
     ocr_fallback: Any | None = None,
 ) -> tuple[
     tuple[int, int, dict[str, Any]] | None,
@@ -7387,6 +7590,10 @@ async def _find_mouse_point_attempt(
         str(recorded_efp_value).strip() if isinstance(recorded_efp_value, str) else ""
     )
     hub_source = _normalize_hub_source(hub_source)
+    from src.recorder.uia_input_boxes import _normalize_parent_signature
+
+    recorded_hub_parent = _normalize_parent_signature(recorded_hub_parent) or None
+    recorded_efp_parent = _normalize_parent_signature(recorded_efp_parent) or None
     recorded_anchor_match = structured_anchor_text is not None
 
     total_started = time.perf_counter()
@@ -7624,6 +7831,8 @@ async def _find_mouse_point_attempt(
                 recorded_efp_name=recorded_efp_name,
                 recorded_efp_value=recorded_efp_value,
                 hub_source=hub_source,
+                recorded_hub_parent=recorded_hub_parent,
+                recorded_efp_parent=recorded_efp_parent,
                 data_item_lookup_fn=_data_item_lookup_by_name,
                 name_findall_fn=_name_findall_by_name,
                 bring_into_view_fn=_bring_named_into_view,
@@ -9458,6 +9667,8 @@ async def resolve_mouse_point(
     recorded_efp_name: str | None = None,
     recorded_efp_value: str | None = None,
     hub_source: str | None = None,
+    recorded_hub_parent: dict[str, str] | None = None,
+    recorded_efp_parent: dict[str, str] | None = None,
 ) -> tuple[int, int, dict[str, Any]]:
     """
     Capture selected monitor(s), build YOLO+OCR candidates, filter and pick via LLM.
@@ -9482,6 +9693,8 @@ async def resolve_mouse_point(
         recorded_efp_name=recorded_efp_name,
         recorded_efp_value=recorded_efp_value,
         hub_source=hub_source,
+        recorded_hub_parent=recorded_hub_parent,
+        recorded_efp_parent=recorded_efp_parent,
     )
     if found is None:
         raise ValueError(RECORDED_ANCHOR_MISS_MESSAGE)

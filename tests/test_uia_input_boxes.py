@@ -629,30 +629,65 @@ def test_snapshot_uia_screen_keeps_expanded_labeled_control_types(monkeypatch) -
 
 def test_element_from_point_name_value_extracts_raw_strings(monkeypatch) -> None:
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes.uia_text_element_at_point",
-        lambda x, y: ("展開|1", (10, 20, 30, 40), "button", "展開", "1"),
+        "src.recorder.uia_input_boxes._element_from_point_name_value_impl",
+        lambda x, y: {
+            "element_from_point_s": 0.01,
+            "name": "展開",
+            "value": "1",
+            "bbox": [10, 20, 30, 40],
+            "control_type": "button",
+            "parent": {
+                "control_type": "tool_bar",
+                "name": "功能區",
+                "automation_id": "Ribbon",
+            },
+        },
     )
     payload = element_from_point_name_value(100, 200)
     assert payload["name"] == "展開"
     assert payload["value"] == "1"
     assert payload["bbox"] == [10, 20, 30, 40]
     assert payload["control_type"] == "button"
+    assert payload["parent"]["name"] == "功能區"
     assert isinstance(payload["element_from_point_s"], float)
     assert payload["element_from_point_s"] >= 0.0
 
 
 def test_element_from_point_name_value_keeps_timing_when_empty(monkeypatch) -> None:
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes.uia_text_element_at_point",
-        lambda x, y: None,
+        "src.recorder.uia_input_boxes._element_from_point_name_value_impl",
+        lambda x, y: {"element_from_point_s": 0.02},
     )
     payload = element_from_point_name_value(1, 2)
     assert "name" not in payload
     assert "value" not in payload
     assert "bbox" not in payload
     assert "control_type" not in payload
+    assert "parent" not in payload
     assert isinstance(payload["element_from_point_s"], float)
     assert payload["element_from_point_s"] >= 0.0
+
+
+def test_parent_signature_usable_and_agree() -> None:
+    from src.recorder.uia_input_boxes import (
+        parent_signature_usable,
+        parent_signatures_agree,
+    )
+
+    assert not parent_signature_usable({})
+    assert not parent_signature_usable({"control_type": "pane"})
+    assert parent_signature_usable({"control_type": "tree", "name": "導覽"})
+    assert parent_signature_usable({"automation_id": "ProperTreeHost"})
+    assert parent_signatures_agree(
+        {"control_type": "tree", "name": "導覽"},
+        {"control_type": "tree", "name": "導覽"},
+    )
+    assert not parent_signatures_agree(
+        {"control_type": "tree", "name": "導覽"},
+        {"control_type": "tool_bar", "name": "位址列"},
+    )
+    # Absent/weak recorded parent never vetoes.
+    assert parent_signatures_agree({}, {"control_type": "tool_bar"})
 
 
 def test_merge_nested_element_boxes_keeps_larger() -> None:

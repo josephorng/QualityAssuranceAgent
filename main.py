@@ -43,7 +43,7 @@ def _fault_log_path() -> Path:
     return _application_dir_for_crash_log() / FAULT_LOG_FILENAME
 
 
-_FAULT_HEARTBEAT_INTERVAL_S = 10.0
+_FAULT_HEARTBEAT_INTERVAL_S = 60.0
 _fault_log_path_active: Path | None = None
 _fault_heartbeat_stop = threading.Event()
 

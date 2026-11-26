@@ -1217,6 +1217,12 @@ class RecordingSession:
         self._uia_status_efp_control_type: str = ""
         self._uia_status_efp_scroll: str = ""
         self._uia_status_efp_pending: bool = False
+        # FindAll covering leaf text at the idle/readiness cursor (LED dual strip).
+        self._uia_status_findall_label: str = ""
+        self._uia_status_findall_parent: str = ""
+        self._uia_status_efp_parent: str = ""
+        # Unique usable FindAll text labels in the cursor's settle/hover cache.
+        self._uia_status_findall_nearby: str = ""
         # Active background UIA work for the LED strip (EFP / FindAll:* kinds).
         # Insertion-ordered; keys are short labels shown on the overlay.
         self._uia_bg_active: dict[str, bool] = {}
@@ -1400,6 +1406,10 @@ class RecordingSession:
             self._uia_status_efp_control_type = ""
             self._uia_status_efp_scroll = ""
             self._uia_status_efp_pending = False
+            self._uia_status_findall_label = ""
+            self._uia_status_findall_parent = ""
+            self._uia_status_efp_parent = ""
+            self._uia_status_findall_nearby = ""
             self._uia_bg_active = {}
             self._hover_uia_led_active = False
             self._hover_uia_led_token = 0
@@ -1982,6 +1992,125 @@ class RecordingSession:
             return "…"
         return cleaned[: _IDLE_EFP_LABEL_MAX_CHARS - 1] + "…"
 
+    def _findall_led_snapshot_at_cursor(
+        self, cursor_xy: tuple[int, int] | None
+    ) -> dict[str, Any] | None:
+        """Settle/hover FindAll cache for ``cursor_xy``, or ``None``.
+
+        Must not be called while holding ``_lock``. Never raises.
+        """
+        if cursor_xy is None:
+            return None
+        try:
+            x, y = int(cursor_xy[0]), int(cursor_xy[1])
+        except (TypeError, ValueError, IndexError):
+            return None
+        try:
+            click_window = self._click_window_payload_at(x, y)
+            snapshot = self._cached_uia_before(click_window, cursor_xy=(x, y))
+            return snapshot if isinstance(snapshot, dict) else None
+        except Exception:
+            return None
+
+    def _findall_cover_label_at_cursor(
+        self, cursor_xy: tuple[int, int] | None
+    ) -> str:
+        """Usable FindAll leaf text covering ``cursor_xy``, or ``""``.
+
+        Prefers the shortest covering label (usually the most specific leaf).
+        Must not be called while holding ``_lock`` (cache lookup takes the lock).
+        Never raises — LED callers treat miss as empty.
+        """
+        if cursor_xy is None:
+            return ""
+        try:
+            x, y = int(cursor_xy[0]), int(cursor_xy[1])
+        except (TypeError, ValueError, IndexError):
+            return ""
+        try:
+            snapshot = self._findall_led_snapshot_at_cursor((x, y))
+            if not isinstance(snapshot, dict):
+                return ""
+            from src.recorder.uia_replay_repair import snapshot_usable_covering_labels
+
+            covering = [
+                str(label).strip()
+                for label in snapshot_usable_covering_labels(snapshot, (x, y))
+                if str(label).strip()
+            ]
+            if not covering:
+                return ""
+            return min(covering, key=lambda label: (len(label), label))
+        except Exception:
+            return ""
+
+    def _findall_nearby_count_at_cursor(
+        self, cursor_xy: tuple[int, int] | None
+    ) -> int | None:
+        """Unique usable FindAll text labels in the cursor cache, or ``None``.
+
+        Matches ``count_usable_snapshot_text_labels`` (qualified landmark pool
+        that can supply nearby hints). ``None`` when no settle/hover snapshot.
+        """
+        snapshot = self._findall_led_snapshot_at_cursor(cursor_xy)
+        if not isinstance(snapshot, dict):
+            return None
+        try:
+            from src.recorder.uia_input_boxes import count_usable_snapshot_text_labels
+
+            return int(count_usable_snapshot_text_labels(snapshot))
+        except Exception:
+            return None
+
+    def _findall_nearby_token_at_cursor(
+        self, cursor_xy: tuple[int, int] | None
+    ) -> str:
+        """Decimal nearby-count token for the LED, or ``""`` when no snapshot."""
+        count = self._findall_nearby_count_at_cursor(cursor_xy)
+        return "" if count is None else str(int(count))
+
+    def _led_parent_labels(
+        self,
+        *,
+        findall_label: str,
+        efp_name: str = "",
+        efp_value: str = "",
+        efp_payload: dict[str, Any] | None = None,
+    ) -> tuple[str, str]:
+        """Return ``(findall_parent, efp_parent)`` compact tokens for the LED.
+
+        EFP parent comes from the idle/probe payload. FindAll parent reuses it
+        when the covering FA label soft-agrees with the EFP leaf (same as
+        analysis hub_parent reuse); otherwise left blank (no extra COM on LED).
+        """
+        from src.recorder.uia_input_boxes import (
+            format_parent_signature_compact,
+            ocr_uia_labels_soft_agree,
+            resolve_usable_uia_probe_label,
+        )
+
+        payload = efp_payload
+        if payload is None:
+            with self._lock:
+                stored = self._idle_efp_payload
+            payload = stored if isinstance(stored, dict) else None
+        efp_parent = ""
+        if isinstance(payload, dict):
+            efp_parent = format_parent_signature_compact(payload.get("parent"))
+        fa = str(findall_label or "").strip()
+        findall_parent = ""
+        if fa and efp_parent:
+            efp_label = resolve_usable_uia_probe_label(
+                name=str(efp_name or "").strip(),
+                value=str(efp_value or "").strip(),
+            )
+            if efp_label and (
+                fa.casefold() == efp_label.casefold()
+                or ocr_uia_labels_soft_agree(fa, efp_label)
+            ):
+                findall_parent = efp_parent
+        return findall_parent, efp_parent
+
     def _emit_uia_status(
         self,
         *,
@@ -1993,16 +2122,23 @@ class RecordingSession:
         efp_control_type: str | None | object = _EFP_UNSET,
         efp_scroll: str | None | object = _EFP_UNSET,
         efp_pending: bool | None = None,
+        findall_label: str | None | object = _EFP_UNSET,
+        findall_parent: str | None | object = _EFP_UNSET,
+        efp_parent: str | None | object = _EFP_UNSET,
+        findall_nearby: str | None | object = _EFP_UNSET,
         bg_add: str | None = None,
         bg_remove: str | None = None,
         bg_clear: bool = False,
     ) -> None:
-        """Publish settle-UIA LED + idle EFP label. Safe from worker/window threads.
+        """Publish settle-UIA LED + idle EFP / FindAll labels. Safe from worker threads.
 
         ``bg_add`` / ``bg_remove`` / ``bg_clear`` maintain the overlay's
         background-work strip (``EFP``, ``FindAll:settle``, ``FindAll:hover``, …).
         ``efp_scroll`` is a compact ScrollPattern/RangeValue percent label
         (``V37%``) shown only for scrollbar-like leaves.
+        ``findall_label`` is the FindAll covering leaf at the cursor (dual LED).
+        ``findall_parent`` / ``efp_parent`` are compact parent tokens (``⌂`` on UI).
+        ``findall_nearby`` is the unique usable FindAll landmark count (``n12``).
         """
         with self._lock:
             bg_changed = False
@@ -2059,6 +2195,33 @@ class RecordingSession:
             if efp_pending is not None:
                 self._uia_status_efp_pending = bool(efp_pending)
                 status_changed = True
+            if findall_label is not _EFP_UNSET:
+                next_fa = self._truncate_uia_status_label(
+                    "" if findall_label is None else str(findall_label)
+                )
+                if next_fa != self._uia_status_findall_label:
+                    self._uia_status_findall_label = next_fa
+                    status_changed = True
+            if findall_parent is not _EFP_UNSET:
+                next_fa_parent = self._truncate_uia_status_label(
+                    "" if findall_parent is None else str(findall_parent)
+                )
+                if next_fa_parent != self._uia_status_findall_parent:
+                    self._uia_status_findall_parent = next_fa_parent
+                    status_changed = True
+            if efp_parent is not _EFP_UNSET:
+                next_efp_parent = self._truncate_uia_status_label(
+                    "" if efp_parent is None else str(efp_parent)
+                )
+                if next_efp_parent != self._uia_status_efp_parent:
+                    self._uia_status_efp_parent = next_efp_parent
+                    status_changed = True
+            if findall_nearby is not _EFP_UNSET:
+                raw_nearby = "" if findall_nearby is None else str(findall_nearby)
+                next_nearby = self._truncate_uia_status_label(raw_nearby.strip())
+                if next_nearby != self._uia_status_findall_nearby:
+                    self._uia_status_findall_nearby = next_nearby
+                    status_changed = True
             if pulse is not None:
                 status_changed = True
             # finally-guards often call bg_remove alone; skip no-op publishes.
@@ -2073,6 +2236,10 @@ class RecordingSession:
                 "efp_control_type": self._uia_status_efp_control_type,
                 "efp_scroll": self._uia_status_efp_scroll,
                 "efp_pending": self._uia_status_efp_pending,
+                "findall_label": self._uia_status_findall_label,
+                "findall_parent": self._uia_status_findall_parent,
+                "efp_parent": self._uia_status_efp_parent,
+                "findall_nearby": self._uia_status_findall_nearby,
                 "bg": list(self._uia_bg_active.keys()),
             }
             callback = self._on_uia_status
@@ -2164,12 +2331,22 @@ class RecordingSession:
                 return
             self._idle_efp_timer = None
         # Clear stale Name/Value while the worker probe is pending (overlay "…").
+        # Keep FindAll cover from the settle/hover cache so FA stays visible.
+        pending_xy = (int(x), int(y))
+        pending_fa = self._findall_cover_label_at_cursor(pending_xy)
+        pending_fa_parent, _pending_efp_parent = self._led_parent_labels(
+            findall_label=pending_fa,
+        )
         self._emit_uia_status(
             efp_name="",
             efp_value="",
             efp_control_type="",
             efp_scroll="",
             efp_pending=True,
+            findall_label=pending_fa,
+            findall_parent=pending_fa_parent,
+            efp_parent="",
+            findall_nearby=self._findall_nearby_token_at_cursor(pending_xy),
             bg_add="EFP",
         )
         self._enqueue(
@@ -2338,6 +2515,14 @@ class RecordingSession:
         clear_bg = bg_remove
         if clear_bg is None and claim_token is not None:
             clear_bg = "FindAll:hover"
+        cursor_for_fa = cursor_xy if isinstance(cursor_xy, tuple) else None
+        findall_label = self._findall_cover_label_at_cursor(cursor_for_fa)
+        findall_nearby = self._findall_nearby_token_at_cursor(cursor_for_fa)
+        findall_parent, efp_parent = self._led_parent_labels(
+            findall_label=findall_label,
+            efp_name=str(efp_name or ""),
+            efp_value=str(efp_value or ""),
+        )
         ready = self._uia_path_ready_at_cursor(cursor_xy)
         if ready:
             self._emit_uia_status(
@@ -2347,14 +2532,22 @@ class RecordingSession:
                 efp_value=efp_value or "",
                 efp_control_type=efp_control_type or "",
                 efp_pending=False,
+                findall_label=findall_label,
+                findall_parent=findall_parent,
+                efp_parent=efp_parent,
+                findall_nearby=findall_nearby,
                 bg_remove=clear_bg,
             )
         else:
-            # Keep existing EFP preview; only the readiness LED goes red.
+            # Keep existing EFP preview; refresh FindAll cover; LED goes red.
             self._emit_uia_status(
                 state="red",
                 after_index=after_index,
                 efp_pending=False,
+                findall_label=findall_label,
+                findall_parent=findall_parent,
+                efp_parent=efp_parent,
+                findall_nearby=findall_nearby,
                 bg_remove=clear_bg,
             )
 
@@ -2425,6 +2618,10 @@ class RecordingSession:
                 efp_control_type="",
                 efp_scroll="",
                 efp_pending=False,
+                findall_label="",
+                findall_parent="",
+                efp_parent="",
+                findall_nearby="",
                 bg_remove="EFP",
             )
             return
@@ -2507,16 +2704,27 @@ class RecordingSession:
             cursor_xy=(int(cursor[0]), int(cursor[1])),
             payload=payload if isinstance(payload, dict) else None,
         )
-        # Show Name/Value/control_type as soon as the probe returns (any LED color).
+        cursor_xy = (int(cursor[0]), int(cursor[1]))
+        # Show Name/Value + FindAll cover + parents as soon as the probe returns.
+        probe_fa = self._findall_cover_label_at_cursor(cursor_xy)
+        probe_fa_parent, probe_efp_parent = self._led_parent_labels(
+            findall_label=probe_fa,
+            efp_name=name,
+            efp_value=value,
+            efp_payload=stored,
+        )
         self._emit_uia_status(
             efp_name=name,
             efp_value=value,
             efp_control_type=control_type,
             efp_scroll=scroll_label,
             efp_pending=False,
+            findall_label=probe_fa,
+            findall_parent=probe_fa_parent,
+            efp_parent=probe_efp_parent,
+            findall_nearby=self._findall_nearby_token_at_cursor(cursor_xy),
             bg_remove="EFP",
         )
-        cursor_xy = (int(cursor[0]), int(cursor[1]))
         leave_settle_yellow = False
         with self._lock:
             if generation != int(self._idle_efp_generation):
@@ -2582,6 +2790,10 @@ class RecordingSession:
             efp_control_type="",
             efp_scroll="",
             efp_pending=True,
+            findall_label="",
+            findall_parent="",
+            efp_parent="",
+            findall_nearby="",
             bg_add=str(bg or "FindAll:settle"),
         )
 

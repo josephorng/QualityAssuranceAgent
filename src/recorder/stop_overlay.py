@@ -50,7 +50,8 @@ _UIA_LED_PULSE_COLORS = {
 }
 _UIA_LED_SIZE = 14
 _UIA_STATUS_PULSE_MS = 350
-_UIA_EFP_LABEL_WIDTH = 52
+# Dual FA + EFP (+ parent) strip needs more room than a single Name/Value label.
+_UIA_EFP_LABEL_WIDTH = 128
 _UIA_BG_LABEL_WIDTH = 36
 _UIA_BG_LABEL_COLOR = "#f39c12"
 
@@ -907,32 +908,62 @@ class RecordingUiaStatusOverlay:
         *,
         control_type: str | None = None,
         scroll: str | None = None,
+        findall_label: str | None = None,
+        findall_parent: str | None = None,
+        efp_parent: str | None = None,
+        findall_nearby: str | None = None,
         pending: bool = False,
     ) -> None:
+        """Paint dual FindAll + EFP strip; EFP-only uses ``FA … | EFP …``.
+
+        Parent tokens append as ``· ⌂{parent}``. Qualified FindAll landmark
+        count appends on the FA side as ``· n12``.
+        """
         if self._destroyed or self._label is None:
             return
         name_s = str(name or "").strip()
         value_s = str(value or "").strip()
         type_s = str(control_type or "").strip()
         scroll_s = str(scroll or "").strip()
+        fa_s = str(findall_label or "").strip()
+        fa_parent_s = str(findall_parent or "").strip()
+        efp_parent_s = str(efp_parent or "").strip()
+        nearby_s = str(findall_nearby or "").strip()
         if pending and not name_s and not value_s and not scroll_s:
-            text = "…"
+            efp_text = "…"
         elif name_s and value_s:
-            text = f"{name_s} | {value_s}"
+            efp_text = f"{name_s} | {value_s}"
         elif name_s:
-            text = name_s
+            efp_text = name_s
         elif value_s:
-            text = value_s
+            efp_text = value_s
         elif type_s:
-            text = type_s
+            efp_text = type_s
         elif scroll_s:
-            text = scroll_s
+            efp_text = scroll_s
+        else:
+            efp_text = ""
+        if type_s and efp_text and efp_text not in ("…", type_s):
+            efp_text = f"{type_s} · {efp_text}"
+        if scroll_s and efp_text and efp_text not in ("…", scroll_s) and scroll_s not in efp_text:
+            efp_text = f"{efp_text} · {scroll_s}"
+        if efp_parent_s and efp_text and efp_text != "…":
+            efp_text = f"{efp_text} · ⌂{efp_parent_s}"
+        fa_display = fa_s if fa_s else ("…" if efp_text or nearby_s else "")
+        if fa_s and fa_parent_s:
+            fa_display = f"{fa_s} · ⌂{fa_parent_s}"
+        if fa_display and nearby_s:
+            fa_display = f"{fa_display} · n{nearby_s}"
+        elif nearby_s and not fa_display:
+            fa_display = f"… · n{nearby_s}"
+        if fa_display and efp_text:
+            text = f"FA {fa_display} | EFP {efp_text}"
+        elif fa_display:
+            text = f"FA {fa_display}" if not pending else f"FA {fa_display} | EFP …"
+        elif efp_text:
+            text = f"FA … | EFP {efp_text}"
         else:
             text = "—"
-        if type_s and text not in ("…", type_s):
-            text = f"{type_s} · {text}"
-        if scroll_s and text not in ("…", scroll_s) and scroll_s not in text:
-            text = f"{text} · {scroll_s}"
         if len(text) > _UIA_EFP_LABEL_WIDTH:
             text = text[: _UIA_EFP_LABEL_WIDTH - 1] + "…"
         try:
@@ -992,6 +1023,10 @@ class RecordingUiaStatusOverlay:
             str(payload.get("efp_value") or ""),
             control_type=str(payload.get("efp_control_type") or ""),
             scroll=str(payload.get("efp_scroll") or ""),
+            findall_label=str(payload.get("findall_label") or ""),
+            findall_parent=str(payload.get("findall_parent") or ""),
+            efp_parent=str(payload.get("efp_parent") or ""),
+            findall_nearby=str(payload.get("findall_nearby") or ""),
             pending=bool(payload.get("efp_pending")),
         )
 

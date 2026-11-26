@@ -1692,6 +1692,18 @@ def _normalize_parent_signature(raw: Any) -> dict[str, str]:
     return out
 
 
+def format_parent_signature_compact(raw: Any) -> str:
+    """Short LED/HTML parent token: name, else AutomationId, else control_type."""
+    sig = _normalize_parent_signature(raw)
+    if not sig:
+        return ""
+    for key in ("name", "automation_id", "control_type"):
+        text = str(sig.get(key) or "").strip()
+        if text:
+            return text
+    return ""
+
+
 def parent_signature_usable(signature: Any) -> bool:
     """True when a recorded parent fingerprint can gate replay.
 

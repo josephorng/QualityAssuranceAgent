@@ -137,6 +137,7 @@ def test_collect_and_publish_settle_uia_emits_green_when_cursor_ready() -> None:
     assert out is not None
     assert [row["state"] for row in statuses] == ["yellow", "green"]
     assert statuses[-1]["efp_name"] == "關閉"
+    assert statuses[-1]["findall_label"] == "關閉"
     assert statuses[-1]["after_index"] == 0
 
 
@@ -381,11 +382,17 @@ def test_idle_efp_timer_cancel_on_move_drops_stale(tmp_path: Path) -> None:
 
     def _probe(x: int, y: int):
         calls.append((x, y))
-        return ("label", (0, 0, 1, 1), "text", "NameA", "ValA")
+        return {
+            "name": "NameA",
+            "value": "ValA",
+            "control_type": "text",
+            "bbox": [0, 0, 1, 1],
+            "element_from_point_s": 0.0,
+        }
 
     with (
         patch(
-            "src.recorder.uia_input_boxes.uia_text_element_at_point",
+            "src.recorder.uia_input_boxes.element_from_point_name_value",
             side_effect=_probe,
         ),
         patch(
@@ -417,6 +424,7 @@ def test_idle_efp_timer_cancel_on_move_drops_stale(tmp_path: Path) -> None:
     assert statuses[-1]["efp_name"] == "NameA"
     assert statuses[-1]["efp_value"] == "ValA"
     assert statuses[-1]["efp_control_type"] == "text"
+    assert statuses[-1]["findall_label"] == "NameA"
     assert statuses[-1]["efp_pending"] is False
 
 
@@ -449,9 +457,15 @@ def test_idle_efp_keeps_label_when_findall_empty_red(tmp_path: Path) -> None:
     )
     with (
         patch(
-            "src.recorder.uia_input_boxes.uia_text_element_at_point",
+            "src.recorder.uia_input_boxes.element_from_point_name_value",
             # pane is not a usable labeled leaf — EFP label shows but LED stays red.
-            return_value=("x", (0, 0, 1, 1), "pane", "Leaf", "V"),
+            return_value={
+                "name": "Leaf",
+                "value": "V",
+                "control_type": "pane",
+                "bbox": [0, 0, 1, 1],
+                "element_from_point_s": 0.0,
+            },
         ),
         patch(
             "src.recorder.capture.resolve_click_window",
@@ -479,6 +493,7 @@ def test_idle_efp_keeps_label_when_findall_empty_red(tmp_path: Path) -> None:
     assert statuses[-1]["efp_name"] == "Leaf"
     assert statuses[-1]["efp_value"] == "V"
     assert statuses[-1]["efp_control_type"] == "pane"
+    assert statuses[-1]["findall_label"] == ""
     # Confirmed empty after completed FindAll: do not loop hover FindAll.
     reschedule.assert_not_called()
     # Probe paints before hover/readiness.
@@ -517,8 +532,8 @@ def test_idle_efp_empty_synthable_hub_goes_green(tmp_path: Path) -> None:
     )
     with (
         patch(
-            "src.recorder.uia_input_boxes.uia_text_element_at_point",
-            return_value=None,
+            "src.recorder.uia_input_boxes.element_from_point_name_value",
+            return_value={},
         ),
         patch(
             "src.recorder.capture.resolve_click_window",
@@ -925,8 +940,14 @@ def test_worker_idle_efp_ignores_stale_generation() -> None:
     session._idle_efp_generation = 9
 
     with patch(
-        "src.recorder.uia_input_boxes.uia_text_element_at_point",
-        return_value=("x", (0, 0, 1, 1), "text", "Stale", "X"),
+        "src.recorder.uia_input_boxes.element_from_point_name_value",
+        return_value={
+            "name": "Stale",
+            "value": "X",
+            "control_type": "text",
+            "bbox": [0, 0, 1, 1],
+            "element_from_point_s": 0.0,
+        },
     ):
         session._worker_idle_efp(
             _DeferredCaptureJob(
@@ -955,6 +976,7 @@ def test_recording_uia_status_overlay_apply_status() -> None:
                 "efp_value": "",
                 "efp_control_type": "button",
                 "efp_pending": False,
+                "findall_label": "關閉",
                 "bg": ["FindAll:hover", "EFP"],
             }
         )
@@ -962,7 +984,7 @@ def test_recording_uia_status_overlay_apply_status() -> None:
         assert overlay._label is not None
         label_text = str(overlay._label.cget("text"))
         assert "關閉" in label_text
-        assert label_text == "button · 關閉"
+        assert label_text == "FA 關閉 | EFP button · 關閉"
         assert overlay._bg_label is not None
         assert str(overlay._bg_label.cget("text")) == "FindAll:hover · EFP"
         overlay.apply_status(
@@ -974,10 +996,13 @@ def test_recording_uia_status_overlay_apply_status() -> None:
                 "efp_control_type": "data_item",
                 "efp_scroll": "V37%",
                 "efp_pending": False,
+                "findall_label": "",
             }
         )
         assert str(overlay._bg_label.cget("text")) == ""
-        assert str(overlay._label.cget("text")) == "data_item · Position · V37%"
+        assert str(overlay._label.cget("text")) == (
+            "FA … | EFP data_item · Position · V37%"
+        )
         overlay.destroy()
     finally:
         root.destroy()
@@ -1009,6 +1034,186 @@ def test_efp_payload_looks_like_scrollbar() -> None:
     )
     assert not efp_payload_looks_like_scrollbar(
         {"name": "G8", "control_type": "data_item"}
+    )
+
+
+def test_findall_cover_label_at_cursor_prefers_shortest() -> None:
+    session = RecordingSession(runs_root=None)  # type: ignore[arg-type]
+    snap = {
+        "hwnd": 1,
+        "window": [0, 0, 400, 400],
+        "inputs": [],
+        "scrollbars": [],
+        "texts": [
+            # Longer host chrome still covers the point.
+            {"bbox": [0, 0, 300, 80], "text": "Quick access navigation"},
+            # Shortest covering leaf wins for the LED strip.
+            {"bbox": [10, 5, 100, 25], "text": "文件"},
+        ],
+    }
+    with (
+        patch.object(session, "_click_window_payload_at", return_value=object()),
+        patch.object(session, "_cached_uia_before", return_value=snap),
+    ):
+        assert session._findall_cover_label_at_cursor((20, 10)) == "文件"
+    with (
+        patch.object(session, "_click_window_payload_at", return_value=object()),
+        patch.object(session, "_cached_uia_before", return_value=None),
+    ):
+        assert session._findall_cover_label_at_cursor((20, 10)) == ""
+
+
+def test_emit_uia_status_publishes_findall_label() -> None:
+    statuses: list[dict] = []
+    session = RecordingSession(runs_root=None)  # type: ignore[arg-type]
+    session.set_on_uia_status(statuses.append)
+    session._emit_uia_status(
+        efp_name="文件",
+        efp_value="",
+        efp_control_type="list_item",
+        findall_label="文件 (已釘選)",
+        findall_parent="ProperTreeHost",
+        efp_parent="ProperTreeHost",
+        efp_pending=False,
+    )
+    assert statuses[-1]["findall_label"] == "文件 (已釘選)"
+    assert statuses[-1]["findall_parent"] == "ProperTreeHost"
+    assert statuses[-1]["efp_parent"] == "ProperTreeHost"
+    assert statuses[-1]["efp_name"] == "文件"
+
+
+def test_findall_nearby_count_at_cursor() -> None:
+    session = RecordingSession(runs_root=None)  # type: ignore[arg-type]
+    snap = {
+        "hwnd": 1,
+        "window": [0, 0, 400, 400],
+        "texts": [
+            {"bbox": [0, 0, 40, 20], "text": "文件"},
+            {"bbox": [50, 0, 90, 20], "text": "首頁"},
+            {"bbox": [100, 0, 140, 20], "text": "文件"},  # duplicate unique key
+            {"bbox": [150, 0, 190, 20], "text": "x"},  # too short / unusable
+        ],
+    }
+    with patch.object(session, "_findall_led_snapshot_at_cursor", return_value=snap):
+        assert session._findall_nearby_count_at_cursor((10, 10)) == 2
+        assert session._findall_nearby_token_at_cursor((10, 10)) == "2"
+    with patch.object(session, "_findall_led_snapshot_at_cursor", return_value=None):
+        assert session._findall_nearby_count_at_cursor((10, 10)) is None
+        assert session._findall_nearby_token_at_cursor((10, 10)) == ""
+
+
+def test_led_parent_labels_reuse_efp_parent_when_fa_agrees() -> None:
+    session = RecordingSession(runs_root=None)  # type: ignore[arg-type]
+    payload = {
+        "name": "文件",
+        "value": "",
+        "parent": {
+            "control_type": "tree",
+            "name": "檔案",
+            "automation_id": "ProperTreeHost",
+        },
+    }
+    fa_parent, efp_parent = session._led_parent_labels(
+        findall_label="文件 (已釘選)",
+        efp_name="文件",
+        efp_value="",
+        efp_payload=payload,
+    )
+    assert efp_parent == "檔案"
+    assert fa_parent == "檔案"
+    fa_parent2, efp_parent2 = session._led_parent_labels(
+        findall_label="首頁",
+        efp_name="文件",
+        efp_value="",
+        efp_payload=payload,
+    )
+    assert efp_parent2 == "檔案"
+    assert fa_parent2 == ""
+
+
+def test_recording_uia_status_overlay_dual_fa_efp_disagree() -> None:
+    """Dual FA+EFP strip without a real Tk root (Tcl may be unavailable in CI)."""
+    from src.recorder import stop_overlay as so
+
+    class _FakeLabel:
+        def __init__(self) -> None:
+            self.text = "—"
+
+        def configure(self, **kwargs: object) -> None:
+            if "text" in kwargs:
+                self.text = str(kwargs["text"])
+
+        def cget(self, key: str) -> str:
+            assert key == "text"
+            return self.text
+
+        def pack(self, **_kwargs: object) -> None:
+            return None
+
+        def pack_forget(self) -> None:
+            return None
+
+    overlay = so.RecordingUiaStatusOverlay.__new__(so.RecordingUiaStatusOverlay)
+    overlay._destroyed = False
+    overlay._label = _FakeLabel()
+    overlay._bg_label = _FakeLabel()
+    overlay._bg_text = ""
+    overlay._state = "red"
+    overlay._led = None
+    overlay._window = None
+    overlay._pulse_after_id = None
+    overlay.set_state = lambda _state: None  # type: ignore[method-assign]
+    overlay.pulse = lambda _kind: None  # type: ignore[method-assign]
+    overlay.ensure_visible = lambda force=False: None  # type: ignore[method-assign]
+
+    overlay.apply_status(
+        {
+            "state": "green",
+            "efp_name": "文件",
+            "efp_value": "",
+            "efp_control_type": "list_item",
+            "findall_label": "文件 (已釘選)",
+            "findall_parent": "ProperTreeHost",
+            "efp_parent": "ProperTreeHost",
+            "findall_nearby": "12",
+            "efp_pending": False,
+            "bg": [],
+        }
+    )
+    assert overlay._label.cget("text") == (
+        "FA 文件 (已釘選) · ⌂ProperTreeHost · n12 | "
+        "EFP list_item · 文件 · ⌂ProperTreeHost"
+    )
+    overlay.apply_status(
+        {
+            "state": "yellow",
+            "efp_name": "",
+            "efp_value": "",
+            "findall_label": "檔案",
+            "findall_parent": "NavBarMenu",
+            "efp_parent": "",
+            "findall_nearby": "3",
+            "efp_pending": True,
+            "bg": ["EFP"],
+        }
+    )
+    assert overlay._label.cget("text") == "FA 檔案 · ⌂NavBarMenu · n3 | EFP …"
+    overlay.apply_status(
+        {
+            "state": "green",
+            "efp_name": "文件",
+            "efp_value": "",
+            "efp_control_type": "list_item",
+            "findall_label": "",
+            "findall_parent": "",
+            "efp_parent": "ProperTreeHost",
+            "findall_nearby": "8",
+            "efp_pending": False,
+            "bg": [],
+        }
+    )
+    assert overlay._label.cget("text") == (
+        "FA … · n8 | EFP list_item · 文件 · ⌂ProperTreeHost"
     )
 
 

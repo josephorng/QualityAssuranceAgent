@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import faulthandler
 import json
 import os
@@ -47,6 +48,83 @@ _FAULT_HEARTBEAT_INTERVAL_S = 60.0
 _fault_log_path_active: Path | None = None
 _fault_heartbeat_stop = threading.Event()
 
+# faulthandler dumps every Windows SEH with the error bit set, including
+# transient COM HRESULTs raised as first-chance exceptions during UIA.
+_RPC_E_CALL_REJECTED = 0x80010001
+_RPC_E_SERVERCALL_RETRYLATER = 0x8001010A
+_RPC_E_CANTCALLOUT_ININPUTSYNCCALL = 0x8001010D
+_NONFATAL_COM_EXCEPTION_CODES = frozenset(
+    {
+        _RPC_E_CALL_REJECTED,
+        _RPC_E_SERVERCALL_RETRYLATER,
+        _RPC_E_CANTCALLOUT_ININPUTSYNCCALL,
+    }
+)
+_EXCEPTION_CONTINUE_EXECUTION = -1
+_EXCEPTION_CONTINUE_SEARCH = 0
+# Keep the WINFUNCTYPE callback alive for the process lifetime.
+_nonfatal_com_veh_handler: Any = None
+_nonfatal_com_veh_handle: Any = None
+
+
+def _install_nonfatal_com_veh() -> None:
+    """Swallow known non-fatal COM SEH so faulthandler does not dump them.
+
+    Registered after ``faulthandler.enable`` so this handler runs first
+    (VEH is LIFO). Allowlisted codes return ``EXCEPTION_CONTINUE_EXECUTION``
+    and never reach faulthandler; real fatals fall through.
+    """
+    global _nonfatal_com_veh_handler, _nonfatal_com_veh_handle
+    if os.name != "nt":
+        return
+    if _nonfatal_com_veh_handle is not None:
+        return
+
+    class _EXCEPTION_RECORD(ctypes.Structure):
+        pass
+
+    _EXCEPTION_RECORD._fields_ = [
+        ("ExceptionCode", ctypes.c_ulong),
+        ("ExceptionFlags", ctypes.c_ulong),
+        ("ExceptionRecord", ctypes.POINTER(_EXCEPTION_RECORD)),
+        ("ExceptionAddress", ctypes.c_void_p),
+        ("NumberParameters", ctypes.c_ulong),
+        ("ExceptionInformation", ctypes.c_ulonglong * 15),
+    ]
+
+    class _EXCEPTION_POINTERS(ctypes.Structure):
+        _fields_ = [
+            ("ExceptionRecord", ctypes.POINTER(_EXCEPTION_RECORD)),
+            ("ContextRecord", ctypes.c_void_p),
+        ]
+
+    handler_type = ctypes.WINFUNCTYPE(
+        ctypes.c_long, ctypes.POINTER(_EXCEPTION_POINTERS)
+    )
+
+    @handler_type
+    def _handler(exc_info: Any) -> int:
+        try:
+            record = exc_info.contents.ExceptionRecord
+            if not record:
+                return _EXCEPTION_CONTINUE_SEARCH
+            code = int(record.contents.ExceptionCode) & 0xFFFFFFFF
+            if code in _NONFATAL_COM_EXCEPTION_CODES:
+                return _EXCEPTION_CONTINUE_EXECUTION
+        except Exception:
+            pass
+        return _EXCEPTION_CONTINUE_SEARCH
+
+    add_veh = ctypes.windll.kernel32.AddVectoredExceptionHandler
+    add_veh.argtypes = [ctypes.c_ulong, handler_type]
+    add_veh.restype = ctypes.c_void_p
+    # FirstHandler=1: run before later-registered handlers when possible;
+    # still register after faulthandler.enable so we outrank its VEH.
+    handle = add_veh(1, _handler)
+    if handle:
+        _nonfatal_com_veh_handler = _handler
+        _nonfatal_com_veh_handle = handle
+
 
 def _write_fault_marker(path: Path, kind: str, **fields: Any) -> None:
     """Append a human-readable marker. Safe under concurrent faulthandler dumps."""
@@ -87,6 +165,9 @@ def _install_faulthandler() -> None:
             # Keep the handle open for the process lifetime; faulthandler needs it.
             fault_file = open(path, "a", encoding="utf-8", errors="replace")
             faulthandler.enable(file=fault_file, all_threads=True)
+            # After faulthandler's VEH so ours runs first (LIFO) and can
+            # suppress known non-fatal COM codes before they are dumped.
+            _install_nonfatal_com_veh()
             _fault_log_path_active = path
             _write_fault_marker(
                 path,

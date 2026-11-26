@@ -67,6 +67,19 @@ DEFAULT_UIA_CLIP_KEEP_AREA_FRAC = 0.5
 # IUIAutomation vtable (full slots including IUnknown 0..2).
 _UIA_ELEMENT_FROM_HANDLE = 6
 _UIA_ELEMENT_FROM_POINT = 7
+# Transient COM HRESULTs when the target is mid–input-synchronous SendMessage.
+_RPC_E_CALL_REJECTED = 0x80010001
+_RPC_E_SERVERCALL_RETRYLATER = 0x8001010A
+_RPC_E_CANTCALLOUT_ININPUTSYNCCALL = 0x8001010D
+_UIA_EFP_RETRYABLE_HRESULTS = frozenset(
+    {
+        _RPC_E_CALL_REJECTED,
+        _RPC_E_SERVERCALL_RETRYLATER,
+        _RPC_E_CANTCALLOUT_ININPUTSYNCCALL,
+    }
+)
+_UIA_EFP_RETRY_DELAY_S = 0.02
+_UIA_EFP_MAX_ATTEMPTS = 3  # 1 initial + 2 retries
 _UIA_GET_CONTROL_VIEW_WALKER = 14
 _UIA_CREATE_CACHE_REQUEST = 20
 _UIA_CREATE_PROPERTY_CONDITION = 23
@@ -1666,6 +1679,38 @@ def parent_signatures_agree(recorded: Any, live: Any) -> bool:
     return False
 
 
+def _uia_hr_u32(hr: int) -> int:
+    return int(hr) & 0xFFFFFFFF
+
+
+def _uia_hr_is_retryable(hr: int) -> bool:
+    """True for transient COM codes safe to retry on ElementFromPoint."""
+    return _uia_hr_u32(hr) in _UIA_EFP_RETRYABLE_HRESULTS
+
+
+def _call_element_from_point_with_retry(
+    call: Callable[[], int],
+    *,
+    max_attempts: int = _UIA_EFP_MAX_ATTEMPTS,
+    delay_s: float = _UIA_EFP_RETRY_DELAY_S,
+    sleep: Callable[[float], None] = time.sleep,
+) -> int:
+    """Invoke ``call`` (returning HRESULT); retry on transient COM codes.
+
+    ``call`` should perform one ElementFromPoint attempt and return its
+    HRESULT. Up to ``max_attempts - 1`` retries sleep ``delay_s`` between
+    tries. Non-retryable failures and ``S_OK`` return immediately.
+    """
+    attempts = max(1, int(max_attempts))
+    hr = call()
+    for _ in range(attempts - 1):
+        if hr == _S_OK or not _uia_hr_is_retryable(hr):
+            return hr
+        sleep(float(delay_s))
+        hr = call()
+    return hr
+
+
 def _parent_signature_at_point_impl(x: int, y: int) -> dict[str, str]:
     """ElementFromPoint + one parent climb; returns ``{}`` on failure."""
     if os.name != "nt":
@@ -1677,9 +1722,6 @@ def _parent_signature_at_point_impl(x: int, y: int) -> dict[str, str]:
         initialized_here = True
     elif hr not in (_S_OK, _S_FALSE) and (hr & 0xFFFFFFFF) != 0x80010106:
         return {}
-
-    class _POINT(ctypes.Structure):
-        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
 
     automation: ctypes.c_void_p | None = None
     element: ctypes.c_void_p | None = None
@@ -1697,25 +1739,9 @@ def _parent_signature_at_point_impl(x: int, y: int) -> dict[str, str]:
         if hr != _S_OK or not automation_ptr:
             return {}
         automation = automation_ptr
-        element_from_point = ctypes.WINFUNCTYPE(
-            ctypes.HRESULT,
-            ctypes.c_void_p,
-            _POINT,
-            ctypes.POINTER(ctypes.c_void_p),
-        )(
-            _com_vtable(automation, _UIA_ELEMENT_FROM_POINT + 1)[
-                _UIA_ELEMENT_FROM_POINT
-            ]
-        )
-        element_ptr = ctypes.c_void_p()
-        hr = element_from_point(
-            automation,
-            _POINT(int(x), int(y)),
-            ctypes.byref(element_ptr),
-        )
-        if hr != _S_OK or not element_ptr:
+        element = _element_from_point(automation, int(x), int(y))
+        if not element:
             return {}
-        element = element_ptr
         return _element_parent_signature(automation, element)
     except Exception:
         return {}
@@ -1762,9 +1788,6 @@ def _element_from_point_name_value_impl(x: int, y: int) -> dict[str, Any]:
         out["element_from_point_s"] = round(time.perf_counter() - started, 3)
         return out
 
-    class _POINT(ctypes.Structure):
-        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
-
     automation: ctypes.c_void_p | None = None
     element: ctypes.c_void_p | None = None
     try:
@@ -1781,25 +1804,9 @@ def _element_from_point_name_value_impl(x: int, y: int) -> dict[str, Any]:
         if hr != _S_OK or not automation_ptr:
             return out
         automation = automation_ptr
-        element_from_point = ctypes.WINFUNCTYPE(
-            ctypes.HRESULT,
-            ctypes.c_void_p,
-            _POINT,
-            ctypes.POINTER(ctypes.c_void_p),
-        )(
-            _com_vtable(automation, _UIA_ELEMENT_FROM_POINT + 1)[
-                _UIA_ELEMENT_FROM_POINT
-            ]
-        )
-        element_ptr = ctypes.c_void_p()
-        hr = element_from_point(
-            automation,
-            _POINT(int(x), int(y)),
-            ctypes.byref(element_ptr),
-        )
-        if hr != _S_OK or not element_ptr:
+        element = _element_from_point(automation, int(x), int(y))
+        if not element:
             return out
-        element = element_ptr
         _label, name, value = _element_label_parts(element)
         name = str(name or "").strip()
         value = str(value or "").strip()
@@ -1876,9 +1883,6 @@ def _uia_text_element_at_point_impl(
     elif hr not in (_S_OK, _S_FALSE) and (hr & 0xFFFFFFFF) != 0x80010106:
         return None
 
-    class _POINT(ctypes.Structure):
-        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
-
     automation: ctypes.c_void_p | None = None
     element: ctypes.c_void_p | None = None
     try:
@@ -1895,25 +1899,9 @@ def _uia_text_element_at_point_impl(
         if hr != _S_OK or not automation_ptr:
             return None
         automation = automation_ptr
-        element_from_point = ctypes.WINFUNCTYPE(
-            ctypes.HRESULT,
-            ctypes.c_void_p,
-            _POINT,
-            ctypes.POINTER(ctypes.c_void_p),
-        )(
-            _com_vtable(automation, _UIA_ELEMENT_FROM_POINT + 1)[
-                _UIA_ELEMENT_FROM_POINT
-            ]
-        )
-        element_ptr = ctypes.c_void_p()
-        hr = element_from_point(
-            automation,
-            _POINT(int(x), int(y)),
-            ctypes.byref(element_ptr),
-        )
-        if hr != _S_OK or not element_ptr:
+        element = _element_from_point(automation, int(x), int(y))
+        if not element:
             return None
-        element = element_ptr
         label, name, value = _element_label_parts(element)
         label = label.strip()
         name = str(name or "").strip()
@@ -2170,6 +2158,8 @@ def _element_from_handle(
 def _element_from_point(
     automation: ctypes.c_void_p, x: int, y: int
 ) -> ctypes.c_void_p | None:
+    """ElementFromPoint with short retries on transient COM HRESULTs."""
+
     class _POINT(ctypes.Structure):
         _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
 
@@ -2183,15 +2173,28 @@ def _element_from_point(
             _UIA_ELEMENT_FROM_POINT
         ]
     )
-    element_ptr = ctypes.c_void_p()
-    hr = element_from_point(
-        automation,
-        _POINT(int(x), int(y)),
-        ctypes.byref(element_ptr),
-    )
-    if hr != _S_OK or not element_ptr:
+    holder: dict[str, ctypes.c_void_p | None] = {"ptr": None}
+
+    def _once() -> int:
+        # Drop a prior failed attempt's pointer before retrying.
+        prev = holder["ptr"]
+        if prev is not None:
+            _com_release(prev)
+            holder["ptr"] = None
+        element_ptr = ctypes.c_void_p()
+        hr = element_from_point(
+            automation,
+            _POINT(int(x), int(y)),
+            ctypes.byref(element_ptr),
+        )
+        if hr == _S_OK and element_ptr:
+            holder["ptr"] = element_ptr
+        return int(hr)
+
+    hr = _call_element_from_point_with_retry(_once)
+    if hr != _S_OK or holder["ptr"] is None:
         return None
-    return element_ptr
+    return holder["ptr"]
 
 
 def _control_view_parent(

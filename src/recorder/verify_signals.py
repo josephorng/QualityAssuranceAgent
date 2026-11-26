@@ -50,7 +50,6 @@ _UIA_PARENT_WALK_CONTROL = 4
 _UIA_PARENT_WALK_SCROLL = 8
 
 # IUIAutomation vtable indexes (IUnknown is 0..2).
-_UIA_ELEMENT_FROM_POINT = 7
 _UIA_GET_RAW_VIEW_WALKER = 16
 # IUIAutomationElement
 _UIA_GET_CURRENT_PATTERN = 16
@@ -1443,23 +1442,11 @@ def _read_uia_fields_impl(
         automation = automation_ptr
 
         if (want_control or want_scroll) and cursor_xy is not None:
-            class _POINT(ctypes.Structure):
-                _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+            from src.recorder.uia_input_boxes import _element_from_point
 
-            element_from_point = ctypes.WINFUNCTYPE(
-                ctypes.HRESULT,
-                ctypes.c_void_p,
-                _POINT,
-                ctypes.POINTER(ctypes.c_void_p),
-            )(_com_vtable(automation, _UIA_ELEMENT_FROM_POINT + 1)[_UIA_ELEMENT_FROM_POINT])
-            point_ptr = ctypes.c_void_p()
-            hr = element_from_point(
-                automation,
-                _POINT(int(cursor_xy[0]), int(cursor_xy[1])),
-                ctypes.byref(point_ptr),
+            point_element = _element_from_point(
+                automation, int(cursor_xy[0]), int(cursor_xy[1])
             )
-            if hr == _S_OK and point_ptr:
-                point_element = point_ptr
 
         if want_focused:
             get_focused = ctypes.WINFUNCTYPE(
@@ -1594,24 +1581,13 @@ def _set_scroll_percents_impl(
             return False
         automation = automation_ptr
 
-        class _POINT(ctypes.Structure):
-            _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+        from src.recorder.uia_input_boxes import _element_from_point
 
-        element_from_point = ctypes.WINFUNCTYPE(
-            ctypes.HRESULT,
-            ctypes.c_void_p,
-            _POINT,
-            ctypes.POINTER(ctypes.c_void_p),
-        )(_com_vtable(automation, _UIA_ELEMENT_FROM_POINT + 1)[_UIA_ELEMENT_FROM_POINT])
-        point_ptr = ctypes.c_void_p()
-        hr = element_from_point(
-            automation,
-            _POINT(int(cursor_xy[0]), int(cursor_xy[1])),
-            ctypes.byref(point_ptr),
+        point_element = _element_from_point(
+            automation, int(cursor_xy[0]), int(cursor_xy[1])
         )
-        if hr != _S_OK or not point_ptr:
+        if not point_element:
             return False
-        point_element = point_ptr
 
         get_walker = ctypes.WINFUNCTYPE(
             ctypes.HRESULT,

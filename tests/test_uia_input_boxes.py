@@ -617,6 +617,89 @@ def test_snapshot_uia_screen_keeps_expanded_labeled_control_types(monkeypatch) -
     assert isinstance(snap.get("findall_count"), int)
 
 
+def test_uia_hr_is_retryable_for_transient_com_codes() -> None:
+    from src.recorder.uia_input_boxes import (
+        _RPC_E_CALL_REJECTED,
+        _RPC_E_CANTCALLOUT_ININPUTSYNCCALL,
+        _RPC_E_SERVERCALL_RETRYLATER,
+        _S_OK,
+        _uia_hr_is_retryable,
+    )
+
+    assert _uia_hr_is_retryable(_RPC_E_CANTCALLOUT_ININPUTSYNCCALL)
+    assert _uia_hr_is_retryable(_RPC_E_SERVERCALL_RETRYLATER)
+    assert _uia_hr_is_retryable(_RPC_E_CALL_REJECTED)
+    # Signed 32-bit HRESULT form (ctypes often returns this).
+    signed = _RPC_E_CANTCALLOUT_ININPUTSYNCCALL - (1 << 32)
+    assert signed < 0
+    assert _uia_hr_is_retryable(signed)
+    assert not _uia_hr_is_retryable(_S_OK)
+    assert not _uia_hr_is_retryable(0x80004005)  # E_FAIL
+
+
+def test_call_element_from_point_with_retry_recovers_after_cantcallout() -> None:
+    from src.recorder.uia_input_boxes import (
+        _RPC_E_CANTCALLOUT_ININPUTSYNCCALL,
+        _S_OK,
+        _call_element_from_point_with_retry,
+    )
+
+    sleeps: list[float] = []
+    calls = {"n": 0}
+
+    def _call() -> int:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _RPC_E_CANTCALLOUT_ININPUTSYNCCALL
+        return _S_OK
+
+    hr = _call_element_from_point_with_retry(
+        _call,
+        sleep=sleeps.append,
+    )
+    assert hr == _S_OK
+    assert calls["n"] == 2
+    assert sleeps == [0.02]
+
+
+def test_call_element_from_point_with_retry_gives_up_after_max_attempts() -> None:
+    from src.recorder.uia_input_boxes import (
+        _RPC_E_SERVERCALL_RETRYLATER,
+        _call_element_from_point_with_retry,
+    )
+
+    sleeps: list[float] = []
+    calls = {"n": 0}
+
+    def _call() -> int:
+        calls["n"] += 1
+        return _RPC_E_SERVERCALL_RETRYLATER
+
+    hr = _call_element_from_point_with_retry(
+        _call,
+        max_attempts=3,
+        delay_s=0.01,
+        sleep=sleeps.append,
+    )
+    assert hr == _RPC_E_SERVERCALL_RETRYLATER
+    assert calls["n"] == 3
+    assert sleeps == [0.01, 0.01]
+
+
+def test_call_element_from_point_with_retry_skips_non_retryable() -> None:
+    from src.recorder.uia_input_boxes import _call_element_from_point_with_retry
+
+    calls = {"n": 0}
+
+    def _call() -> int:
+        calls["n"] += 1
+        return 0x80004005  # E_FAIL
+
+    hr = _call_element_from_point_with_retry(_call, sleep=lambda _s: None)
+    assert hr == 0x80004005
+    assert calls["n"] == 1
+
+
 def test_element_from_point_name_value_extracts_raw_strings(monkeypatch) -> None:
     monkeypatch.setattr(
         "src.recorder.uia_input_boxes._element_from_point_name_value_impl",

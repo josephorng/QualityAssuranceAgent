@@ -4290,3 +4290,68 @@ def test_probe_low_level_hook_tolerates_foreign_hookproc_argtypes() -> None:
     # Probe must restore the foreign argtypes it found on entry.
     assert stub.argtypes[1] is foreign_hookproc
 
+
+def test_merge_typing_ready_signals_focused_only_preserves_settle_caret() -> None:
+    """Type-start refresh updates focused name but never overlays caret."""
+    settle_caret = {
+        "class_name": "Edit",
+        "process_name": "app.exe",
+        "hwnd": 1,
+        "rect": [10, 10, 11, 30],
+    }
+    existing = {
+        "foreground": {
+            "class_name": "App",
+            "title": "App",
+            "process_name": "app.exe",
+        },
+        "caret": settle_caret,
+        "focused": {"name": "OldField", "value": ""},
+    }
+    live = {
+        "focused": {"name": "K14", "value": ""},
+        "caret": {
+            "class_name": "EXCEL6",
+            "process_name": "EXCEL.EXE",
+            "hwnd": 99,
+            "rect": [20, 20, 21, 40],
+        },
+    }
+    merged = RecordingSession._merge_typing_ready_signals(existing, live)
+    assert merged["focused"] == {"name": "K14", "value": ""}
+    assert merged["caret"] == settle_caret
+    assert merged["foreground"] == existing["foreground"]
+
+
+def test_merge_typing_ready_signals_ignores_live_caret_alone() -> None:
+    existing = {
+        "focused": {"name": "Field", "value": "x"},
+        "caret": {
+            "class_name": "Edit",
+            "process_name": "app.exe",
+            "hwnd": 1,
+        },
+    }
+    live = {
+        "caret": {
+            "class_name": "EXCEL6",
+            "process_name": "EXCEL.EXE",
+            "hwnd": 2,
+        },
+    }
+    merged = RecordingSession._merge_typing_ready_signals(existing, live)
+    assert merged["focused"] == existing["focused"]
+    assert merged["caret"] == existing["caret"]
+
+    from_empty = RecordingSession._merge_typing_ready_signals(None, live)
+    assert "caret" not in from_empty
+    assert from_empty == {}
+
+
+def test_merge_typing_ready_signals_accepts_live_focused_when_missing() -> None:
+    existing = {"clipboard": "clip"}
+    live = {"focused": {"name": "Search", "value": ""}}
+    merged = RecordingSession._merge_typing_ready_signals(existing, live)
+    assert merged["focused"] == {"name": "Search", "value": ""}
+    assert merged["clipboard"] == "clip"
+

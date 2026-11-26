@@ -7014,10 +7014,12 @@ class RecordingSession:
         existing: dict[str, Any] | None,
         live_ready: dict[str, Any],
     ) -> dict[str, Any]:
-        """Copy ``existing`` and overlay live focused/caret only.
+        """Copy ``existing`` and overlay live focused only.
 
-        Windows / foreground stay from the settle cache so sealing a following
-        gesture does not pull later window deltas into the typing step.
+        Windows / foreground / caret stay from the settle cache so sealing a
+        following gesture does not pull later window deltas into the typing
+        step, and so type-start edit hosts (e.g. Excel ``EXCEL6``) are not
+        baked into ``ready.caret``.
 
         Focused value is replaced only when the focused control **name** changes
         (or was missing). Same-name refreshes keep the settle value so an IME
@@ -7035,18 +7037,16 @@ class RecordingSession:
                 merged["focused"] = dict(focused)
             elif not isinstance(prior, dict) or not prior:
                 merged["focused"] = dict(focused)
-        caret = live_ready.get("caret")
-        if isinstance(caret, dict) and caret:
-            merged["caret"] = dict(caret)
         return merged
 
     def _sample_typing_ready_signals(
         self,
         focus_xy: tuple[int, int] | None,
     ) -> dict[str, Any]:
-        """Live focused/caret at type-burst start for ``ready.focused``.
+        """Live focused at type-burst start for ``ready.focused``.
 
-        Empty when UIA/fast sampling fails — callers keep the settle before.
+        Caret is not sampled here: settle ``signals_before`` keeps pre-type
+        caret truth. Empty when UIA sampling fails — callers keep the settle.
         """
         try:
             live = capture_step_signals(cursor_xy=focus_xy, kind="text_input")
@@ -7058,18 +7058,6 @@ class RecordingSession:
         focused = live.get("focused")
         if isinstance(focused, dict) and focused:
             out["focused"] = dict(focused)
-        caret = live.get("caret")
-        if isinstance(caret, dict) and caret:
-            out["caret"] = dict(caret)
-        if "caret" not in out:
-            try:
-                fast = capture_fast_signals(cursor_xy=focus_xy)
-            except Exception:
-                fast = {}
-            if isinstance(fast, dict):
-                caret = fast.get("caret")
-                if isinstance(caret, dict) and caret:
-                    out["caret"] = dict(caret)
         return out
 
     def _repatch_sealed_after_ready_signals(
@@ -7077,10 +7065,12 @@ class RecordingSession:
         event_index: int,
         live_ready: dict[str, Any],
     ) -> None:
-        """Update focused/caret on a previously sealed after-cache.
+        """Update focused (and optional caret) on a previously sealed after-cache.
 
-        Does not reclaim ``_after_owner_index``. Updates a still-pending seal
-        in ``_after_seals`` and patches event JSON when debug already exists.
+        Type-start refresh passes focused-only patches; caret write support
+        remains for callers that still supply it. Does not reclaim
+        ``_after_owner_index``. Updates a still-pending seal in
+        ``_after_seals`` and patches event JSON when debug already exists.
         """
         focused = live_ready.get("focused")
         caret = live_ready.get("caret")
@@ -7136,10 +7126,12 @@ class RecordingSession:
         meta: dict[str, Any],
         focus_xy: tuple[int, int] | None,
     ) -> None:
-        """Replace stale settle focused/caret with a live type-start sample.
+        """Replace stale settle focused with a live type-start sample.
 
         Fast click→type often seals the prior click before the slow UIA settle
         refresh lands; without this, ``ready.focused`` names the previous field.
+        Caret stays on the settle before-cache so edit-mode hosts are not
+        asserted as pre-type readiness.
         """
         live_ready = self._sample_typing_ready_signals(focus_xy)
         if not live_ready:
@@ -7151,22 +7143,22 @@ class RecordingSession:
         )
         meta["signals_before"] = merged
         # Only re-seal / settle-update keys that the merge actually changed
-        # (name change or missing prior), plus always-refreshed caret.
+        # (focused name change or missing prior). Caret is never patched here.
         patched: dict[str, Any] = {}
-        if "caret" in live_ready:
-            patched["caret"] = dict(live_ready["caret"])
         merged_focused = merged.get("focused")
         before_focused = (
             before.get("focused") if isinstance(before, dict) else None
         )
         if merged_focused is not before_focused and isinstance(merged_focused, dict):
             patched["focused"] = dict(merged_focused)
+        if not patched:
+            return
         with self._lock:
             settle = dict(self._last_settle_signals or {})
             settle.update(patched)
             self._last_settle_signals = settle
         sealed_idx = meta.get("sealed_after_index")
-        if isinstance(sealed_idx, int) and patched:
+        if isinstance(sealed_idx, int):
             self._repatch_sealed_after_ready_signals(sealed_idx, patched)
 
     def _worker_begin_text_input(self, job: _DeferredCaptureJob) -> None:

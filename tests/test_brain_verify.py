@@ -311,6 +311,67 @@ async def test_process_step_move_mouse_failure_holds_for_overlay_retry() -> None
     assert brain._deferred_window_verify is None
 
 
+def test_cached_calls_omitting_disabled_click_window(tmp_path, monkeypatch) -> None:
+    import json
+
+    from src.common.runtime_context import SCRIPT_PATH_ENV
+
+    recording = tmp_path / "recording_click_window_strip"
+    (recording / "analysis").mkdir(parents=True)
+    (recording / "events").mkdir()
+    (recording / "session.json").write_text("{}", encoding="utf-8")
+    (recording / "events" / "event_001.json").write_text("{}", encoding="utf-8")
+    (recording / "analysis" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "instruction": "點擊",
+                "window_verify": {
+                    "foreground": {
+                        "title": "App",
+                        "class_name": "Wnd",
+                        "process_name": "app.exe",
+                    }
+                },
+                "window_verify_disabled": ["click_window"],
+                "tool_calls": [
+                    {
+                        "name": "move_mouse",
+                        "arguments": {
+                            "instruction": "「確定」文字",
+                            "click_window": {"title": "App"},
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(SCRIPT_PATH_ENV, str(recording))
+
+    brain = _brain_for_process_step()
+    brain._script_step_index = 0
+    brain._script_event_indices = [1]
+    calls = [
+        {
+            "name": "move_mouse",
+            "arguments": {
+                "instruction": "「確定」文字",
+                "click_window": {"title": "App"},
+            },
+        }
+    ]
+    stripped = brain._cached_calls_omitting_disabled_click_window(calls)
+    assert stripped[0]["arguments"] == {"instruction": "「確定」文字"}
+    brain.manager.log_info.assert_any_call(
+        "click_window disabled; omitting locate ROI event=1"
+    )
+
+    monkeypatch.delenv(SCRIPT_PATH_ENV, raising=False)
+    assert brain._cached_calls_omitting_disabled_click_window(calls) == calls
+
+
 @pytest.mark.asyncio
 async def test_process_step_move_mouse_stops_at_script_retry_limit(
     tmp_path,

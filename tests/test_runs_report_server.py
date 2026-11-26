@@ -1778,6 +1778,51 @@ def test_apply_recording_event_verify_conditions_persists_unchecked(
         )
 
 
+def test_apply_recording_event_verify_conditions_allows_tool_args_click_window(
+    tmp_path: Path,
+) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_landmark_run(runs_root, "recording_verify_click_window")
+    analysis_path = run_root / "analysis" / "event_001.json"
+    analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+    analysis["window_verify"] = {
+        "foreground": {
+            "title": "神網7",
+            "class_name": "WinForms",
+            "process_name": "WM7Ldr.exe",
+        }
+    }
+    analysis["tool_calls"] = [
+        {
+            "name": "move_mouse",
+            "arguments": {
+                "instruction": "「確定」文字",
+                "click_window": {
+                    "title": "神網7",
+                    "class_name": "WinForms",
+                    "process_name": "WM7Ldr.exe",
+                },
+            },
+        }
+    ]
+    analysis_path.write_text(json.dumps(analysis, ensure_ascii=False), encoding="utf-8")
+
+    result = apply_recording_event_verify_conditions(
+        runs_root,
+        "recording_verify_click_window",
+        1,
+        disabled=["click_window"],
+    )
+
+    assert result == {"disabled": ["click_window"]}
+    saved = json.loads(analysis_path.read_text(encoding="utf-8"))
+    assert saved["window_verify_disabled"] == ["click_window"]
+    assert "click_window" not in saved["window_verify"]
+    html = (run_root / "recording_steps.html").read_text(encoding="utf-8")
+    assert 'data-verify-key="click_window">' in html
+    assert 'data-verify-key="foreground" checked' in html
+
+
 def test_apply_recording_verifications_toggles_every_step(tmp_path: Path) -> None:
     runs_root = tmp_path / "runs"
     run_root = runs_root / "recording_verify_all"

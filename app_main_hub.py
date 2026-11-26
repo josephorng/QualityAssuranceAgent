@@ -3827,7 +3827,10 @@ class MainHub(ctk.CTk):
         instruction: str,
         disabled: list[str],
     ) -> None:
-        from src.recorder.window_snapshot import normalize_window_verify_disabled
+        from src.recorder.window_snapshot import (
+            effective_window_verify_predicate,
+            normalize_window_verify_disabled,
+        )
 
         analysis = read_json(
             Path(recording_dir) / "analysis" / f"event_{event_index:03d}.json",
@@ -3842,8 +3845,7 @@ class MainHub(ctk.CTk):
             raise ValueError("instruction is too long")
         if instruction.strip() != current_instruction.strip() and not instruction.strip():
             raise ValueError("instruction is empty")
-        predicate = analysis.get("window_verify")
-        recorded = predicate if isinstance(predicate, dict) else {}
+        recorded = effective_window_verify_predicate(analysis)
         normalized = (
             normalize_window_verify_disabled(recorded, disabled, strict=True)
             if recorded

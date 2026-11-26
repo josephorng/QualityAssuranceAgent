@@ -6489,14 +6489,17 @@ def window_verify_check_rows(
     """Plain-text window and signal checks for one recorded step.
 
     Each row is ``(key, index, label, value, enabled)``. ``index`` is set for
-    itemized conditions. Unchecked rows are the ones replay skips.
+    itemized conditions. Unchecked rows are the ones replay skips. Includes a
+    synthetic ``click_window`` row when locate tool args carry that identity
+    even if ``window_verify`` omitted it.
     """
     if not isinstance(analysis, dict):
         return []
-    predicate = analysis.get("window_verify")
+    from src.recorder.window_snapshot import effective_window_verify_predicate
+
     disabled = analysis.get("window_verify_disabled")
     rows = _window_verify_condition_rows(
-        predicate if isinstance(predicate, dict) else None,
+        effective_window_verify_predicate(analysis),
         disabled,
     )
     return [
@@ -6693,13 +6696,18 @@ def _render_verify_conditions_panel_html(
     """Checklist of replay checks for this recorded step. Unchecked items are skipped.
 
     Returns the panel HTML and a short miss summary (empty when nothing mismatched).
+    Includes a synthetic ``click_window`` row when locate tool args carry that
+    identity even if ``window_verify`` omitted it.
     """
-    predicate = analysis.get("window_verify") if isinstance(analysis, dict) else None
-    disabled = analysis.get("window_verify_disabled") if isinstance(analysis, dict) else None
-    rows = _window_verify_condition_rows(
-        predicate if isinstance(predicate, dict) else None,
-        disabled,
+    from src.recorder.window_snapshot import effective_window_verify_predicate
+
+    predicate = (
+        effective_window_verify_predicate(analysis)
+        if isinstance(analysis, dict)
+        else {}
     )
+    disabled = analysis.get("window_verify_disabled") if isinstance(analysis, dict) else None
+    rows = _window_verify_condition_rows(predicate, disabled)
     outcome_text = expected_outcome.strip()
     if use_expected_outcome or outcome_text:
         value_html = escape(outcome_text) if outcome_text else "（已啟用，但文字為空）"
@@ -6708,7 +6716,7 @@ def _render_verify_conditions_panel_html(
     reason = verify.get("reason") if isinstance(verify, dict) else None
     mismatch = _mismatched_verify_condition(
         rows=rows,
-        predicate=predicate if isinstance(predicate, dict) else None,
+        predicate=predicate,
         reason=reason,
         step_failed=_step_verify_failed(verify, status),
     )

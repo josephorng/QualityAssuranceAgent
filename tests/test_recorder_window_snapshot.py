@@ -12,8 +12,10 @@ from src.recorder.window_snapshot import (
     WindowStateChange,
     build_window_verify_predicate,
     click_hits_caption_buttons,
+    click_window_identity_from_tool_calls,
     diff_snapshots,
     diff_snapshots_with_debug,
+    effective_window_verify_predicate,
     ensure_recorded_click_window_maximized,
     ensure_recorded_click_window_on_screen,
     expected_outcome_for_window_change,
@@ -23,7 +25,9 @@ from src.recorder.window_snapshot import (
     is_agent_app_minimize,
     is_agent_app_restore,
     is_desktop_shell_click_window,
+    omit_click_window_from_tool_calls,
     resolve_window_change,
+    sample_foreground_click_window,
     settle_delay_for_click,
     filter_disabled_window_verify,
     normalize_window_verify_disabled,
@@ -1929,6 +1933,58 @@ def test_find_matching_click_window_skips_hidden_or_zero_size_stale_hwnd() -> No
     assert matched.class_name == "WorkerW"
 
 
+def test_sample_foreground_click_window_resolves_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    win = WindowInfo(
+        hwnd=55,
+        title="Foreground",
+        pid=1234,
+        left=0,
+        top=0,
+        width=200,
+        height=100,
+        is_minimized=False,
+        is_maximized=False,
+        class_name="AppWindow",
+        process_name=None,
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.os.name",
+        "nt",
+    )
+    monkeypatch.setattr(
+        "ctypes.windll.user32.GetForegroundWindow",
+        lambda: 55,
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot._window_info_from_hwnd",
+        lambda hwnd: win if int(hwnd) == 55 else None,
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot._process_name_for_pid",
+        lambda pid: "app.exe" if int(pid) == 1234 else None,
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot._window_class_name",
+        lambda _hwnd: "AppWindow",
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot._is_taskbar_class",
+        lambda _c: False,
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot._is_flyout_window",
+        lambda **_k: False,
+    )
+
+    sampled = sample_foreground_click_window()
+    assert sampled is not None
+    assert sampled.hwnd == 55
+    assert sampled.title == "Foreground"
+    assert sampled.process_name == "app.exe"
+
+
 def test_ensure_recorded_click_window_on_screen_restores_minimized(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3801,3 +3857,84 @@ def test_filter_disabled_window_verify_drops_unchecked_entries() -> None:
     with pytest.raises(ValueError):
         normalize_window_verify_disabled(predicate, ["disappeared:9"])
     assert normalize_window_verify_disabled(predicate, ["missing", "disappeared:9"], strict=False) == []
+
+
+def test_click_window_identity_from_tool_calls_and_effective_predicate() -> None:
+    identity = {
+        "title": "神網7",
+        "class_name": "WinForms",
+        "process_name": "WM7Ldr.exe",
+        "hwnd": 7,
+    }
+    tool_calls = [
+        {
+            "name": "move_mouse",
+            "arguments": {"instruction": "「確定」文字", "click_window": identity},
+        }
+    ]
+    assert click_window_identity_from_tool_calls(tool_calls) == identity
+    assert click_window_identity_from_tool_calls(
+        [
+            {
+                "name": "drag",
+                "arguments": {
+                    "start_click_window": identity,
+                    "destination_click_window": {"title": "Other"},
+                },
+            }
+        ]
+    ) == identity
+    assert click_window_identity_from_tool_calls([]) is None
+
+    analysis = {
+        "window_verify": {
+            "foreground": {
+                "title": "神網7",
+                "class_name": "WinForms",
+                "process_name": "WM7Ldr.exe",
+            }
+        },
+        "tool_calls": tool_calls,
+    }
+    effective = effective_window_verify_predicate(analysis)
+    assert effective["foreground"]["title"] == "神網7"
+    assert effective["click_window"] == identity
+    assert "click_window" not in analysis["window_verify"]
+
+    with_verify = {
+        "window_verify": {"click_window": {"title": "FromVerify"}},
+        "tool_calls": tool_calls,
+    }
+    assert effective_window_verify_predicate(with_verify)["click_window"] == {
+        "title": "FromVerify"
+    }
+
+    assert normalize_window_verify_disabled(effective, ["click_window"]) == [
+        "click_window"
+    ]
+
+
+def test_omit_click_window_from_tool_calls_strips_roi_args() -> None:
+    calls = [
+        {
+            "name": "move_mouse",
+            "arguments": {
+                "instruction": "「確定」文字",
+                "click_window": {"title": "A"},
+            },
+        },
+        {
+            "name": "drag",
+            "arguments": {
+                "start_click_window": {"title": "A"},
+                "destination_click_window": {"title": "B"},
+                "start_instruction": "a",
+            },
+        },
+        {"name": "click", "arguments": {"button": "left"}},
+    ]
+    stripped = omit_click_window_from_tool_calls(calls)
+    assert stripped[0]["arguments"] == {"instruction": "「確定」文字"}
+    assert stripped[1]["arguments"] == {"start_instruction": "a"}
+    assert stripped[2]["arguments"] == {"button": "left"}
+    assert calls[0]["arguments"]["click_window"]["title"] == "A"

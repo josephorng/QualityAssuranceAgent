@@ -2957,6 +2957,55 @@ def _screen_xyxy_to_image_roi(
     )
 
 
+def _click_window_identity_log(
+    label: str,
+    info: dict[str, Any] | Any | None,
+) -> str:
+    """Compact title/process/hwnd fragment for move_mouse diagnostics."""
+    if info is None:
+        return f"{label} title=None process=None hwnd=None"
+    if isinstance(info, dict):
+        title = info.get("title")
+        process = info.get("process_name")
+        hwnd = info.get("hwnd")
+    else:
+        title = getattr(info, "title", None)
+        process = getattr(info, "process_name", None)
+        hwnd = getattr(info, "hwnd", None)
+    return f"{label} title={title!r} process={process!r} hwnd={hwnd!r}"
+
+
+def _log_click_window_live_miss(
+    click_window: dict[str, Any] | None,
+    *,
+    reason: str,
+) -> None:
+    """Log recorded vs live-match vs foreground identity on click_window miss."""
+    from src.recorder.window_snapshot import (
+        find_matching_click_window,
+        sample_foreground_click_window,
+    )
+
+    try:
+        live_match = (
+            find_matching_click_window(click_window)
+            if isinstance(click_window, dict)
+            else None
+        )
+    except Exception:
+        live_match = None
+    try:
+        foreground = sample_foreground_click_window()
+    except Exception:
+        foreground = None
+    _log_info(
+        f"move_mouse {reason}: "
+        f"{_click_window_identity_log('recorded', click_window)}; "
+        f"{_click_window_identity_log('live_match', live_match)}; "
+        f"{_click_window_identity_log('foreground', foreground)}"
+    )
+
+
 def _any_monitor_has_live_click_window(
     captured: list[tuple[int, np.ndarray]],
     click_window: dict[str, Any],
@@ -3085,9 +3134,9 @@ def _collect_monitor_detections(
             monitor_offset=active_monitor_offset(monitor_index),
         )
         if live_roi is None:
-            _log_info(
-                "move_mouse: no live click_window match "
-                f"monitor={monitor_index}"
+            _log_click_window_live_miss(
+                click_window,
+                reason=f"no live click_window match monitor={monitor_index}",
             )
             return None
         return live_roi
@@ -3151,16 +3200,19 @@ def _collect_monitor_detections(
             if is_desktop_shell_click_window(click_window):
                 # Progman/WorkerW mismatch or stale shell hwnd: still scan the
                 # captured monitor(s) so YOLO+OCR can find desktop icons.
-                _log_info(
-                    "move_mouse desktop click_window live miss; "
-                    "scanning full monitor(s)"
+                _log_click_window_live_miss(
+                    click_window,
+                    reason="desktop click_window live miss; scanning full monitor(s)",
                 )
                 planned = [
                     (monitor_index, bgr, None, None)
                     for monitor_index, bgr in captured
                 ]
             else:
-                _log_info("move_mouse fail: no live click_window match")
+                _log_click_window_live_miss(
+                    click_window,
+                    reason="fail: no live click_window match",
+                )
                 raise ValueError(CLICK_WINDOW_MISS_MESSAGE)
         landmarks_outside = False
         if not planned:
@@ -7433,6 +7485,18 @@ async def find_mouse_point(
     maximize_meta = await asyncio.to_thread(
         ensure_recorded_click_window_maximized, click_window
     )
+    if isinstance(on_screen_meta, dict):
+        status = str(on_screen_meta.get("status") or "")
+        if status in {
+            "skipped_no_match",
+            "restored",
+            "foregrounded",
+            "already_on_screen",
+        }:
+            _log_click_window_live_miss(
+                click_window if isinstance(click_window, dict) else None,
+                reason=f"click_window_on_screen status={status}",
+            )
     ocr_fallback = take_yolo_ocr_fallback()
 
     def _with_prep_meta(
@@ -7917,6 +7981,11 @@ async def _find_mouse_point_attempt(
         uia_first_measured = True
         if not uia_dets:
             uia_snapshot_was_empty = True
+            if isinstance(click_window, dict):
+                _log_click_window_live_miss(
+                    click_window,
+                    reason="uia_first snapshot empty",
+                )
         _log_info(
             "move_mouse uia_first snapshot "
             f"total={len(uia_dets)} {_uia_snapshot_class_counts(uia_dets)}"
@@ -8404,9 +8473,6 @@ async def _find_mouse_point_attempt(
                             f"reason={uia_first_reason!r}"
                         )
                     else:
-                        detections = _sort_detections_reading_order(
-                            [*uia_dets, *yolo_detections]
-                        )
                         _log_info(
                             "move_mouse uia_yolo_subtarget_efp soft_miss; "
                             f"keeping UIA center reason={uia_first_reason!r}"

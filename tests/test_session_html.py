@@ -2864,6 +2864,73 @@ def test_write_recording_html_renders_empty_verify_conditions(tmp_path: Path) ->
     assert "無視窗／訊號驗證條件" in html
 
 
+def test_write_recording_html_shows_click_window_from_tool_calls(
+    tmp_path: Path,
+) -> None:
+    from src.common.session_html import window_verify_check_rows
+
+    run_root = tmp_path / "recording_20260721_120000_000032cw"
+    _write_recording_fixture(run_root)
+    (run_root / "analysis" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "instruction": "點擊「全選」文字",
+                "window_verify": {
+                    "foreground": {
+                        "class_name": "WinForms",
+                        "title": "神網7",
+                        "process_name": "WM7Ldr.exe",
+                    }
+                },
+                "tool_calls": [
+                    {
+                        "name": "move_mouse",
+                        "arguments": {
+                            "instruction": "「全選」文字",
+                            "click_window": {
+                                "class_name": "WinForms",
+                                "title": "神網7",
+                                "process_name": "WM7Ldr.exe",
+                            },
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    rows = window_verify_check_rows(
+        json.loads((run_root / "analysis" / "event_001.json").read_text(encoding="utf-8"))
+    )
+    assert any(key == "click_window" and enabled for key, _i, _l, _v, enabled in rows)
+
+    html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
+    assert "點擊視窗" in html
+    assert 'data-verify-key="click_window" checked' in html
+    assert 'data-verify-key="foreground" checked' in html
+
+
+def test_window_verify_check_rows_omits_click_window_without_tool_or_verify() -> None:
+    from src.common.session_html import window_verify_check_rows
+
+    rows = window_verify_check_rows(
+        {
+            "window_verify": {
+                "foreground": {
+                    "class_name": "WinForms",
+                    "title": "神網7",
+                    "process_name": "WM7Ldr.exe",
+                }
+            },
+            "tool_calls": [{"name": "click", "arguments": {"button": "left"}}],
+        }
+    )
+    assert all(key != "click_window" for key, *_rest in rows)
+
+
 def test_write_recording_html_renders_ready_verify_condition(tmp_path: Path) -> None:
     run_root = tmp_path / "recording_20260721_120000_000032r"
     _write_recording_fixture(run_root)

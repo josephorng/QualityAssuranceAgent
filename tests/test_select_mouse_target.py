@@ -4862,10 +4862,12 @@ def test_collect_fails_when_no_live_click_window(
         RECORDED_ANCHOR_MISS_MESSAGE,
         _collect_monitor_detections,
     )
+    from src.recorder.window_snapshot import ClickWindowInfo
 
     def fake_build(*_args, **_kwargs):
         raise AssertionError("missing live click_window must not search other windows")
 
+    logs: list[str] = []
     monkeypatch.setattr(
         "cua_mcp.select_mouse_target._detect_mouse_targets_from_bgr",
         fake_build,
@@ -4882,6 +4884,27 @@ def test_collect_fails_when_no_live_click_window(
         "src.recorder.window_snapshot.resolve_live_ocr_roi_local",
         lambda *_a, **_k: None,
     )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.sample_foreground_click_window",
+        lambda: ClickWindowInfo(
+            hwnd=99,
+            title="Live App",
+            process_name="live.exe",
+            left=0,
+            top=0,
+            width=100,
+            height=100,
+            is_maximized=False,
+        ),
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._log_info",
+        logs.append,
+    )
 
     img1 = np.full((4, 4, 3), 1, dtype=np.uint8)
     img2 = np.full((4, 4, 3), 2, dtype=np.uint8)
@@ -4890,8 +4913,52 @@ def test_collect_fails_when_no_live_click_window(
         _collect_monitor_detections(
             [(1, img1), (2, img2)],
             yolo_conf_threshold=0.05,
-            click_window={"hwnd": 1, "is_maximized": True, "rect": [0, 0, 1920, 1080]},
+            click_window={
+                "hwnd": 1,
+                "title": "Recorded App",
+                "process_name": "recorded.exe",
+                "is_maximized": True,
+                "rect": [0, 0, 1920, 1080],
+            },
         )
+    miss_logs = [line for line in logs if "fail: no live click_window match" in line]
+    assert miss_logs, logs
+    assert "recorded title='Recorded App' process='recorded.exe' hwnd=1" in miss_logs[0]
+    assert "live_match title=None process=None hwnd=None" in miss_logs[0]
+    assert "foreground title='Live App' process='live.exe' hwnd=99" in miss_logs[0]
+
+
+def test_click_window_identity_log_formats_dict_and_object() -> None:
+    from cua_mcp.select_mouse_target import _click_window_identity_log
+    from src.recorder.window_snapshot import ClickWindowInfo
+
+    assert (
+        _click_window_identity_log("recorded", None)
+        == "recorded title=None process=None hwnd=None"
+    )
+    assert (
+        _click_window_identity_log(
+            "recorded",
+            {"title": "A", "process_name": "a.exe", "hwnd": 7},
+        )
+        == "recorded title='A' process='a.exe' hwnd=7"
+    )
+    assert (
+        _click_window_identity_log(
+            "foreground",
+            ClickWindowInfo(
+                hwnd=8,
+                title="B",
+                process_name="b.exe",
+                left=0,
+                top=0,
+                width=1,
+                height=1,
+                is_maximized=False,
+            ),
+        )
+        == "foreground title='B' process='b.exe' hwnd=8"
+    )
 
 
 def test_collect_desktop_live_miss_scans_full_frame(

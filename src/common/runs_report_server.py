@@ -1730,9 +1730,13 @@ def apply_recording_event_verify_conditions(
     """Persist which window/signal checks are unchecked for one recorded event.
 
     ``disabled`` is a list of ``key`` or ``key:index`` selectors. An empty list
-    checks every condition again. Replay skips the stored selectors.
+    checks every condition again. Replay skips the stored selectors. Synthetic
+    ``click_window`` from tool args is allowed even when absent from
+    ``window_verify``.
     Returns ``{"disabled": list[str]}``.
     """
+    from src.recorder.window_snapshot import effective_window_verify_predicate
+
     run_dir = resolve_deletable_run_folder(runs_root, run_id)
     if not isinstance(event_index, int) or event_index < 1:
         raise ValueError("invalid event index")
@@ -1747,9 +1751,9 @@ def apply_recording_event_verify_conditions(
     if not isinstance(analysis, dict):
         raise ValueError("analysis not found")
 
-    predicate = analysis.get("window_verify")
+    predicate = effective_window_verify_predicate(analysis)
     normalized = normalize_window_verify_disabled(
-        predicate if isinstance(predicate, dict) else {},
+        predicate,
         disabled,
         strict=True,
     )
@@ -1766,12 +1770,13 @@ def apply_recording_event_verify_conditions(
 
 def _all_window_verify_selectors(analysis: dict[str, Any]) -> list[str]:
     """Selectors for every window/signal check shown on the recording page."""
+    from src.recorder.window_snapshot import effective_window_verify_predicate
+
     raw: list[str] = []
     for key, index, _label, _value, _enabled in window_verify_check_rows(analysis):
         raw.append(key if index is None else f"{key}:{index}")
-    predicate = analysis.get("window_verify")
     return normalize_window_verify_disabled(
-        predicate if isinstance(predicate, dict) else {},
+        effective_window_verify_predicate(analysis),
         raw,
         strict=False,
     )

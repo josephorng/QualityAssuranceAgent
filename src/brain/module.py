@@ -23,7 +23,7 @@ from cua_mcp.tools import (
 )
 from ollama import Message
 from pydantic import ValidationError
-from src.common.io_utils import write_json
+from src.common.io_utils import read_json, write_json
 from cua_mcp.llm_json import extract_json_object_string, parse_json_object, repair_json_object_text
 from src.common.models import (
     BrainStepOutcome,
@@ -81,8 +81,10 @@ from src.recorder.window_snapshot import (
     WindowInfo,
     build_window_verify_predicate,
     disappeared_windows_still_present,
+    omit_click_window_from_tool_calls,
     omit_foreground_when_structural,
     snapshot_top_level_windows,
+    window_verify_condition_enabled,
     window_verify_has_assertions,
     window_verify_satisfied,
 )
@@ -1163,6 +1165,51 @@ class BrainModule:
             reason=reason.strip(),
         )
 
+    def _cached_calls_omitting_disabled_click_window(
+        self,
+        cached_calls: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Drop locate ``click_window`` ROI args when the step checkbox is off."""
+        script_path_raw = (os.environ.get(SCRIPT_PATH_ENV) or "").strip()
+        if not script_path_raw:
+            return cached_calls
+        try:
+            from src.common.script_helper import recording_run_dir
+
+            recording_dir = recording_run_dir(Path(script_path_raw))
+            event_ids = self._script_event_indices
+            step_index = self._script_step_index
+            event_index = (
+                event_ids[step_index]
+                if 0 <= step_index < len(event_ids)
+                and isinstance(event_ids[step_index], int)
+                else None
+            )
+            if recording_dir is None or event_index is None:
+                return cached_calls
+            analysis = read_json(
+                Path(recording_dir) / "analysis" / f"event_{int(event_index):03d}.json",
+                None,
+            )
+            if not isinstance(analysis, dict):
+                return cached_calls
+            if window_verify_condition_enabled(
+                analysis.get("window_verify_disabled"),
+                "click_window",
+            ):
+                return cached_calls
+            stripped = omit_click_window_from_tool_calls(cached_calls)
+            self.manager.log_info(
+                "click_window disabled; omitting locate ROI "
+                f"event={int(event_index)}"
+            )
+            return stripped
+        except Exception as exc:
+            self.manager.log_info(
+                f"click_window disable strip skipped: {exc}"
+            )
+            return cached_calls
+
     async def _try_replay_cached_tools(
         self,
         goal: str,
@@ -1178,6 +1225,7 @@ class BrainModule:
         re-pick visually. ``fallback`` is any other replay failure, which still
         goes to the decide loop.
         """
+        cached_calls = self._cached_calls_omitting_disabled_click_window(cached_calls)
         all_image_paths = await self._eye.capture_separated_images()
         before_screenshot = self._primary_decision_screenshot(all_image_paths)
         # Matching recording: this step's before is the previous step's after.

@@ -1747,11 +1747,85 @@ _ITEMIZED_VERIFY_KEYS = frozenset(
     }
 )
 _VERIFY_SELECTOR_RE = re.compile(r"^([a-z_]+)(?::(\d+))?$")
+_CLICK_WINDOW_TOOL_ARG_KEYS = (
+    "click_window",
+    "start_click_window",
+    "destination_click_window",
+)
 
 
 def _selector_sort_key(selector: str) -> tuple[str, int]:
     key, _, index = selector.partition(":")
     return (key, int(index) if index.isdigit() else -1)
+
+
+def click_window_identity_from_tool_calls(
+    tool_calls: Any,
+) -> dict[str, Any] | None:
+    """First non-empty locate ``click_window`` identity from compiled tool args."""
+    if not isinstance(tool_calls, list):
+        return None
+    for call in tool_calls:
+        if not isinstance(call, dict):
+            continue
+        arguments = call.get("arguments")
+        if not isinstance(arguments, dict):
+            continue
+        for key in _CLICK_WINDOW_TOOL_ARG_KEYS:
+            value = arguments.get(key)
+            if isinstance(value, dict) and value:
+                return dict(value)
+    return None
+
+
+def effective_window_verify_predicate(
+    analysis: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """``window_verify`` plus synthetic ``click_window`` from tool args when missing.
+
+    Display / normalize only — callers must not write this dict back into analysis
+    ``window_verify``. When ``window_verify`` already has ``click_window``, that
+    value wins.
+    """
+    if not isinstance(analysis, dict):
+        return {}
+    raw = analysis.get("window_verify")
+    predicate = dict(raw) if isinstance(raw, dict) else {}
+    existing = predicate.get("click_window")
+    if isinstance(existing, dict) and existing:
+        return predicate
+    identity = click_window_identity_from_tool_calls(analysis.get("tool_calls"))
+    if identity is None:
+        return predicate
+    out = dict(predicate)
+    out["click_window"] = identity
+    return out
+
+
+def omit_click_window_from_tool_calls(
+    tool_calls: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Return copies of tool calls without locate ``click_window`` ROI args."""
+    if not isinstance(tool_calls, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for call in tool_calls:
+        if not isinstance(call, dict):
+            continue
+        arguments = call.get("arguments")
+        if not isinstance(arguments, dict):
+            out.append(dict(call))
+            continue
+        if not any(key in arguments for key in _CLICK_WINDOW_TOOL_ARG_KEYS):
+            out.append(dict(call))
+            continue
+        new_args = dict(arguments)
+        for key in _CLICK_WINDOW_TOOL_ARG_KEYS:
+            new_args.pop(key, None)
+        new_call = dict(call)
+        new_call["arguments"] = new_args
+        out.append(new_call)
+    return out
 
 
 def normalize_window_verify_disabled(
@@ -2540,6 +2614,26 @@ def resolve_click_window(x: int, y: int) -> ClickWindowInfo | None:
     keep their own rects — do not replace with a later Explorer/owner window.
     """
     win = window_at_point(int(x), int(y))
+    if win is None:
+        return None
+    return _click_window_from_window_info(win)
+
+
+def sample_foreground_click_window() -> ClickWindowInfo | None:
+    """Best-effort foreground window identity for replay miss diagnostics.
+
+    Always resolves ``process_name`` (unlike the raw hwnd probe used for flyout
+    matching). Returns ``None`` off Windows or when the foreground hwnd is gone.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        hwnd = int(ctypes.windll.user32.GetForegroundWindow() or 0)
+    except Exception:
+        return None
+    if hwnd == 0:
+        return None
+    win = _window_info_from_hwnd(hwnd)
     if win is None:
         return None
     return _click_window_from_window_info(win)

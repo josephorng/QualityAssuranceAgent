@@ -19,6 +19,7 @@ import ctypes
 import heapq
 import os
 import re
+import threading
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -150,11 +151,10 @@ _HOVER_SUBTREE_AREA_FRAC = 0.15
 _HOVER_SUBTREE_MAX_CLIMB = 12
 
 # Budgeted ControlView walk (replaces unbounded FindAllBuildCache).
-# Temporary diagnostic: raised so slow WinForms trees (e.g. 龜速的網域) can
-# finish a full snapshot under a 5-minute wall clock.
-_DEFAULT_WALK_MAX_HITS = 50_000
-_DEFAULT_WALK_MAX_NODES = 200_000
-_DEFAULT_WALK_MAX_SECONDS = 300.0
+_DEFAULT_WALK_MAX_HITS = 500
+_DEFAULT_WALK_MAX_NODES = 4000
+# VM / slow providers often need more than 2s to finish a local climb walk.
+_DEFAULT_WALK_MAX_SECONDS = 5.0
 _DEFAULT_WALK_MAX_CHILDREN_PER_PARENT = 80
 _WALK_OFFSCREEN_SCORE_BASE = 1_000_000_000.0
 _WALK_MISSING_BBOX_SCORE = 1_000_000_000_000.0
@@ -166,8 +166,12 @@ _EFP_SCAN_STEP_PX = 28
 _EFP_SCAN_MAX_PROBES = 80
 _EFP_SCAN_MAX_SECONDS = 1.0
 # Outer uia_call waits (must cover walk budget; enrich stacks refetch + EFP scan).
-_SNAPSHOT_UIA_TIMEOUT_S = 305.0
-_SNAPSHOT_UIA_ENRICH_TIMEOUT_S = 610.0
+_SNAPSHOT_UIA_TIMEOUT_S = 5.5
+_SNAPSHOT_UIA_ENRICH_TIMEOUT_S = 15.0
+# One FindAll snapshot at a time across seed/settle/hover callers.
+_SNAPSHOT_FINDALL_LOCK = threading.Lock()
+# Set while a gated snapshot owns the lock (inner UIA-worker reentry skips).
+_SNAPSHOT_FINDALL_BUSY = False
 
 
 @dataclass(frozen=True)
@@ -4563,6 +4567,7 @@ def snapshot_uia_screen(
     cursor_xy: tuple[int, int] | None = None,
     budgets: WalkBudgets | None = None,
     enrich: bool = True,
+    wait: bool = True,
 ) -> dict[str, object] | None:
     """Budgeted UIA walk under ``hwnd`` (optional cursor climb) for analysis.
 
@@ -4577,10 +4582,17 @@ def snapshot_uia_screen(
     When ``cursor_xy`` is set and ``enrich`` is true, an EFP cover miss triggers
     one cursor-climbed FindAll refetch, then a bounded EFP ROI scan when still
     uncovered or sparse (``findall_refetch`` / ``efp_scan_*`` fields).
+
+    Only one gated FindAll runs at a time. ``wait=True`` (settle/seed/typing)
+    blocks until the lock is free. ``wait=False`` (hover) returns ``None``
+    immediately when another FindAll is in flight. Cursor enrich refetch uses
+    ``_snapshot_uia_screen_impl`` directly so it does not re-enter this gate;
+    a UIA-worker call that somehow re-enters while busy runs without
+    re-acquiring the lock.
     """
     if os.name != "nt" or not int(hwnd or 0):
         return None
-    from src.recorder.uia_thread import uia_call
+    from src.recorder.uia_thread import uia_call, uia_worker_is_current_thread
 
     def _run() -> dict[str, object] | None:
         started = time.perf_counter()
@@ -4627,10 +4639,32 @@ def snapshot_uia_screen(
         if enrich and cursor_xy is not None
         else float(_SNAPSHOT_UIA_TIMEOUT_S)
     )
+
+    global _SNAPSHOT_FINDALL_BUSY
+    # Inner reentry on the UIA worker (should be rare; enrich uses _impl).
+    if uia_worker_is_current_thread() and _SNAPSHOT_FINDALL_BUSY:
+        try:
+            return _run()
+        except Exception:
+            return None
+
+    if wait:
+        _SNAPSHOT_FINDALL_LOCK.acquire()
+        acquired = True
+    else:
+        acquired = _SNAPSHOT_FINDALL_LOCK.acquire(blocking=False)
+        if not acquired:
+            return None
+    _SNAPSHOT_FINDALL_BUSY = True
     try:
-        return uia_call(_run, timeout_s=timeout_s)
-    except Exception:
-        return None
+        try:
+            return uia_call(_run, timeout_s=timeout_s)
+        except Exception:
+            return None
+    finally:
+        _SNAPSHOT_FINDALL_BUSY = False
+        if acquired:
+            _SNAPSHOT_FINDALL_LOCK.release()
 
 
 def snapshot_uia_hover_subtree(
@@ -4641,10 +4675,13 @@ def snapshot_uia_hover_subtree(
     """Hover warm-up: ElementFromPoint climb, then budgeted ControlView walk.
 
     Snapshot ``window`` / boxes stay in screen space under the top-level
-    ``hwnd``. Returns ``None`` only when UIA cannot be created; an empty tree is
-    still a snapshot dict.
+    ``hwnd``. Returns ``None`` when UIA cannot be created, another FindAll is
+    already in flight (``wait=False``), or the outer walk times out; an empty
+    tree is still a snapshot dict.
     """
-    return snapshot_uia_screen(int(hwnd), cursor_xy=(int(x), int(y)))
+    return snapshot_uia_screen(
+        int(hwnd), cursor_xy=(int(x), int(y)), wait=False
+    )
 
 
 def _snapshot_xyxy_list(raw: object) -> list[ScreenXyxy]:

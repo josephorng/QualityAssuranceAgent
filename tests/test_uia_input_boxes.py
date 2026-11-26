@@ -1464,3 +1464,29 @@ def test_uia_worker_call_runs_and_is_reentrant() -> None:
 
     assert uia_call(_outer, timeout_s=2.5) == "ok"
     assert marker == [True]
+
+
+def test_default_walk_budgets_match_short_limits() -> None:
+    from src.recorder.uia_input_boxes import (
+        WalkBudgets,
+        _SNAPSHOT_UIA_ENRICH_TIMEOUT_S,
+        _SNAPSHOT_UIA_TIMEOUT_S,
+    )
+
+    budgets = WalkBudgets()
+    assert budgets.max_hits == 500
+    assert budgets.max_nodes == 4000
+    assert budgets.max_seconds == 5.0
+    assert _SNAPSHOT_UIA_TIMEOUT_S == 5.5
+    assert _SNAPSHOT_UIA_ENRICH_TIMEOUT_S == 15.0
+
+
+def test_snapshot_uia_screen_wait_false_skips_when_busy() -> None:
+    from src.recorder import uia_input_boxes as uia
+
+    assert uia._SNAPSHOT_FINDALL_LOCK.acquire(blocking=False)
+    try:
+        assert uia.snapshot_uia_screen(1, wait=False) is None
+        assert uia.snapshot_uia_hover_subtree(1, 10, 20) is None
+    finally:
+        uia._SNAPSHOT_FINDALL_LOCK.release()

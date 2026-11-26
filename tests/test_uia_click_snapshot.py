@@ -980,8 +980,14 @@ def test_hover_findall_warms_uncached_hwnd(tmp_path: Path) -> None:
 
     with (
         patch(
-            "src.recorder.uia_input_boxes.uia_text_element_at_point",
-            return_value=("x", (0, 0, 1, 1), "text", "Leaf", "V"),
+            "src.recorder.uia_input_boxes.element_from_point_name_value",
+            return_value={
+                "name": "Leaf",
+                "value": "V",
+                "control_type": "text",
+                "bbox": [0, 0, 1, 1],
+                "element_from_point_s": 0.0,
+            },
         ),
         patch(
             "src.recorder.capture.resolve_click_window",
@@ -1181,8 +1187,14 @@ def test_hover_findall_skips_when_already_cached_or_yellow_or_mismatch(
 
         with (
             patch(
-                "src.recorder.uia_input_boxes.uia_text_element_at_point",
-                return_value=("x", (0, 0, 1, 1), "text", "N", "V"),
+                "src.recorder.uia_input_boxes.element_from_point_name_value",
+                return_value={
+                    "name": "N",
+                    "value": "V",
+                    "control_type": "text",
+                    "bbox": [0, 0, 1, 1],
+                    "element_from_point_s": 0.0,
+                },
             ),
             patch(
                 "src.recorder.capture.resolve_click_window",
@@ -1326,10 +1338,17 @@ def test_hover_findall_skips_when_already_cached_or_yellow_or_mismatch(
     # Flyout / noise ineligible
     session._events = []
     session._last_settle_uia_after_index = 0
+    efp_nv = {
+        "name": "N",
+        "value": "V",
+        "control_type": "text",
+        "bbox": [0, 0, 1, 1],
+        "element_from_point_s": 0.0,
+    }
     with (
         patch(
-            "src.recorder.uia_input_boxes.uia_text_element_at_point",
-            return_value=("x", (0, 0, 1, 1), "text", "N", "V"),
+            "src.recorder.uia_input_boxes.element_from_point_name_value",
+            return_value=efp_nv,
         ),
         patch(
             "src.recorder.capture.resolve_click_window",
@@ -1350,8 +1369,8 @@ def test_hover_findall_skips_when_already_cached_or_yellow_or_mismatch(
         assert snap.call_count == 0
     with (
         patch(
-            "src.recorder.uia_input_boxes.uia_text_element_at_point",
-            return_value=("x", (0, 0, 1, 1), "text", "N", "V"),
+            "src.recorder.uia_input_boxes.element_from_point_name_value",
+            return_value=efp_nv,
         ),
         patch(
             "src.recorder.capture.resolve_click_window",

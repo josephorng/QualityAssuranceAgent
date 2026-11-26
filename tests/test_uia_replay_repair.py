@@ -158,7 +158,7 @@ def test_choose_with_reason_reports_ocr_miss() -> None:
 
 
 def test_choose_repairs_when_ocr_has_single_char_garble() -> None:
-    """Repair confirm floor (0.5) accepts 空白文件↔空自文件; mouse filter stays 0.8."""
+    """Repair confirm floor (0.5) accepts 空白文件↔空自文件; mouse filter is also 0.5."""
     hit, reason = choose_uia_replay_repair_with_reason(
         recorded_bbox=_RECORDED_BBOX,
         recorded_text="空白文件",

@@ -26,8 +26,9 @@ COSINE_OK = 0.85
 NORMALIZED_L2_OK = 0.4
 # Candidate center must lie within this fraction of replay scale from synth point.
 TARGET_NEAR_SYNTH = 0.35
-# In-radius text ranking floor (below global 0.8 top-tie filter so count-suffix
-# OCR like ``Linux`` ↔ ``Linux (5)`` can still qualify near the synth point).
+# In-radius text ranking floor (stricter than the global 0.5 mouse filter so
+# weak OCR cousins near the synth point do not win on proximity alone; still
+# low enough for count-suffix OCR like ``Linux`` ↔ ``Linux (5)``).
 TEXT_IN_RADIUS_SIMILARITY_FLOOR = 0.7
 # Drop a landmark when more than this fraction of its edges to other matched
 # landmarks fail the vector checks.

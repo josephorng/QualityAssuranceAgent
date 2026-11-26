@@ -2389,7 +2389,8 @@ def _filter_mouse_candidates_exact(
 
 
 # Minimum SequenceMatcher score to keep a candidate before the LLM filter.
-_MOUSE_FILTER_SIMILARITY_THRESHOLD = 0.8
+# 0.5 keeps single-char OCR garbles (e.g. 活頁通Txlsx ↔ 活頁簿1.xlsx ≈ 0.71).
+_MOUSE_FILTER_SIMILARITY_THRESHOLD = 0.5
 
 
 def _detections_label_similar(
@@ -4064,8 +4065,9 @@ def _resolve_with_landmark_geometry(
     When ``synth_only`` is True (empty-space / relative-offset clicks), skip
     detection picking and always return the synthesized point.
 
-    When ``candidate_pool`` is set (e.g. similarity-matched inputs), pick only
-    among that pool near the synthesized point; otherwise synthesize.
+    On-object targets never return a bare synth point: if no live detection is
+    near the synthesized location, return ``None`` so callers miss/retry
+    instead of clicking empty chrome.
     """
     # Lazy import: ``src.recorder`` package init pulls tools → this module.
     from src.recorder.landmark_geometry import (
@@ -4102,7 +4104,7 @@ def _resolve_with_landmark_geometry(
         near = pick_detection_near_synthesized(candidate_pool, synth, scale)
         if near is not None:
             return near, (int(near.cx), int(near.cy)), "landmark_geometry_pick"
-        return None, synth, "landmark_geometry_synth"
+        return None
 
     kept_hints = _kept_nearby_hints_for_labels(nearby_hints, set(kept_centers))
     unique = _unique_target_from_landmarks(
@@ -4126,7 +4128,7 @@ def _resolve_with_landmark_geometry(
     if near is not None:
         return near, (int(near.cx), int(near.cy)), "landmark_geometry_pick"
 
-    return None, synth, "landmark_geometry_synth"
+    return None
 
 
 def _resolve_text_anchor_with_landmark_geometry(
@@ -9228,8 +9230,8 @@ async def _find_mouse_point_attempt(
         pass
     elif not anchor_matches:
         # On-object text anchors must still resolve via OCR/similarity (or the
-        # radius-similarity path above). Constellation synth / landmark-unique
-        # fallbacks remain for non-text targets (e.g. empty 輸入欄).
+        # radius-similarity path above). Non-text may still snap to a near-synth
+        # detection / landmark-unique; bare constellation synth is refused.
         if (
             similarity_match_required()
             and _anchor_is_text(anchor)
@@ -9263,38 +9265,12 @@ async def _find_mouse_point_attempt(
                         f"center=[{chosen.cx},{chosen.cy}] method={geom_method}"
                     )
                 else:
-                    resolved = (
-                        int(geom_point[0]) + int(offset_dx),
-                        int(geom_point[1]) + int(offset_dy),
-                    )
-                    if _synth_point_within_bounds(
-                        resolved,
-                        captured=captured,
-                        click_window=click_window,
-                    ):
-                        select_s = time.perf_counter() - select_started
-                        _log_info(
-                            "move_mouse: landmark geometry synth "
-                            f"point=[{geom_point[0]},{geom_point[1]}]"
-                        )
-                        return _pack(_landmark_geometry_synth_meta(
-                            point=geom_point,
-                            offset_dx=offset_dx,
-                            offset_dy=offset_dy,
-                            track_percent=track_percent,
-                            char_target=char_target,
-                            char_occurrence=char_occurrence,
-                            instruction_text=instruction_text,
-                            nearby_phrases=nearby_phrases,
-                            image_paths=image_paths,
-                            selection_method=geom_method,
-                            timing=_timing_meta(
-                                select_s=select_s, select_phase=geom_method
-                            ),
-                        ))
+                    # On-object: never click bare synth (empty-space uses
+                    # synth_only above). Defend against stale (None, synth) hits.
                     _log_info(
-                        "move_mouse: landmark_geometry_synth_out_of_bounds "
-                        f"point=[{resolved[0]},{resolved[1]}]"
+                        "move_mouse: landmark_geometry_synth_refused "
+                        f"point=[{geom_point[0]},{geom_point[1]}] "
+                        "(on-object; no near detection)"
                     )
         unique = _unique_target_from_landmarks(
             detections,
@@ -9503,40 +9479,11 @@ async def _find_mouse_point_attempt(
                             f"pool={len(anchor_matches)}"
                         )
                     else:
-                        resolved = (
-                            int(geom_point[0]) + int(offset_dx),
-                            int(geom_point[1]) + int(offset_dy),
-                        )
-                        if _synth_point_within_bounds(
-                            resolved,
-                            captured=captured,
-                            click_window=click_window,
-                        ):
-                            select_s = time.perf_counter() - select_started
-                            _log_info(
-                                "move_mouse: landmark geometry synth among anchors "
-                                f"point=[{geom_point[0]},{geom_point[1]}] "
-                                f"pool={len(anchor_matches)}"
-                            )
-                            return _pack(_landmark_geometry_synth_meta(
-                                point=geom_point,
-                                offset_dx=offset_dx,
-                                offset_dy=offset_dy,
-                                track_percent=track_percent,
-                                char_target=char_target,
-                                char_occurrence=char_occurrence,
-                                instruction_text=instruction_text,
-                                nearby_phrases=nearby_phrases,
-                                image_paths=image_paths,
-                                selection_method=geom_method,
-                                timing=_timing_meta(
-                                    select_s=select_s, select_phase=geom_method
-                                ),
-                            ))
                         _log_info(
-                            "move_mouse: landmark_geometry_synth_out_of_bounds "
-                            f"point=[{resolved[0]},{resolved[1]}] "
-                            f"pool={len(anchor_matches)}; skipping geometry commit"
+                            "move_mouse: landmark_geometry_synth_refused "
+                            f"point=[{geom_point[0]},{geom_point[1]}] "
+                            f"pool={len(anchor_matches)} "
+                            "(on-object; no near detection)"
                         )
 
         selection_done = bool(used_geometry)

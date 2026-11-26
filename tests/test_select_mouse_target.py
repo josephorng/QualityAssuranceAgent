@@ -5713,9 +5713,10 @@ _GEOMETRY_NEARBY = [
 
 
 @pytest.mark.asyncio
-async def test_find_mouse_point_replay_geometry_synth_when_target_missing(
+async def test_find_mouse_point_replay_geometry_refuses_bare_synth_when_target_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """On-object hubs must not click constellation synth with no near detection."""
     from cua_mcp import select_mouse_target as smt
 
     async def fake_pick(*_a, **_k):
@@ -5734,10 +5735,21 @@ async def test_find_mouse_point_replay_geometry_synth_when_target_missing(
             nearby_objects=_GEOMETRY_NEARBY,
             landmark_geometry=_recorded_input_geometry(),
         )
-    assert found is not None
-    assert found[2]["selection_method"] == "landmark_geometry_synth"
-    assert abs(found[0] - 60) <= 1
-    assert abs(found[1] - 60) <= 1
+    assert found is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_landmark_geometry_refuses_bare_synth_without_near_detection() -> None:
+    from cua_mcp.select_mouse_target import _resolve_with_landmark_geometry
+
+    detections = _geometry_landmark_scene(include_target=False)
+    hit = _resolve_with_landmark_geometry(
+        detections,
+        _recorded_input_geometry(),
+        anchor="輸入欄",
+        nearby_hints=_GEOMETRY_NEARBY,
+    )
+    assert hit is None
 
 
 @pytest.mark.asyncio
@@ -5781,9 +5793,10 @@ async def test_find_mouse_point_replay_geometry_picks_near_synth(
 
 
 @pytest.mark.asyncio
-async def test_find_mouse_point_replay_geometry_synth_when_peers_far(
+async def test_find_mouse_point_replay_geometry_refuses_bare_synth_when_peers_far(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Far type-compatible peers outside near-synth radius must not unlock bare synth."""
     from cua_mcp import select_mouse_target as smt
 
     async def fake_pick(*_a, **_k):
@@ -5813,10 +5826,7 @@ async def test_find_mouse_point_replay_geometry_synth_when_peers_far(
             nearby_objects=_GEOMETRY_NEARBY,
             landmark_geometry=_recorded_input_geometry(),
         )
-    assert found is not None
-    assert found[2]["selection_method"] == "landmark_geometry_synth"
-    assert abs(found[0] - 60) <= 1
-    assert abs(found[1] - 60) <= 1
+    assert found is None
 
 
 @pytest.mark.asyncio

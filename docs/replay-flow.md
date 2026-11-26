@@ -4,6 +4,8 @@ How cache replay turns an `analysis/event_NNN.json` step into a screen click —
 
 Recording side (how twins are prepared): [`recording-flow.md`](recording-flow.md).
 
+Interactive overview (open in a browser; switch Replay / Recording): [`uia-replay-path.html`](uia-replay-path.html).
+
 ## Overview
 
 ```mermaid

@@ -4,6 +4,8 @@ How a live session becomes durable `events/`, `yolo_ocr/`, and `analysis/` artif
 
 For low-level capture threads (before-shot, settle UIA, idle hover), see [`RECORDING_LOOPS.md`](../RECORDING_LOOPS.md).
 
+Interactive overview (open in a browser; switch Replay / Recording): [`uia-replay-path.html`](uia-replay-path.html).
+
 ## Overview
 
 ```mermaid

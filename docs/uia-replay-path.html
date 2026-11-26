@@ -1,0 +1,1018 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>UIA record &amp; replay path</title>
+  <style>
+    :root {
+      --background: #f7f7f5;
+      --foreground: #1c1c1a;
+      --card: #ffffff;
+      --muted: #ecece8;
+      --muted-foreground: #6b6b66;
+      --border: #d8d8d2;
+      --blue: #2f6fed;
+      --orange: #c56a1a;
+      --success: #1f7a45;
+      --accent: #2f6fed;
+      --purple: #7a4fd4;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --background: #141413;
+        --foreground: #f2f2ee;
+        --card: #1e1e1c;
+        --muted: #2a2a27;
+        --muted-foreground: #a3a39c;
+        --border: #3a3a35;
+        --blue: #6b9bff;
+        --orange: #e08a3c;
+        --success: #3db872;
+        --accent: #6b9bff;
+        --purple: #b08aff;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 24px;
+      font: 14px/1.45 system-ui, sans-serif;
+      color: var(--foreground); background: var(--background);
+    }
+    #uia-flow {
+      display: flex; flex-direction: column; gap: 24px;
+      max-width: 960px; margin: 0 auto;
+    }
+    .vis-sr-only {
+      position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+      overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+    }
+    .vis-controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+    .vis-form-label {
+      display: flex; flex-direction: column; gap: 6px;
+      font-size: 13px; color: var(--muted-foreground);
+    }
+    .vis-form-select, .vis-toggle-group {
+      min-width: 160px; padding: 8px 10px;
+      border: 1px solid var(--border); border-radius: 8px;
+      background: var(--card); color: var(--foreground); font: inherit;
+    }
+    .vis-toggle-group {
+      display: inline-flex; gap: 0; padding: 0; min-width: 0; overflow: hidden;
+    }
+    .vis-toggle-group label {
+      padding: 8px 14px; cursor: pointer; border-right: 1px solid var(--border);
+      color: var(--muted-foreground); user-select: none;
+    }
+    .vis-toggle-group label:last-child { border-right: 0; }
+    .vis-toggle-group input { position: absolute; opacity: 0; pointer-events: none; }
+    .vis-toggle-group input:checked + label {
+      background: color-mix(in srgb, var(--accent) 14%, var(--card));
+      color: var(--foreground); font-weight: 500;
+    }
+    .vis-toggle-group input:focus-visible + label {
+      outline: 2px solid var(--accent); outline-offset: -2px;
+    }
+    .vis-column { display: flex; flex-direction: column; gap: 12px; }
+    .vis-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .vis-chart-meta {
+      display: flex; flex-wrap: wrap; justify-content: space-between;
+      gap: 12px; align-items: flex-start;
+    }
+    .vis-chart-meta-copy h3 { margin: 0; font-size: 16px; font-weight: 500; }
+    .vis-chart-meta-copy span {
+      display: block; margin-top: 2px; color: var(--muted-foreground); font-size: 13px;
+    }
+    .vis-legend {
+      display: flex; flex-wrap: wrap; gap: 12px;
+      font-size: 13px; color: var(--muted-foreground);
+    }
+    .vis-legend-item { display: inline-flex; align-items: center; gap: 6px; }
+    .vis-swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+    .vis-swatch.vis-blue { background: var(--blue); }
+    .vis-swatch.vis-orange { background: var(--orange); }
+    .vis-swatch.vis-success { background: var(--success); }
+    .vis-swatch.vis-purple { background: var(--purple); }
+    .vis-card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 10px; padding: 14px;
+    }
+    .vis-badge {
+      display: inline-flex; align-items: center; padding: 2px 8px;
+      border-radius: 999px; border: 1px solid var(--border);
+      font-size: 12px; background: var(--muted);
+    }
+    .vis-badge.vis-accent {
+      border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+      color: var(--accent);
+      background: color-mix(in srgb, var(--accent) 12%, transparent);
+    }
+    .vis-text-muted { color: var(--muted-foreground); }
+    .vis-text-small { font-size: 12px; }
+    .vis-code-block {
+      margin: 0; background: var(--muted); border-radius: 8px; padding: 10px 12px;
+    }
+    .vis-code-block figcaption {
+      margin: 0 0 6px; font-size: 12px; color: var(--muted-foreground);
+    }
+    .vis-code-block pre {
+      margin: 0; white-space: pre-wrap;
+      font: 12px/1.4 ui-monospace, Consolas, monospace;
+    }
+    .vis-category-surface.vis-blue { fill: color-mix(in srgb, var(--blue) 18%, var(--card)); }
+    .vis-category-surface.vis-orange { fill: color-mix(in srgb, var(--orange) 18%, var(--card)); }
+    .vis-category-surface.vis-success { fill: color-mix(in srgb, var(--success) 18%, var(--card)); }
+    .vis-category-surface.vis-purple { fill: color-mix(in srgb, var(--purple) 18%, var(--card)); }
+    .vis-chart-text { font-size: 12px; }
+    code { font: 12px/1.4 ui-monospace, Consolas, monospace; }
+    #uia-flow .urp-node { cursor: pointer; }
+    #uia-flow .urp-node[aria-current="true"] rect { stroke-width: 2.5; }
+    #uia-flow [hidden] { display: none !important; }
+    .doc-note { margin: 0; color: var(--muted-foreground); font-size: 13px; }
+    .doc-note a { color: var(--accent); }
+    #urp-overview, #urp-detail-flow {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--background);
+    }
+    #urp-overview { border: 0; background: transparent; }
+    #urp-detail-flow {
+      min-height: 440px;
+      display: block;
+    }
+    .urp-detail-list {
+      margin: 0; padding-left: 18px;
+      color: var(--muted-foreground); font-size: 13px;
+    }
+    .urp-detail-list li { margin: 4px 0; }
+  </style>
+</head>
+<body>
+  <div id="uia-flow">
+    <p class="vis-sr-only">Interactive UIA recording and replay path diagrams. Switch mode, then select a stage for its detail flowchart.</p>
+    <p class="doc-note" id="urp-doc-note">Companion to <a href="replay-flow.md">replay-flow.md</a> and <a href="recording-flow.md">recording-flow.md</a>.</p>
+
+    <div class="vis-controls">
+      <div class="vis-form-label">
+        <span>Mode</span>
+        <div class="vis-toggle-group" role="radiogroup" aria-label="Path mode">
+          <input id="mode-replay" type="radio" name="urp-mode" value="replay" checked />
+          <label for="mode-replay">Replay</label>
+          <input id="mode-recording" type="radio" name="urp-mode" value="recording" />
+          <label for="mode-recording">Recording</label>
+        </div>
+      </div>
+      <label class="vis-form-label" id="urp-hub-wrap">
+        <span>Hub source</span>
+        <select id="urp-hub" class="vis-form-select" aria-controls="urp-detail">
+          <option value="findall" selected>findall</option>
+          <option value="uia_efp">uia_efp</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="vis-column">
+      <div class="vis-chart-meta">
+        <div class="vis-chart-meta-copy">
+          <h3 id="urp-overview-title">UIA replay path</h3>
+          <span id="urp-overview-sub">Compile to hand move</span>
+        </div>
+        <div class="vis-legend" id="urp-legend"></div>
+      </div>
+      <svg id="urp-overview" viewBox="0 0 736 420" width="100%" role="img" aria-labelledby="urp-overview-title urp-overview-desc">
+        <title id="urp-overview-title-svg">Overview flowchart</title>
+        <desc id="urp-overview-desc">High-level stages for the selected mode.</desc>
+        <defs>
+          <marker id="urp-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--foreground)"></path>
+          </marker>
+          <marker id="urp-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--muted-foreground)"></path>
+          </marker>
+        </defs>
+        <g id="urp-overview-body"></g>
+      </svg>
+    </div>
+
+    <div class="vis-column">
+      <div class="vis-chart-meta">
+        <div class="vis-chart-meta-copy">
+          <h3 id="urp-detail-title">Stage detail</h3>
+          <span id="urp-detail-sub">select a stage</span>
+        </div>
+      </div>
+      <div id="urp-detail" class="vis-card" aria-live="polite">
+        <div class="vis-column">
+          <div class="vis-row">
+            <span class="vis-badge vis-accent" id="urp-phase">—</span>
+            <span class="vis-badge" id="urp-reason">—</span>
+          </div>
+          <div class="vis-row">
+            <span class="vis-text-muted vis-text-small">file</span>
+            <code id="urp-file">—</code>
+          </div>
+          <div class="vis-row">
+            <span class="vis-text-muted vis-text-small">fn</span>
+            <code id="urp-fn">—</code>
+          </div>
+          <figure class="vis-code-block">
+            <figcaption>Key gate</figcaption>
+            <pre><code id="urp-gate"></code></pre>
+          </figure>
+          <svg id="urp-detail-flow" viewBox="0 0 700 320" role="img" aria-label="Stage detail flowchart"></svg>
+          <ul id="urp-bullets" class="urp-detail-list"></ul>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+  (function () {
+    var root = document.getElementById("uia-flow");
+    if (!root) return;
+
+    var hubSel = root.querySelector("#urp-hub");
+    var hubWrap = root.querySelector("#urp-hub-wrap");
+    var overviewBody = root.querySelector("#urp-overview-body");
+    var overviewSvg = root.querySelector("#urp-overview");
+    var overviewTitle = root.querySelector("#urp-overview-title");
+    var overviewSub = root.querySelector("#urp-overview-sub");
+    var overviewDesc = root.querySelector("#urp-overview-desc");
+    var legendEl = root.querySelector("#urp-legend");
+    var titleEl = root.querySelector("#urp-detail-title");
+    var subEl = root.querySelector("#urp-detail-sub");
+    var phaseEl = root.querySelector("#urp-phase");
+    var reasonEl = root.querySelector("#urp-reason");
+    var fileEl = root.querySelector("#urp-file");
+    var fnEl = root.querySelector("#urp-fn");
+    var gateEl = root.querySelector("#urp-gate");
+    var bulletsEl = root.querySelector("#urp-bullets");
+    var detailSvg = root.querySelector("#urp-detail-flow");
+    var mode = "replay";
+    var currentStage = "select";
+    var efpCueVisible = false;
+
+    function esc(s) {
+      return String(s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    function box(x, y, w, h, title, sub, tone) {
+      var fill = "var(--card)";
+      if (tone === "blue") fill = "color-mix(in srgb, var(--blue) 16%, var(--card))";
+      if (tone === "orange") fill = "color-mix(in srgb, var(--orange) 16%, var(--card))";
+      if (tone === "success") fill = "color-mix(in srgb, var(--success) 16%, var(--card))";
+      if (tone === "purple") fill = "color-mix(in srgb, var(--purple) 16%, var(--card))";
+      if (tone === "muted") fill = "var(--muted)";
+      var t2 = sub
+        ? '<text class="vis-chart-text" x="' + (x + w / 2) + '" y="' + (y + 36) + '" text-anchor="middle" fill="var(--muted-foreground)">' + esc(sub) + "</text>"
+        : "";
+      return (
+        '<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" rx="8" fill="' + fill + '" stroke="var(--foreground)" stroke-width="1.5" vector-effect="non-scaling-stroke"></rect>' +
+        '<text class="vis-chart-text" x="' + (x + w / 2) + '" y="' + (y + (sub ? 22 : 28)) + '" text-anchor="middle" fill="var(--foreground)">' + esc(title) + "</text>" +
+        t2
+      );
+    }
+
+    function node(stage, x, y, w, h, title, sub, tone) {
+      var fill = "var(--card)";
+      if (tone === "blue") fill = "color-mix(in srgb, var(--blue) 18%, var(--card))";
+      if (tone === "orange") fill = "color-mix(in srgb, var(--orange) 18%, var(--card))";
+      if (tone === "success") fill = "color-mix(in srgb, var(--success) 18%, var(--card))";
+      if (tone === "purple") fill = "color-mix(in srgb, var(--purple) 18%, var(--card))";
+      return (
+        '<g class="urp-node" data-stage="' + esc(stage) + '" transform="translate(' + x + "," + y + ')">' +
+        '<rect width="' + w + '" height="' + h + '" rx="8" fill="' + fill + '" stroke="var(--foreground)" stroke-width="1.5" vector-effect="non-scaling-stroke"></rect>' +
+        '<text class="vis-chart-text" x="' + (w / 2) + '" y="24" text-anchor="middle" fill="var(--foreground)">' + esc(title) + "</text>" +
+        '<text class="vis-chart-text" x="' + (w / 2) + '" y="42" text-anchor="middle" fill="var(--muted-foreground)">' + esc(sub) + "</text>" +
+        "</g>"
+      );
+    }
+
+    function diamond(cx, cy, title) {
+      var s = 40;
+      return (
+        '<path d="M' + cx + " " + (cy - s) + " L" + (cx + s) + " " + cy + " L" + cx + " " + (cy + s) + " L" + (cx - s) + " " + cy + ' Z" fill="var(--muted)" stroke="var(--foreground)" stroke-width="1.5" vector-effect="non-scaling-stroke"></path>' +
+        '<text class="vis-chart-text" x="' + cx + '" y="' + (cy + 4) + '" text-anchor="middle" fill="var(--foreground)">' + esc(title) + "</text>"
+      );
+    }
+
+    function arrow(d, muted) {
+      return (
+        '<path d="' + d + '" fill="none" stroke="' + (muted ? "var(--muted-foreground)" : "var(--foreground)") +
+        '" stroke-width="1.5" marker-end="url(#' + (muted ? "urp-arrow-muted" : "urp-arrow") + ')" vector-effect="non-scaling-stroke"></path>'
+      );
+    }
+
+    function dArrow(d, muted) {
+      return (
+        '<path d="' + d + '" fill="none" stroke="' + (muted ? "var(--muted-foreground)" : "var(--foreground)") +
+        '" stroke-width="1.5" marker-end="url(#' + (muted ? "urp-d-arrow-m" : "urp-d-arrow") + ')" vector-effect="non-scaling-stroke"></path>'
+      );
+    }
+
+    function label(x, y, text, muted) {
+      return (
+        '<text class="vis-chart-text" x="' + x + '" y="' + y + '" fill="' +
+        (muted ? "var(--muted-foreground)" : "var(--foreground)") + '">' + esc(text) + "</text>"
+      );
+    }
+
+    function detailDefs() {
+      return (
+        "<defs>" +
+        '<marker id="urp-d-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--foreground)"></path></marker>' +
+        '<marker id="urp-d-arrow-m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--muted-foreground)"></path></marker>' +
+        "</defs>"
+      );
+    }
+
+    function legend(items) {
+      legendEl.innerHTML = items.map(function (it) {
+        return '<span class="vis-legend-item"><span class="vis-swatch ' + it.cls + '"></span>' + esc(it.label) + "</span>";
+      }).join("");
+    }
+
+    var replayStages = {
+      compile: {
+        title: "Compile tool call",
+        sub: "（UIA） → move_mouse args",
+        phase: "compile",
+        reason: "findall | uia_efp",
+        file: "compile_tool_calls.py / vision_context.py",
+        fn: "_move_mouse_call · select_click_primary_candidate",
+        gate: "candidates[0].source\nuia → findall · uia_efp → uia_efp",
+        bullets: [
+          "Both FindAll and EFP stay in the pool; typed precedence picks primary.",
+          "0 concrete FindAll · 1 data_item EFP · 2 other UIA · 3 generic row hubs.",
+          "Packs landmark_geometry, nearby_objects, click_window, optional hub_parent."
+        ]
+      },
+      move: {
+        title: "MCP move_mouse",
+        sub: "tools → tool_module",
+        phase: "resolve",
+        reason: "miss raises",
+        file: "cua_mcp/tools.py · tool_module.py",
+        fn: "_move_mouse → resolve_mouse_point → find_mouse_point",
+        gate: "soft miss → None\nhard miss → raise",
+        bullets: [
+          "find_mouse_point may retry once when capture MAD shows UI change.",
+          "Drag resolves start and destination; scroll may hover then wheel."
+        ]
+      },
+      attempt: {
+        title: "Point attempt",
+        sub: "window + OCR twin prep",
+        phase: "選取 · 標題列 / FindAll",
+        reason: "caption early exit",
+        file: "select_mouse_target.py",
+        fn: "_find_mouse_point_attempt",
+        gate: "allow_uia_select && refine_with_uia && hwnd",
+        bullets: [
+          "Caption roles short-circuit to caption_button.",
+          "filter_by_control_type only when vision_mode=uia."
+        ]
+      },
+      findall: {
+        title: "UIA FindAll snapshot",
+        sub: "click_window pool",
+        phase: "選取 · FindAll",
+        reason: "empty → retry once",
+        file: "select_mouse_target.py",
+        fn: "_uia_only_detections_for_click_window",
+        gate: "uia_efp may merge YOLO landmarks first",
+        bullets: [
+          "Phase badge: 選取 · FindAll (briefly 選取 · YOLO for constellation landmarks)."
+        ]
+      },
+      select: null,
+      commit: {
+        title: "Commit hub center",
+        sub: "offsets · char · scroll %",
+        phase: "select_unique / uia_yolo_subtarget",
+        reason: "uia_first_hit",
+        file: "select_mouse_target.py",
+        fn: "_find_mouse_point_attempt (post UIA-first)",
+        gate: "no OCR twin or input/scrollbar/EFP synth → commit",
+        bullets: [
+          "Subtarget EFP soft-miss keeps hub when findall or EFP-verified reason."
+        ]
+      },
+      fallback: {
+        title: "Miss fallback",
+        sub: "retry · twin · YOLO",
+        phase: "選取 · YOLO / OCR",
+        reason: "soft-miss keep findall",
+        file: "select_mouse_target.py · uia_replay_repair.py",
+        fn: "take_yolo_ocr_fallback",
+        gate: "retry FindAll else OCR twin / force yolo_ocr",
+        bullets: [
+          "Queued YoloOcrMoveFallback rewrites instruction/nearby/landmarks."
+        ]
+      },
+      hand: {
+        title: "Hand execution",
+        sub: "move · click · drag · scroll",
+        phase: "action",
+        reason: "gx, gy",
+        file: "tool_module.py",
+        fn: "hand_tools.move / drag / scroll_at",
+        gate: "click after move; drag resolves 2 points",
+        bullets: [
+          "Click family: move_mouse then click/double_click/…"
+        ]
+      }
+    };
+
+    var recordingStages = {
+      start: {
+        title: "Session start",
+        sub: "RecordingSession.start",
+        phase: "start",
+        reason: "folders + hooks",
+        file: "app_main_hub.py · capture.py",
+        fn: "_start_recording · RecordingSession.start",
+        gate: "_accepting_input = True\n+ VisionPrefetchWorker",
+        bullets: [
+          "Creates events/, screenshots/, yolo_ocr/.",
+          "Seeds settle windows; starts before-shot + pre-click loops."
+        ]
+      },
+      capture: {
+        title: "Live capture",
+        sub: "events/event_NNN.json",
+        phase: "persist",
+        reason: "screenshot + UIA + EFP",
+        file: "capture.py",
+        fn: "_persist_queued_event · write_event_json",
+        gate: "uia_snapshot when settle hwnd matches\nelement_from_point on worker",
+        bullets: [
+          "Stores cursor, click_window, monitor, modifiers.",
+          "Later patches: window_change, focused_element, drag end_*."
+        ]
+      },
+      prefetch: {
+        title: "Vision prefetch",
+        sub: "yolo_ocr/event_NNN.json",
+        phase: "prefetch",
+        reason: "async YOLO+OCR",
+        file: "capture.py / vision prefetch worker",
+        fn: "VisionPrefetchWorker",
+        gate: "notify hub after persist\n→ often warm cache for analyze",
+        bullets: [
+          "Analyze can rebuild from this cache via try_rebuild_vision_from_cache."
+        ]
+      },
+      stop: {
+        title: "Stop / finalize",
+        sub: "session.json",
+        phase: "finalize",
+        reason: "drain prefetch",
+        file: "capture.py · main.py",
+        fn: "begin_stop → finalize_stop → analyze_screen_recording",
+        gate: "analyze=True → analyze_recording_session",
+        bullets: [
+          "Joins worker + window-step; writes final_after.jpeg."
+        ]
+      },
+      analyze: {
+        title: "Analyze session",
+        sub: "prepare_event_vision",
+        phase: "analyze",
+        reason: "coalesce → vision → instruction",
+        file: "orchestrator.py · analyze.py",
+        fn: "analyze_recording_session · prepare_event_vision",
+        gate: "caption shortcut / cache hit /\nelse build_vision_context_at_point",
+        bullets: [
+          "Then text_choice refine, analyze_event_to_cache, compile_tool_calls."
+        ]
+      },
+      decide: {
+        title: "UIA vs YOLO",
+        sub: "_detect_recording_mouse_targets",
+        phase: "vision_path",
+        reason: "recording_uia_skip_reason",
+        file: "vision_context.py",
+        fn: "_detect_recording_mouse_targets · recording_uia_skip_reason",
+        gate: "skip_reason is None → vision_path=uia\nelse yolo_ocr",
+        bullets: [
+          "Always run YOLO; inject EFP peer when usable.",
+          "UIA sufficient: usable text/input/scrollbar under click, landmark unique hub, or EFP-labeled leaf.",
+          "Weak EFP↔OCR disagree can demote UIA → YOLO."
+        ]
+      },
+      primary: null,
+      write: {
+        title: "Analysis + twin",
+        sub: "analysis/event_NNN.json",
+        phase: "write",
+        reason: "（UIA） or （YOLO+OCR）",
+        file: "orchestrator.py · compile_tool_calls.py · uia_replay_repair.py",
+        fn: "_write_event_analysis · compile_tool_calls · build_yolo_ocr_fallback_from_vision",
+        gate: "UIA primary + YOLO detections\n→ yolo_ocr_fallback twin",
+        bullets: [
+          "move_mouse gets hub_source, EFP sidecar, click_window, landmarks.",
+          "Replay repair promotion happens later at cache replay, not here."
+        ]
+      }
+    };
+
+    function replaySelectDetail(hub) {
+      if (hub === "uia_efp") {
+        return {
+          title: "Constellation-EFP",
+          sub: "then Name shortlist",
+          phase: "選取 · FindAll",
+          reason: "landmark_efp_* / hit",
+          file: "select_mouse_target.py",
+          fn: "_try_uia_first_unique_select",
+          gate: "hub_source=uia_efp → constellation first",
+          bullets: [
+            "Reasons: landmark_efp_hit, _synth_hit, _neighbor_hit, uia_data_item_name_hit.",
+            "EFP miss continues Name shortlist on UIA-family only."
+          ]
+        };
+      }
+      return {
+        title: "FindAll Name shortlist",
+        sub: "unique + hub_parent",
+        phase: "選取 · FindAll",
+        reason: "hit / efp_parent_recovery",
+        file: "select_mouse_target.py",
+        fn: "_try_uia_first_unique_select",
+        gate: "hub_source=findall → skip hard EFP",
+        bullets: [
+          "Exactly one anchor after nearby prefilter.",
+          "hub_parent must agree; else EFP Name+parent recovery."
+        ]
+      };
+    }
+
+    function recordingPrimaryDetail(hub) {
+      if (hub === "uia_efp") {
+        return {
+          title: "Primary → uia_efp",
+          sub: "data_item / labeled EFP wins",
+          phase: "primary",
+          reason: "precedence 1 or 2",
+          file: "vision_context.py",
+          fn: "_uia_click_primary_precedence · select_click_primary_candidate",
+          gate: "data_item EFP beats generic row FindAll\n→ candidates[0].source=uia_efp",
+          bullets: [
+            "Compile maps uia_efp → hub_source=uia_efp.",
+            "Disagreeing FindAll still injected; debug efp_findall_label_disagree."
+          ]
+        };
+      }
+      return {
+        title: "Primary → findall",
+        sub: "concrete FindAll wins",
+        phase: "primary",
+        reason: "precedence 0",
+        file: "vision_context.py",
+        fn: "_uia_click_primary_precedence · select_click_primary_candidate",
+        gate: "button/tab/menu/list_item FindAll\nbeats disagreeing cell EFP",
+        bullets: [
+          "Containing-click hits ranked by precedence → content → area.",
+          "Compile maps uia → hub_source=findall (+ hub_parent)."
+        ]
+      };
+    }
+
+    function stageData(stageKey) {
+      if (mode === "recording") {
+        return stageKey === "primary" ? recordingPrimaryDetail(hubSel.value) : recordingStages[stageKey];
+      }
+      return stageKey === "select" ? replaySelectDetail(hubSel.value) : replayStages[stageKey];
+    }
+
+    function renderReplayOverview() {
+      var hub = hubSel.value;
+      var selectSub = hub === "uia_efp" ? "Constellation-EFP" : "Name shortlist";
+      var branch = hub === "uia_efp" ? "uia_efp · EFP first" : "findall · Name path";
+      var html =
+        node("compile", 28, 24, 150, 56, "1 Compile", "vision_mode=uia") +
+        node("move", 218, 24, 150, 56, "2 move_mouse", "resolve_mouse_point") +
+        node("attempt", 408, 24, 150, 56, "3 Attempt", "_find_mouse_point") +
+        node("findall", 293, 120, 150, 56, "4 FindAll", "click_window UIA", "blue") +
+        node("select", 293, 216, 150, 56, "5 UIA select", selectSub, "blue") +
+        node("commit", 118, 320, 150, 56, "6a Commit", "hub center ± offset", "success") +
+        node("fallback", 468, 320, 150, 56, "6b Fallback", "OCR twin / YOLO", "orange") +
+        node("hand", 293, 320, 150, 56, "7 Hand move", "hand_tools.move") +
+        arrow("M178 52 H218") + arrow("M368 52 H408") +
+        arrow("M483 80 V120 H443") + arrow("M368 176 V216") +
+        arrow("M293 244 H193 V320") + arrow("M443 244 H543 V320", true) +
+        arrow("M268 348 H293") + arrow("M468 348 H443", true) +
+        label(220, 236, "hit", true) + label(490, 236, "miss", true) +
+        label(500, 148, branch, false);
+      if (hub === "uia_efp") {
+        html +=
+          '<g id="urp-efp-cue">' +
+          '<rect x="560" y="200" width="150" height="40" rx="8" fill="var(--muted)" stroke="var(--muted-foreground)" stroke-width="1" vector-effect="non-scaling-stroke"></rect>' +
+          '<text class="vis-chart-text" x="635" y="224" text-anchor="middle" fill="var(--foreground)">Constellation-EFP</text>' +
+          arrow("M560 220 H443") +
+          "</g>";
+      }
+      overviewSvg.setAttribute("viewBox", "0 0 736 420");
+      overviewBody.innerHTML = html;
+    }
+
+    function renderRecordingOverview() {
+      var html =
+        node("start", 28, 24, 150, 56, "1 Start", "RecordingSession") +
+        node("capture", 218, 24, 150, 56, "2 Capture", "events + EFP", "purple") +
+        node("prefetch", 408, 24, 150, 56, "3 Prefetch", "yolo_ocr/", "orange") +
+        node("stop", 598, 24, 110, 56, "4 Stop", "session.json") +
+        node("analyze", 118, 140, 150, 56, "5 Analyze", "prepare vision", "blue") +
+        node("decide", 308, 140, 150, 56, "6 UIA vs YOLO", "skip_reason?", "blue") +
+        node("primary", 498, 140, 150, 56, "7 Primary", "FindAll / EFP", "purple") +
+        node("write", 308, 280, 150, 56, "8 Write", "analysis + twin", "success") +
+        arrow("M178 52 H218") + arrow("M368 52 H408") + arrow("M558 52 H598") +
+        arrow("M653 80 V110 H193 V140") +
+        arrow("M268 168 H308") + arrow("M458 168 H498") +
+        arrow("M573 196 V240 H383 V280");
+      overviewSvg.setAttribute("viewBox", "0 0 736 360");
+      overviewBody.innerHTML = html;
+    }
+
+    function renderDetailFlow(stageKey) {
+      var hub = hubSel.value;
+      var w = 860;
+      var h = 440;
+      var body = "";
+      if (mode === "replay") {
+        if (stageKey === "compile") {
+          h = 420;
+          body =
+            box(40, 28, 200, 56, "analysis event", "candidates[0]") +
+            box(320, 28, 200, 56, "precedence", "typed FindAll/EFP", "blue") +
+            box(600, 28, 200, 56, "primary source", "uia | uia_efp") +
+            box(40, 160, 200, 56, "hub_source", "findall | uia_efp", "blue") +
+            box(320, 160, 200, 56, "hub fields", "anchor · type · parent") +
+            box(600, 160, 200, 56, "EFP sidecar", "name · value · parent") +
+            box(320, 300, 220, 56, "move_mouse args", "vision_mode=uia", "success") +
+            dArrow("M240 56 H320") + dArrow("M520 56 H600") +
+            dArrow("M700 84 V130 H140 V160") + dArrow("M420 84 V160") + dArrow("M700 84 V130 H700 V160") +
+            dArrow("M140 216 V260 H430 V300") + dArrow("M420 216 V300") + dArrow("M700 216 V260 H430");
+        } else if (stageKey === "move") {
+          h = 380;
+          body =
+            box(40, 28, 200, 56, "MCP move_mouse", "tools.py") +
+            box(320, 28, 220, 56, "_move_mouse", "tool_module.py") +
+            box(620, 28, 200, 56, "resolve_mouse_point", "") +
+            box(40, 170, 200, 56, "raise on miss", "", "orange") +
+            box(320, 170, 220, 56, "find_mouse_point", "soft miss → None", "blue") +
+            box(620, 170, 200, 56, "hand_tools.move", "gx, gy", "success") +
+            box(320, 300, 220, 52, "click / drag / scroll", "reuse resolve") +
+            dArrow("M240 56 H320") + dArrow("M540 56 H620") +
+            dArrow("M430 84 V170") + dArrow("M720 84 V170") +
+            dArrow("M320 198 H240") + dArrow("M540 198 H620") +
+            dArrow("M430 226 V300");
+        } else if (stageKey === "attempt") {
+          h = 500;
+          body =
+            box(30, 24, 180, 56, "restore window", "click_window") +
+            box(240, 24, 180, 56, "take OCR twin", "once") +
+            box(450, 24, 180, 56, "caption hit?", "DWM", "muted") +
+            box(660, 24, 160, 56, "caption_button", "", "success") +
+            box(30, 140, 180, 56, "parse args", "mode · anchor") +
+            box(240, 140, 180, 56, "allow_uia_select", "≠ yolo_ocr", "blue") +
+            box(450, 140, 180, 56, "filter_by_type", "vision_mode=uia") +
+            diamond(330, 280, "UIA gate?") +
+            box(60, 400, 200, 56, "YOLO+OCR path", "", "orange") +
+            box(420, 400, 240, 56, "FindAll → select", "stages 4–5", "blue") +
+            dArrow("M210 52 H240") + dArrow("M420 52 H450") + dArrow("M630 52 H660") +
+            label(640, 18, "yes", true) +
+            dArrow("M120 80 V140") + dArrow("M330 80 V140") + dArrow("M540 80 V140") +
+            dArrow("M330 196 V240") +
+            dArrow("M290 280 H160 V400") + label(170, 268, "no", true) +
+            dArrow("M370 280 H540 V400") + label(480, 268, "yes", true);
+        } else if (stageKey === "findall") {
+          h = 420;
+          body =
+            box(60, 28, 220, 56, "grab monitors", "_grab_selected") +
+            box(360, 28, 240, 56, "FindAll snapshot", "click_window UIA", "blue") +
+            diamond(480, 170, "uia_efp?") +
+            box(40, 300, 220, 56, "merge YOLO landmarks", "deferred TEXT/ELEMENT", "orange") +
+            box(320, 300, 220, 56, "UIA-only pool", "_uia_only_detections", "blue") +
+            box(600, 300, 200, 56, "→ unique select", "stage 5", "success") +
+            dArrow("M280 56 H360") + dArrow("M480 84 V130") +
+            dArrow("M440 170 H150 V300") + label(170, 158, "yes", true) +
+            dArrow("M520 170 H430 V300") + label(540, 190, "no", true) +
+            dArrow("M260 328 H320") + dArrow("M540 328 H600");
+        } else if (stageKey === "select") {
+          if (hub === "uia_efp") {
+            h = 520;
+            body =
+              box(40, 24, 240, 56, "Constellation-EFP", "landmark + recorded EFP", "blue") +
+              box(330, 24, 220, 56, "near pool", "FindAll ∪ YOLO") +
+              box(600, 16, 200, 48, "landmark_efp_hit", "", "success") +
+              box(600, 76, 200, 48, "synth / neighbor", "", "success") +
+              box(40, 140, 240, 56, "EFP miss → continue", "UIA-family only") +
+              box(330, 140, 220, 56, "Name shortlist", "typed filter", "blue") +
+              box(40, 260, 240, 56, "Name FindAll recover", "PropertyCondition") +
+              diamond(560, 290, "unique?") +
+              box(380, 420, 180, 56, "reason=hit", "", "success") +
+              box(620, 420, 180, 56, "not_unique", "", "orange") +
+              dArrow("M280 52 H330") + dArrow("M550 52 H600") +
+              dArrow("M440 80 V140") + dArrow("M160 196 V260") +
+              dArrow("M440 196 V250 H560 V250") +
+              dArrow("M520 290 H470 V420") + label(480, 340, "yes", true) +
+              dArrow("M600 290 H710 V420") + label(640, 278, "no", true);
+          } else {
+            h = 520;
+            body =
+              box(40, 24, 220, 56, "skip constellation", "hub_source=findall", "blue") +
+              box(320, 24, 220, 56, "Name shortlist", "Name then Value") +
+              box(600, 24, 200, 56, "control_type filter", "vision_mode=uia") +
+              diamond(430, 160, "empty?") +
+              box(40, 260, 220, 56, "Name FindAll recover", "bring_into_view") +
+              box(320, 260, 220, 56, "nearby prefilter", "_prefilter_anchors") +
+              diamond(430, 380, "unique 1?") +
+              box(40, 460, 200, 48, "hub_parent check", "findall only", "blue") +
+              box(280, 460, 200, 48, "hit / recovery", "efp_parent_*", "success") +
+              box(600, 360, 200, 48, "not_unique", "", "orange") +
+              dArrow("M260 52 H320") + dArrow("M540 52 H600") +
+              dArrow("M430 80 V120") +
+              dArrow("M390 160 H150 V260") + label(170, 148, "yes", true) +
+              dArrow("M470 160 H430 V260") + label(500, 180, "no", true) +
+              dArrow("M150 316 V340 H430 V340") + dArrow("M430 316 V340") +
+              dArrow("M390 380 H140 V460") +
+              dArrow("M140 508 H280") +
+              dArrow("M470 380 H700 V408") + label(560, 368, "no", true);
+          }
+        } else if (stageKey === "commit") {
+          h = 480;
+          body =
+            box(40, 28, 200, 56, "UIA hub hit", "chosen detection", "blue") +
+            diamond(380, 56, "OCR twin?") +
+            box(520, 28, 240, 56, "commit center now", "input/scrollbar/EFP", "success") +
+            box(40, 160, 240, 56, "選取 · 子目標", "uia_yolo_subtarget", "orange") +
+            box(340, 160, 220, 56, "unique box in hub", "skip OCR") +
+            box(620, 160, 180, 56, "OCR in hub", "finish OCR") +
+            diamond(160, 300, "EFP soft?") +
+            box(320, 280, 220, 56, "keep UIA hub", "findall / EFP-verified", "success") +
+            box(600, 280, 200, 56, "clear → twin", "", "orange") +
+            box(280, 400, 280, 52, "apply offset / char / %", "return gx, gy", "success") +
+            dArrow("M240 56 H340") +
+            dArrow("M420 56 H520") + label(450, 40, "no / skip", true) +
+            dArrow("M380 96 V160") + label(390, 130, "yes", true) +
+            dArrow("M280 188 H340") + dArrow("M560 188 H620") +
+            dArrow("M160 216 V260") +
+            dArrow("M200 300 H320") + label(220, 288, "keep", true) +
+            dArrow("M120 300 H80 V308 H700 V280") + label(90, 288, "drop", true) +
+            dArrow("M430 336 V400") + dArrow("M640 84 V380 H560");
+        } else if (stageKey === "fallback") {
+          h = 460;
+          body =
+            box(40, 28, 200, 56, "UIA miss", "after select", "orange") +
+            box(300, 28, 220, 56, "retry FindAll once", "", "blue") +
+            diamond(680, 56, "still miss?") +
+            diamond(220, 190, "OCR twin?") +
+            box(360, 170, 240, 56, "rewrite YOLO fields", "instruction · nearby") +
+            box(640, 170, 180, 56, "empty → yolo_ocr", "force mode", "orange") +
+            box(40, 330, 200, 56, "選取 · YOLO", "", "orange") +
+            box(300, 330, 200, 56, "選取 · OCR", "") +
+            box(560, 330, 240, 56, "similarity / landmark", "LLM if needed") +
+            box(300, 420, 240, 40, "soft UIA again?", "if OCR pending") +
+            dArrow("M240 56 H300") + dArrow("M520 56 H640") +
+            dArrow("M680 96 V130 H220 V150") +
+            dArrow("M260 190 H360") + label(280, 178, "yes", true) +
+            dArrow("M180 190 H140 V330") + label(100, 250, "no", true) +
+            dArrow("M680 96 V170") +
+            dArrow("M480 226 V280 H140") +
+            dArrow("M140 386 H300") + dArrow("M500 358 H560") +
+            dArrow("M400 386 V420");
+        } else if (stageKey === "hand") {
+          h = 360;
+          body =
+            box(40, 28, 200, 56, "point ready", "gx, gy, meta", "success") +
+            box(320, 28, 200, 56, "hand_tools.move", "") +
+            box(600, 28, 200, 56, "click family", "click / dbl / right") +
+            box(40, 170, 240, 56, "drag: resolve ×2", "start + destination", "blue") +
+            box(340, 170, 220, 56, "hand_tools.drag", "scrollbar snap?") +
+            box(620, 170, 180, 56, "scroll hover", "move then wheel") +
+            box(280, 300, 280, 48, "pyautogui / hand", "execute action", "success") +
+            dArrow("M240 56 H320") + dArrow("M520 56 H600") +
+            dArrow("M140 84 V170") + dArrow("M420 84 V170") + dArrow("M700 84 V170") +
+            dArrow("M160 226 V270 H420 V300") +
+            dArrow("M450 226 V300") +
+            dArrow("M710 226 V270 H420");
+        }
+      } else {
+        if (stageKey === "start") {
+          h = 380;
+          body =
+            box(40, 28, 200, 56, "Hub start", "app_main_hub") +
+            box(320, 28, 220, 56, "create folders", "events/ screenshots/") +
+            box(620, 28, 200, 56, "worker + loops", "before-shot", "purple") +
+            box(320, 170, 220, 56, "pynput listeners", "") +
+            box(620, 170, 200, 56, "VisionPrefetch", "", "orange") +
+            box(320, 300, 220, 56, "_accepting_input", "", "success") +
+            dArrow("M240 56 H320") + dArrow("M540 56 H620") +
+            dArrow("M430 84 V170") + dArrow("M720 84 V170") +
+            dArrow("M430 226 V300");
+        } else if (stageKey === "capture") {
+          h = 420;
+          body =
+            box(40, 28, 180, 56, "mouse/keyboard", "hooks") +
+            box(300, 28, 180, 56, "worker queue", "") +
+            box(560, 28, 240, 56, "_persist_queued_event", "", "purple") +
+            box(40, 170, 180, 56, "JPEG shot", "") +
+            box(300, 170, 180, 56, "uia_snapshot", "FindAll", "blue") +
+            box(560, 170, 240, 56, "element_from_point", "EFP", "purple") +
+            box(280, 320, 280, 56, "events/event_NNN.json", "", "success") +
+            dArrow("M220 56 H300") + dArrow("M480 56 H560") +
+            dArrow("M680 84 V130 H130 V170") + dArrow("M680 84 V130 H390 V170") + dArrow("M680 84 V170") +
+            dArrow("M130 226 V280 H420 V320") + dArrow("M390 226 V320") + dArrow("M680 226 V280 H420");
+        } else if (stageKey === "prefetch") {
+          h = 320;
+          body =
+            box(40, 40, 220, 56, "persist notify", "hub") +
+            box(320, 40, 240, 56, "VisionPrefetchWorker", "", "orange") +
+            box(620, 40, 200, 56, "yolo_ocr/event_NNN", "candidates", "success") +
+            box(320, 200, 240, 56, "warm analyze cache", "") +
+            dArrow("M260 68 H320") + dArrow("M560 68 H620") + dArrow("M440 96 V200");
+        } else if (stageKey === "stop") {
+          h = 400;
+          body =
+            box(40, 28, 200, 56, "begin_stop", "flush") +
+            box(320, 28, 200, 56, "finalize_stop", "join workers") +
+            box(600, 28, 200, 56, "session.json", "", "success") +
+            box(320, 160, 200, 56, "drain prefetch", "") +
+            diamond(420, 300, "analyze?") +
+            box(560, 280, 220, 56, "analyze_recording", "", "blue") +
+            dArrow("M240 56 H320") + dArrow("M520 56 H600") +
+            dArrow("M420 84 V160") + dArrow("M420 216 V260") +
+            dArrow("M460 300 H560") + label(500, 288, "yes", true);
+        } else if (stageKey === "analyze") {
+          h = 420;
+          body =
+            box(40, 28, 200, 56, "coalesce events", "") +
+            box(320, 28, 240, 56, "prepare_event_vision", "parallel", "blue") +
+            box(640, 28, 180, 56, "text_choice LLM", "") +
+            box(40, 170, 200, 56, "caption?", "skip vision") +
+            box(320, 170, 240, 56, "cache rebuild?", "") +
+            box(640, 170, 180, 56, "build_vision", "at point", "blue") +
+            box(300, 320, 280, 56, "analyze_event_to_cache", "", "success") +
+            dArrow("M240 56 H320") + dArrow("M560 56 H640") +
+            dArrow("M440 84 V130 H140 V170") + dArrow("M440 84 V170") + dArrow("M730 84 V170") +
+            dArrow("M440 226 V320");
+        } else if (stageKey === "decide") {
+          h = 500;
+          body =
+            box(40, 24, 200, 56, "load uia_snapshot", "FindAll", "blue") +
+            box(310, 24, 220, 56, "inject EFP peer", "if usable", "purple") +
+            box(600, 24, 200, 56, "always YOLO+OCR", "", "orange") +
+            diamond(420, 160, "UIA ok?") +
+            box(40, 260, 260, 56, "vision_path=uia", "store YOLO twin dets", "blue") +
+            box(520, 260, 260, 56, "vision_path=yolo_ocr", "+ EFP peer", "orange") +
+            diamond(170, 390, "weak EFP?") +
+            box(340, 370, 220, 56, "demote → YOLO", "", "orange") +
+            box(620, 370, 180, 56, "keep UIA", "", "success") +
+            dArrow("M240 52 H310") + dArrow("M530 52 H600") +
+            dArrow("M420 80 V120") +
+            dArrow("M380 160 H170 V260") + label(190, 148, "yes", true) +
+            dArrow("M460 160 H650 V260") + label(520, 148, "no", true) +
+            dArrow("M170 316 V350") +
+            dArrow("M210 390 H340") + label(240, 378, "disagree", true) +
+            dArrow("M130 390 H90 V400 H710 V370") + label(100, 378, "ok", true);
+        } else if (stageKey === "primary") {
+          h = 480;
+          body =
+            box(40, 24, 260, 56, "containing-click hits", "padded bbox") +
+            box(380, 24, 260, 56, "typed precedence", "lower wins", "purple") +
+            box(40, 140, 180, 56, "0 concrete FindAll", "button/tab/…", "blue") +
+            box(240, 140, 180, 56, "1 data_item EFP", "", "purple") +
+            box(440, 140, 180, 56, "2 other UIA/EFP", "") +
+            box(640, 140, 160, 56, "3 row hubs", "清單 row") +
+            box(40, 260, 260, 56, "content → area ties", "") +
+            box(380, 260, 260, 56, "candidates[0]", "primary", "success") +
+            box(40, 390, 260, 56, "source=uia", "→ hub_source findall", "blue") +
+            box(380, 390, 260, 56, "source=uia_efp", "→ hub_source uia_efp", "purple") +
+            dArrow("M300 52 H380") + dArrow("M510 80 V140") +
+            dArrow("M510 196 V260") + dArrow("M170 316 V390") + dArrow("M510 316 V390");
+          if (hub === "uia_efp") {
+            body += label(250, 128, "typical win →", true);
+          } else {
+            body += label(50, 128, "typical win →", true);
+          }
+        } else if (stageKey === "write") {
+          h = 420;
+          body =
+            box(40, 28, 220, 56, "instruction prefix", "（UIA）/（YOLO+OCR）") +
+            box(330, 28, 220, 56, "compile_tool_calls", "", "blue") +
+            box(620, 28, 200, 56, "move_mouse args", "hub_source…") +
+            diamond(240, 180, "UIA+YOLO?") +
+            box(400, 160, 240, 56, "build YOLO twin", "yolo_ocr_fallback", "orange") +
+            box(200, 300, 280, 56, "analysis/event_NNN.json", "", "success") +
+            box(560, 300, 220, 56, "ready for replay", "", "success") +
+            dArrow("M260 56 H330") + dArrow("M550 56 H620") +
+            dArrow("M440 84 V120 H240 V140") +
+            dArrow("M280 180 H400") + label(300, 168, "yes", true) +
+            dArrow("M240 220 V300") + dArrow("M520 216 V270 H340") +
+            dArrow("M480 328 H560");
+        }
+      }
+
+      detailSvg.setAttribute("viewBox", "0 0 " + w + " " + h);
+      detailSvg.innerHTML = detailDefs() + body;
+    }
+
+    function bindOverviewNodes() {
+      overviewBody.querySelectorAll(".urp-node").forEach(function (n) {
+        n.setAttribute("tabindex", "0");
+        n.setAttribute("role", "button");
+        var labelText = n.querySelector("text");
+        n.setAttribute("aria-label", labelText ? labelText.textContent : n.getAttribute("data-stage"));
+        function activate() {
+          paintDetail(n.getAttribute("data-stage"));
+        }
+        n.addEventListener("click", activate);
+        n.addEventListener("keydown", function (e) {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            activate();
+          }
+        });
+      });
+    }
+
+    function paintOverview() {
+      if (mode === "replay") {
+        overviewTitle.textContent = "UIA replay path";
+        overviewSub.textContent = "Compile to hand move";
+        overviewDesc.textContent = "Replay stages from compile through hand move.";
+        legend([
+          { cls: "vis-blue", label: "UIA-first" },
+          { cls: "vis-orange", label: "Fallback" },
+          { cls: "vis-success", label: "Commit" }
+        ]);
+        hubWrap.hidden = false;
+        renderReplayOverview();
+      } else {
+        overviewTitle.textContent = "UIA recording path";
+        overviewSub.textContent = "Capture to analysis JSON";
+        overviewDesc.textContent = "Recording stages from session start through analysis write.";
+        legend([
+          { cls: "vis-purple", label: "Capture / EFP" },
+          { cls: "vis-blue", label: "Analyze / UIA" },
+          { cls: "vis-orange", label: "YOLO" },
+          { cls: "vis-success", label: "Artifacts" }
+        ]);
+        hubWrap.hidden = false;
+        renderRecordingOverview();
+      }
+      bindOverviewNodes();
+    }
+
+    function paintDetail(stageKey) {
+      var data = stageData(stageKey);
+      if (!data) return;
+      currentStage = stageKey;
+      titleEl.textContent = data.title;
+      subEl.textContent = data.sub;
+      phaseEl.textContent = data.phase;
+      reasonEl.textContent = data.reason;
+      fileEl.textContent = data.file;
+      fnEl.textContent = data.fn;
+      gateEl.textContent = data.gate;
+      bulletsEl.innerHTML = (data.bullets || [])
+        .map(function (b) { return "<li>" + esc(b) + "</li>"; })
+        .join("");
+      renderDetailFlow(stageKey);
+      overviewBody.querySelectorAll(".urp-node").forEach(function (n) {
+        n.setAttribute("aria-current", n.getAttribute("data-stage") === stageKey ? "true" : "false");
+      });
+    }
+
+    function paintAll() {
+      paintOverview();
+      var defaultStage = mode === "replay" ? "select" : "decide";
+      if (!stageData(currentStage)) currentStage = defaultStage;
+      paintDetail(currentStage);
+    }
+
+    root.querySelectorAll('input[name="urp-mode"]').forEach(function (input) {
+      input.addEventListener("change", function () {
+        if (!input.checked) return;
+        mode = input.value;
+        currentStage = mode === "replay" ? "select" : "decide";
+        paintAll();
+      });
+    });
+
+    hubSel.addEventListener("change", function () {
+      paintOverview();
+      paintDetail(currentStage);
+    });
+
+    paintAll();
+  })();
+  </script>
+</body>
+</html>

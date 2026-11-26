@@ -667,7 +667,9 @@ def test_parent_signature_usable_and_agree() -> None:
     assert not parent_signature_usable({})
     assert not parent_signature_usable({"control_type": "pane"})
     assert parent_signature_usable({"control_type": "tree", "name": "導覽"})
-    assert parent_signature_usable({"automation_id": "ProperTreeHost"})
+    # automation_id alone is not a gate key (kept for LED/debug only).
+    assert not parent_signature_usable({"automation_id": "ProperTreeHost"})
+    assert parent_signature_usable({"control_type": "tree", "automation_id": "ProperTreeHost"})
     assert parent_signatures_agree(
         {"control_type": "tree", "name": "導覽"},
         {"control_type": "tree", "name": "導覽"},
@@ -676,8 +678,25 @@ def test_parent_signature_usable_and_agree() -> None:
         {"control_type": "tree", "name": "導覽"},
         {"control_type": "tool_bar", "name": "位址列"},
     )
+    # Positional AutomationId drift must not veto a name+type match.
+    assert parent_signatures_agree(
+        {
+            "control_type": "list_item",
+            "name": "活頁簿1.xlsx",
+            "automation_id": "34",
+        },
+        {
+            "control_type": "list_item",
+            "name": "活頁簿1.xlsx",
+            "automation_id": "33",
+        },
+    )
     # Absent/weak recorded parent never vetoes.
     assert parent_signatures_agree({}, {"control_type": "tool_bar"})
+    assert parent_signatures_agree(
+        {"automation_id": "ProperTreeHost"},
+        {"control_type": "tool_bar"},
+    )
 
 
 def test_merge_nested_element_boxes_keeps_larger() -> None:

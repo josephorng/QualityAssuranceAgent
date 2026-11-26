@@ -1600,16 +1600,19 @@ def format_parent_signature_compact(raw: Any) -> str:
 def parent_signature_usable(signature: Any) -> bool:
     """True when a recorded parent fingerprint can gate replay.
 
-    Weak chrome (empty, or generic pane/group/custom with no name and no
-    AutomationId) does not unlock the gate or EFP recovery.
+    Gate uses ``control_type`` + ``name`` only. ``automation_id`` is kept on
+    recorded signatures for LED/debug but is not a gate key — Explorer and
+    similar hosts often use unstable positional AutomationIds.
+
+    Weak chrome (empty, or generic pane/group/custom with no name) does not
+    unlock the gate or EFP recovery.
     """
     sig = _normalize_parent_signature(signature)
     if not sig:
         return False
     control_type = str(sig.get("control_type") or "").strip().lower()
     name = str(sig.get("name") or "").strip()
-    automation_id = str(sig.get("automation_id") or "").strip()
-    if name or automation_id:
+    if name:
         return True
     # Type-only: reject generic containers that cannot disambiguate leaves.
     if control_type in ("pane", "group", "custom", "window", "document"):
@@ -1618,7 +1621,10 @@ def parent_signature_usable(signature: Any) -> bool:
 
 
 def parent_signatures_agree(recorded: Any, live: Any) -> bool:
-    """True when live parent soft-agrees with a usable recorded signature."""
+    """True when live parent soft-agrees with a usable recorded signature.
+
+    Compares ``control_type`` and ``name`` only; ``automation_id`` is ignored.
+    """
     if not parent_signature_usable(recorded):
         return True
     rec = _normalize_parent_signature(recorded)
@@ -1629,18 +1635,12 @@ def parent_signatures_agree(recorded: Any, live: Any) -> bool:
     live_type = str(liv.get("control_type") or "").strip().lower()
     if rec_type and live_type and rec_type != live_type:
         return False
-    rec_id = str(rec.get("automation_id") or "").strip()
-    live_id = str(liv.get("automation_id") or "").strip()
-    if rec_id and live_id and rec_id != live_id:
-        return False
     rec_name = canonicalize_uia_shell_status_label(str(rec.get("name") or ""))
     live_name = canonicalize_uia_shell_status_label(str(liv.get("name") or ""))
     if rec_name and live_name and rec_name.casefold() != live_name.casefold():
         return False
     # Recorded had a usable fingerprint; require at least one overlapping field.
     if rec_type and live_type and rec_type == live_type:
-        return True
-    if rec_id and live_id and rec_id == live_id:
         return True
     if rec_name and live_name and rec_name.casefold() == live_name.casefold():
         return True

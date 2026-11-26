@@ -8827,6 +8827,90 @@ async def test_findall_efp_soft_miss_empty_pool_keeps_uia_center(
 
 
 @pytest.mark.asyncio
+async def test_landmark_efp_hit_soft_miss_empty_pool_keeps_uia_center(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """landmark_efp_hit + empty YOLO twin soft-miss must keep UIA without crash."""
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+    from src.recorder.uia_replay_repair import (
+        YoloOcrMoveFallback,
+        bind_yolo_ocr_fallbacks,
+    )
+
+    uia_hub = _detection_from_bbox(
+        (2885, 649, 72, 22),
+        YOLO_CLASS_TEXT,
+        text="N16",
+        source="uia",
+    )
+    finish_calls: list[int] = []
+
+    def fake_grab(*_a, **_k):
+        frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], 0.01
+
+    def fake_finish(*_a, **_k):
+        finish_calls.append(1)
+        timing = {
+            "capture_s": 0.01,
+            "yolo_s": 0.05,
+            "line_s": 0.0,
+            "uia_input_s": 0.0,
+            "uia_scrollbar_s": 0.0,
+            "uia_text_s": 0.0,
+            "ocr_s": 0.0,
+            "icon_ocr_retry_s": 0.0,
+            "total_s": 0.05,
+            "_ocr_pending": [],
+            "debug_layers": {},
+        }
+        frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], [], timing
+
+    monkeypatch.setattr(smt, "EMPTY_IN_HUB_YOLO_SLEEP_S", 0)
+    monkeypatch.setattr(smt, "_grab_selected_monitors", fake_grab)
+    monkeypatch.setattr(
+        smt,
+        "_uia_only_detections_for_click_window",
+        lambda *_a, **_k: [uia_hub],
+    )
+    monkeypatch.setattr(
+        smt,
+        "_try_uia_first_unique_select",
+        lambda *_a, **_k: (uia_hub, "landmark_efp_hit"),
+    )
+    monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", fake_finish)
+    monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
+
+    fallback = YoloOcrMoveFallback(
+        instruction="（YOLO+OCR）將滑鼠移到「16」文字，並點擊滑鼠一下。",
+        hub_source="uia_efp",
+    )
+    with bind_yolo_ocr_fallbacks([fallback]):
+        found = await smt.find_mouse_point(
+            "（UIA）將滑鼠移到「N16」資料項目",
+            click_window={
+                "hwnd": 5,
+                "title": "活頁簿1 - Excel",
+                "process_name": "EXCEL.EXE",
+                "rect": [0, 0, 1920, 1080],
+            },
+            vision_mode="uia",
+            anchor_text="N16",
+            control_type="data_item",
+            hub_source="uia_efp",
+            recorded_efp_name="N16",
+            recorded_efp_value="",
+        )
+    assert found is not None
+    assert found[0:2] == (uia_hub.cx, uia_hub.cy)
+    assert found[2]["selection_method"] == "landmark_efp_hit"
+    assert len(finish_calls) == 1 + smt.EMPTY_IN_HUB_YOLO_MAX_EXTRA
+
+
+@pytest.mark.asyncio
 async def test_empty_in_hub_yolo_retry_then_unique_box(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

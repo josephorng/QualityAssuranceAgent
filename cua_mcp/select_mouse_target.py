@@ -8404,6 +8404,9 @@ async def _find_mouse_point_attempt(
                             f"reason={uia_first_reason!r}"
                         )
                     else:
+                        detections = _sort_detections_reading_order(
+                            [*uia_dets, *yolo_detections]
+                        )
                         _log_info(
                             "move_mouse uia_yolo_subtarget_efp soft_miss; "
                             f"keeping UIA center reason={uia_first_reason!r}"

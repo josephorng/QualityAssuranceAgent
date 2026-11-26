@@ -1,14 +1,21 @@
 from pathlib import Path
 
 from src.common.settings import (
+    UIA_FINDALL_SCENARIO_PRESETS,
     apply_startup_triton_probe,
     apply_startup_vllm_host_probe,
     canonicalize_llm_backend,
     canonicalize_vision_backend,
+    clamp_uia_findall_hover_max_hits,
+    clamp_uia_findall_hover_max_nodes,
+    clamp_uia_findall_hover_max_seconds,
+    clamp_uia_findall_hover_roi_half_px,
     clamp_uia_findall_max_hits,
     clamp_uia_findall_max_nodes,
     clamp_uia_findall_max_seconds,
+    clamp_uia_findall_scenario_values,
     default_agent_settings_dict,
+    findall_hover_settings,
     findall_walk_settings,
     normalize_agent_settings_dict,
     probe_llm_backend,
@@ -256,6 +263,10 @@ def test_default_agent_settings_include_findall_budgets() -> None:
     assert data["uia_findall_max_seconds"] == 5.0
     assert data["uia_findall_max_hits"] == 500
     assert data["uia_findall_max_nodes"] == 4000
+    assert data["uia_findall_hover_max_seconds"] == 2.0
+    assert data["uia_findall_hover_max_hits"] == 120
+    assert data["uia_findall_hover_max_nodes"] == 1000
+    assert data["uia_findall_hover_roi_half_px"] == 400
 
 
 def test_normalize_clamps_findall_budgets() -> None:
@@ -265,11 +276,19 @@ def test_normalize_clamps_findall_budgets() -> None:
             "uia_findall_max_seconds": 999,
             "uia_findall_max_hits": 1,
             "uia_findall_max_nodes": 50_000,
+            "uia_findall_hover_max_seconds": 99,
+            "uia_findall_hover_max_hits": 1,
+            "uia_findall_hover_max_nodes": 99_000,
+            "uia_findall_hover_roi_half_px": 5,
         }
     )
     assert out["uia_findall_max_seconds"] == 60.0
     assert out["uia_findall_max_hits"] == 50
     assert out["uia_findall_max_nodes"] == 20_000
+    assert out["uia_findall_hover_max_seconds"] == 30.0
+    assert out["uia_findall_hover_max_hits"] == 20
+    assert out["uia_findall_hover_max_nodes"] == 10_000
+    assert out["uia_findall_hover_roi_half_px"] == 50
 
 
 def test_normalize_preserves_findall_budgets() -> None:
@@ -279,17 +298,83 @@ def test_normalize_preserves_findall_budgets() -> None:
             "uia_findall_max_seconds": 10,
             "uia_findall_max_hits": 350,
             "uia_findall_max_nodes": 2500,
+            "uia_findall_hover_max_seconds": 3,
+            "uia_findall_hover_max_hits": 100,
+            "uia_findall_hover_max_nodes": 800,
+            "uia_findall_hover_roi_half_px": 350,
         }
     )
     assert out["uia_findall_max_seconds"] == 10.0
     assert out["uia_findall_max_hits"] == 350
     assert out["uia_findall_max_nodes"] == 2500
+    assert out["uia_findall_hover_max_seconds"] == 3.0
+    assert out["uia_findall_hover_max_hits"] == 100
+    assert out["uia_findall_hover_max_nodes"] == 800
+    assert out["uia_findall_hover_roi_half_px"] == 350
 
 
 def test_clamp_uia_findall_helpers() -> None:
     assert clamp_uia_findall_max_seconds("nope") == 5.0
     assert clamp_uia_findall_max_hits("x") == 500
     assert clamp_uia_findall_max_nodes(None) == 4000
+    assert clamp_uia_findall_hover_max_seconds("bad") == 2.0
+    assert clamp_uia_findall_hover_max_hits(None) == 120
+    assert clamp_uia_findall_hover_max_nodes("x") == 1000
+    assert clamp_uia_findall_hover_roi_half_px(-1) == 50
+
+
+def test_uia_findall_scenario_presets_within_clamps() -> None:
+    assert len(UIA_FINDALL_SCENARIO_PRESETS) == 3
+    labels = {str(row["label"]) for row in UIA_FINDALL_SCENARIO_PRESETS}
+    assert labels == {"預設平衡", "慢速 VM", "輕量防卡"}
+    for preset in UIA_FINDALL_SCENARIO_PRESETS:
+        values = clamp_uia_findall_scenario_values(preset)
+        settle = preset["settle"]
+        hover = preset["hover"]
+        assert values["uia_findall_max_seconds"] == float(
+            settle["uia_findall_max_seconds"]
+        )
+        assert values["uia_findall_max_hits"] == int(settle["uia_findall_max_hits"])
+        assert values["uia_findall_max_nodes"] == int(settle["uia_findall_max_nodes"])
+        assert values["uia_findall_hover_max_seconds"] == float(
+            hover["uia_findall_hover_max_seconds"]
+        )
+        assert values["uia_findall_hover_max_hits"] == int(
+            hover["uia_findall_hover_max_hits"]
+        )
+        assert values["uia_findall_hover_max_nodes"] == int(
+            hover["uia_findall_hover_max_nodes"]
+        )
+        assert values["uia_findall_hover_roi_half_px"] == int(
+            hover["uia_findall_hover_roi_half_px"]
+        )
+
+
+def test_findall_hover_settings_reads_agent_dict(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.common.settings.load_agent_settings_dict",
+        lambda: {
+            "llm_backend": "vllm_server",
+            "brain_lm": "google/gemma-4-26B-A4B-it",
+            "ollama_host": "http://192.168.4.134:8000",
+            "vision_backend": "triton_192_168_0_17",
+            "triton_http_url": "http://192.168.0.17:9000",
+            "uia_findall_max_seconds": 5.0,
+            "uia_findall_max_hits": 500,
+            "uia_findall_max_nodes": 4000,
+            "uia_findall_hover_max_seconds": 2.5,
+            "uia_findall_hover_max_hits": 90,
+            "uia_findall_hover_max_nodes": 700,
+            "uia_findall_hover_roi_half_px": 320,
+        },
+    )
+    cfg = findall_hover_settings()
+    assert cfg == {
+        "max_seconds": 2.5,
+        "max_hits": 90,
+        "max_nodes": 700,
+        "roi_half_px": 320,
+    }
 
 
 def test_findall_walk_settings_reads_agent_dict(monkeypatch) -> None:

@@ -1501,21 +1501,25 @@ def test_default_walk_budgets_reads_agent_settings(monkeypatch) -> None:
 
 
 def test_hover_walk_budgets_cap_below_settle_settings(monkeypatch) -> None:
-    from src.recorder.uia_input_boxes import (
-        _HOVER_WALK_MAX_HITS,
-        _HOVER_WALK_MAX_NODES,
-        _HOVER_WALK_MAX_SECONDS,
-        hover_walk_budgets,
-    )
+    from src.recorder.uia_input_boxes import hover_walk_budgets
 
     monkeypatch.setattr(
         "src.common.settings.findall_walk_settings",
         lambda: {"max_seconds": 30.0, "max_hits": 2000, "max_nodes": 20000},
     )
+    monkeypatch.setattr(
+        "src.common.settings.findall_hover_settings",
+        lambda: {
+            "max_seconds": 2.0,
+            "max_hits": 120,
+            "max_nodes": 1000,
+            "roi_half_px": 400,
+        },
+    )
     budgets = hover_walk_budgets()
-    assert budgets.max_hits == _HOVER_WALK_MAX_HITS
-    assert budgets.max_nodes == _HOVER_WALK_MAX_NODES
-    assert budgets.max_seconds == _HOVER_WALK_MAX_SECONDS
+    assert budgets.max_hits == 120
+    assert budgets.max_nodes == 1000
+    assert budgets.max_seconds == 2.0
 
 
 def test_hover_walk_budgets_respect_lower_settle_settings(monkeypatch) -> None:
@@ -1525,10 +1529,42 @@ def test_hover_walk_budgets_respect_lower_settle_settings(monkeypatch) -> None:
         "src.common.settings.findall_walk_settings",
         lambda: {"max_seconds": 1.5, "max_hits": 80, "max_nodes": 500},
     )
+    monkeypatch.setattr(
+        "src.common.settings.findall_hover_settings",
+        lambda: {
+            "max_seconds": 2.0,
+            "max_hits": 120,
+            "max_nodes": 1000,
+            "roi_half_px": 400,
+        },
+    )
     budgets = hover_walk_budgets()
     assert budgets.max_hits == 80
     assert budgets.max_nodes == 500
     assert budgets.max_seconds == 1.5
+
+
+def test_hover_walk_budgets_use_hover_settings(monkeypatch) -> None:
+    from src.recorder.uia_input_boxes import hover_cursor_roi_half_px, hover_walk_budgets
+
+    monkeypatch.setattr(
+        "src.common.settings.findall_walk_settings",
+        lambda: {"max_seconds": 10.0, "max_hits": 500, "max_nodes": 4000},
+    )
+    monkeypatch.setattr(
+        "src.common.settings.findall_hover_settings",
+        lambda: {
+            "max_seconds": 1.25,
+            "max_hits": 60,
+            "max_nodes": 450,
+            "roi_half_px": 275,
+        },
+    )
+    budgets = hover_walk_budgets()
+    assert budgets.max_hits == 60
+    assert budgets.max_nodes == 450
+    assert budgets.max_seconds == 1.25
+    assert hover_cursor_roi_half_px() == 275
 
 
 def test_cursor_roi_clip_xyxy_clamps_to_root() -> None:
@@ -1594,12 +1630,13 @@ def test_snapshot_uia_hover_subtree_uses_hover_budgets_and_roi(monkeypatch) -> N
             max_hits=120, max_nodes=1000, max_seconds=2.0, max_children_per_parent=80
         ),
     )
+    monkeypatch.setattr(uia, "hover_cursor_roi_half_px", lambda: 400)
     out = uia.snapshot_uia_hover_subtree(55, 100, 200)
     assert out is not None
     assert captured["hwnd"] == 55
     assert captured["cursor_xy"] == (100, 200)
     assert captured["wait"] is False
-    assert captured["cursor_roi_half_px"] == uia._HOVER_CURSOR_ROI_HALF_PX
+    assert captured["cursor_roi_half_px"] == 400
     assert captured["budgets"].max_hits == 120
     assert captured["budgets"].max_nodes == 1000
     assert captured["budgets"].max_seconds == 2.0

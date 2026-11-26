@@ -20,6 +20,10 @@ AGENT_SETTINGS_KEYS = (
     "uia_findall_max_seconds",
     "uia_findall_max_hits",
     "uia_findall_max_nodes",
+    "uia_findall_hover_max_seconds",
+    "uia_findall_hover_max_hits",
+    "uia_findall_hover_max_nodes",
+    "uia_findall_hover_roi_half_px",
 )
 
 AGENT_SETTINGS_SCHEMA: tuple[tuple[str, str, str], ...] = (
@@ -28,6 +32,10 @@ AGENT_SETTINGS_SCHEMA: tuple[tuple[str, str, str], ...] = (
     ("uia_findall_max_seconds", "FindAll 最長時間（秒）", "number"),
     ("uia_findall_max_hits", "FindAll 最大命中數", "number"),
     ("uia_findall_max_nodes", "FindAll 最大節點數", "number"),
+    ("uia_findall_hover_max_seconds", "Hover FindAll 最長時間（秒）", "number"),
+    ("uia_findall_hover_max_hits", "Hover FindAll 最大命中數", "number"),
+    ("uia_findall_hover_max_nodes", "Hover FindAll 最大節點數", "number"),
+    ("uia_findall_hover_roi_half_px", "Hover 游標 ROI 半寬（px）", "number"),
 )
 
 # Recording FindAll / budgeted ControlView walk (agent_settings.json).
@@ -40,12 +48,78 @@ UIA_FINDALL_MAX_HITS_MAX = 2000
 UIA_FINDALL_MAX_NODES_DEFAULT = 4000
 UIA_FINDALL_MAX_NODES_MIN = 200
 UIA_FINDALL_MAX_NODES_MAX = 20_000
+# Idle hover FindAll (tighter than settle; agent_settings.json).
+UIA_FINDALL_HOVER_MAX_SECONDS_DEFAULT = 2.0
+UIA_FINDALL_HOVER_MAX_SECONDS_MIN = 0.5
+UIA_FINDALL_HOVER_MAX_SECONDS_MAX = 30.0
+UIA_FINDALL_HOVER_MAX_HITS_DEFAULT = 120
+UIA_FINDALL_HOVER_MAX_HITS_MIN = 20
+UIA_FINDALL_HOVER_MAX_HITS_MAX = 1000
+UIA_FINDALL_HOVER_MAX_NODES_DEFAULT = 1000
+UIA_FINDALL_HOVER_MAX_NODES_MIN = 100
+UIA_FINDALL_HOVER_MAX_NODES_MAX = 10_000
+UIA_FINDALL_HOVER_ROI_HALF_PX_DEFAULT = 400
+UIA_FINDALL_HOVER_ROI_HALF_PX_MIN = 50
+UIA_FINDALL_HOVER_ROI_HALF_PX_MAX = 2000
 _UIA_FINDALL_NUMERIC_KEYS = frozenset(
     {
         "uia_findall_max_seconds",
         "uia_findall_max_hits",
         "uia_findall_max_nodes",
+        "uia_findall_hover_max_seconds",
+        "uia_findall_hover_max_hits",
+        "uia_findall_hover_max_nodes",
+        "uia_findall_hover_roi_half_px",
     }
+)
+
+# One-click FindAll 走訪 tab scenarios (fill settle + hover fields).
+UIA_FINDALL_SCENARIO_PRESETS: tuple[dict[str, Any], ...] = (
+    {
+        "id": "balanced",
+        "label": "預設平衡",
+        "settle": {
+            "uia_findall_max_seconds": 5.0,
+            "uia_findall_max_hits": 500,
+            "uia_findall_max_nodes": 4000,
+        },
+        "hover": {
+            "uia_findall_hover_max_seconds": 2.0,
+            "uia_findall_hover_max_hits": 120,
+            "uia_findall_hover_max_nodes": 1000,
+            "uia_findall_hover_roi_half_px": 400,
+        },
+    },
+    {
+        "id": "slow_vm",
+        "label": "慢速 VM",
+        "settle": {
+            "uia_findall_max_seconds": 10.0,
+            "uia_findall_max_hits": 350,
+            "uia_findall_max_nodes": 2500,
+        },
+        "hover": {
+            "uia_findall_hover_max_seconds": 3.0,
+            "uia_findall_hover_max_hits": 100,
+            "uia_findall_hover_max_nodes": 800,
+            "uia_findall_hover_roi_half_px": 400,
+        },
+    },
+    {
+        "id": "light",
+        "label": "輕量防卡",
+        "settle": {
+            "uia_findall_max_seconds": 8.0,
+            "uia_findall_max_hits": 200,
+            "uia_findall_max_nodes": 1500,
+        },
+        "hover": {
+            "uia_findall_hover_max_seconds": 2.0,
+            "uia_findall_hover_max_hits": 80,
+            "uia_findall_hover_max_nodes": 600,
+            "uia_findall_hover_roi_half_px": 300,
+        },
+    },
 )
 
 VISION_BACKEND_CHOICES = frozenset({"triton_192_168_0_17"})
@@ -298,11 +372,90 @@ def clamp_uia_findall_max_nodes(value: Any) -> int:
     )
 
 
+def clamp_uia_findall_hover_max_seconds(value: Any) -> float:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        seconds = float(UIA_FINDALL_HOVER_MAX_SECONDS_DEFAULT)
+    if seconds != seconds:  # NaN
+        seconds = float(UIA_FINDALL_HOVER_MAX_SECONDS_DEFAULT)
+    return max(
+        float(UIA_FINDALL_HOVER_MAX_SECONDS_MIN),
+        min(float(UIA_FINDALL_HOVER_MAX_SECONDS_MAX), float(seconds)),
+    )
+
+
+def clamp_uia_findall_hover_max_hits(value: Any) -> int:
+    try:
+        hits = int(round(float(value)))
+    except (TypeError, ValueError):
+        hits = int(UIA_FINDALL_HOVER_MAX_HITS_DEFAULT)
+    return max(
+        int(UIA_FINDALL_HOVER_MAX_HITS_MIN),
+        min(int(UIA_FINDALL_HOVER_MAX_HITS_MAX), hits),
+    )
+
+
+def clamp_uia_findall_hover_max_nodes(value: Any) -> int:
+    try:
+        nodes = int(round(float(value)))
+    except (TypeError, ValueError):
+        nodes = int(UIA_FINDALL_HOVER_MAX_NODES_DEFAULT)
+    return max(
+        int(UIA_FINDALL_HOVER_MAX_NODES_MIN),
+        min(int(UIA_FINDALL_HOVER_MAX_NODES_MAX), nodes),
+    )
+
+
+def clamp_uia_findall_hover_roi_half_px(value: Any) -> int:
+    try:
+        half = int(round(float(value)))
+    except (TypeError, ValueError):
+        half = int(UIA_FINDALL_HOVER_ROI_HALF_PX_DEFAULT)
+    return max(
+        int(UIA_FINDALL_HOVER_ROI_HALF_PX_MIN),
+        min(int(UIA_FINDALL_HOVER_ROI_HALF_PX_MAX), half),
+    )
+
+
 def default_uia_findall_settings() -> dict[str, Any]:
     return {
         "uia_findall_max_seconds": float(UIA_FINDALL_MAX_SECONDS_DEFAULT),
         "uia_findall_max_hits": int(UIA_FINDALL_MAX_HITS_DEFAULT),
         "uia_findall_max_nodes": int(UIA_FINDALL_MAX_NODES_DEFAULT),
+        "uia_findall_hover_max_seconds": float(UIA_FINDALL_HOVER_MAX_SECONDS_DEFAULT),
+        "uia_findall_hover_max_hits": int(UIA_FINDALL_HOVER_MAX_HITS_DEFAULT),
+        "uia_findall_hover_max_nodes": int(UIA_FINDALL_HOVER_MAX_NODES_DEFAULT),
+        "uia_findall_hover_roi_half_px": int(UIA_FINDALL_HOVER_ROI_HALF_PX_DEFAULT),
+    }
+
+
+def clamp_uia_findall_scenario_values(raw: dict[str, Any]) -> dict[str, Any]:
+    """Clamp a settle+hover scenario payload to agent-settings ranges."""
+    settle = raw.get("settle") if isinstance(raw.get("settle"), dict) else {}
+    hover = raw.get("hover") if isinstance(raw.get("hover"), dict) else {}
+    return {
+        "uia_findall_max_seconds": clamp_uia_findall_max_seconds(
+            settle.get("uia_findall_max_seconds")
+        ),
+        "uia_findall_max_hits": clamp_uia_findall_max_hits(
+            settle.get("uia_findall_max_hits")
+        ),
+        "uia_findall_max_nodes": clamp_uia_findall_max_nodes(
+            settle.get("uia_findall_max_nodes")
+        ),
+        "uia_findall_hover_max_seconds": clamp_uia_findall_hover_max_seconds(
+            hover.get("uia_findall_hover_max_seconds")
+        ),
+        "uia_findall_hover_max_hits": clamp_uia_findall_hover_max_hits(
+            hover.get("uia_findall_hover_max_hits")
+        ),
+        "uia_findall_hover_max_nodes": clamp_uia_findall_hover_max_nodes(
+            hover.get("uia_findall_hover_max_nodes")
+        ),
+        "uia_findall_hover_roi_half_px": clamp_uia_findall_hover_roi_half_px(
+            hover.get("uia_findall_hover_roi_half_px")
+        ),
     }
 
 
@@ -374,6 +527,30 @@ def normalize_agent_settings_dict(data: dict[str, Any]) -> dict[str, Any]:
     out["uia_findall_max_nodes"] = clamp_uia_findall_max_nodes(
         data.get("uia_findall_max_nodes", defaults["uia_findall_max_nodes"])
     )
+    out["uia_findall_hover_max_seconds"] = clamp_uia_findall_hover_max_seconds(
+        data.get(
+            "uia_findall_hover_max_seconds",
+            defaults["uia_findall_hover_max_seconds"],
+        )
+    )
+    out["uia_findall_hover_max_hits"] = clamp_uia_findall_hover_max_hits(
+        data.get(
+            "uia_findall_hover_max_hits",
+            defaults["uia_findall_hover_max_hits"],
+        )
+    )
+    out["uia_findall_hover_max_nodes"] = clamp_uia_findall_hover_max_nodes(
+        data.get(
+            "uia_findall_hover_max_nodes",
+            defaults["uia_findall_hover_max_nodes"],
+        )
+    )
+    out["uia_findall_hover_roi_half_px"] = clamp_uia_findall_hover_roi_half_px(
+        data.get(
+            "uia_findall_hover_roi_half_px",
+            defaults["uia_findall_hover_roi_half_px"],
+        )
+    )
     return out
 
 
@@ -384,6 +561,17 @@ def findall_walk_settings() -> dict[str, float | int]:
         "max_seconds": float(data["uia_findall_max_seconds"]),
         "max_hits": int(data["uia_findall_max_hits"]),
         "max_nodes": int(data["uia_findall_max_nodes"]),
+    }
+
+
+def findall_hover_settings() -> dict[str, float | int]:
+    """Clamped hover FindAll budgets + ROI from agent settings (live read)."""
+    data = load_agent_settings_dict()
+    return {
+        "max_seconds": float(data["uia_findall_hover_max_seconds"]),
+        "max_hits": int(data["uia_findall_hover_max_hits"]),
+        "max_nodes": int(data["uia_findall_hover_max_nodes"]),
+        "roi_half_px": int(data["uia_findall_hover_roi_half_px"]),
     }
 
 

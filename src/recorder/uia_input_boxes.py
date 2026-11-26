@@ -2484,12 +2484,34 @@ def default_walk_budgets() -> WalkBudgets:
 def hover_walk_budgets() -> WalkBudgets:
     """Tighter caps for idle hover FindAll (never above settle settings)."""
     base = default_walk_budgets()
+    hover_hits = int(_HOVER_WALK_MAX_HITS)
+    hover_nodes = int(_HOVER_WALK_MAX_NODES)
+    hover_seconds = float(_HOVER_WALK_MAX_SECONDS)
+    try:
+        from src.common.settings import findall_hover_settings
+
+        cfg = findall_hover_settings()
+        hover_hits = int(cfg["max_hits"])
+        hover_nodes = int(cfg["max_nodes"])
+        hover_seconds = float(cfg["max_seconds"])
+    except Exception:
+        pass
     return WalkBudgets(
-        max_hits=min(int(base.max_hits), int(_HOVER_WALK_MAX_HITS)),
-        max_nodes=min(int(base.max_nodes), int(_HOVER_WALK_MAX_NODES)),
-        max_seconds=min(float(base.max_seconds), float(_HOVER_WALK_MAX_SECONDS)),
+        max_hits=min(int(base.max_hits), int(hover_hits)),
+        max_nodes=min(int(base.max_nodes), int(hover_nodes)),
+        max_seconds=min(float(base.max_seconds), float(hover_seconds)),
         max_children_per_parent=int(base.max_children_per_parent),
     )
+
+
+def hover_cursor_roi_half_px() -> int:
+    """Cursor ROI half-extent for hover FindAll (agent settings or default)."""
+    try:
+        from src.common.settings import findall_hover_settings
+
+        return max(1, int(findall_hover_settings()["roi_half_px"]))
+    except Exception:
+        return int(_HOVER_CURSOR_ROI_HALF_PX)
 
 
 def cursor_roi_clip_xyxy(
@@ -4684,7 +4706,7 @@ def snapshot_uia_hover_subtree(
         int(hwnd),
         cursor_xy=(int(x), int(y)),
         budgets=hover_walk_budgets(),
-        cursor_roi_half_px=int(_HOVER_CURSOR_ROI_HALF_PX),
+        cursor_roi_half_px=hover_cursor_roi_half_px(),
         wait=False,
     )
 

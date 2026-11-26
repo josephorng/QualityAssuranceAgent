@@ -150,10 +150,11 @@ _HOVER_SUBTREE_AREA_FRAC = 0.15
 _HOVER_SUBTREE_MAX_CLIMB = 12
 
 # Budgeted ControlView walk (replaces unbounded FindAllBuildCache).
-_DEFAULT_WALK_MAX_HITS = 500
-_DEFAULT_WALK_MAX_NODES = 4000
-# VM / slow providers often need more than 2s to finish a local climb walk.
-_DEFAULT_WALK_MAX_SECONDS = 5.0
+# Temporary diagnostic: raised so slow WinForms trees (e.g. 龜速的網域) can
+# finish a full snapshot under a 5-minute wall clock.
+_DEFAULT_WALK_MAX_HITS = 50_000
+_DEFAULT_WALK_MAX_NODES = 200_000
+_DEFAULT_WALK_MAX_SECONDS = 300.0
 _DEFAULT_WALK_MAX_CHILDREN_PER_PARENT = 80
 _WALK_OFFSCREEN_SCORE_BASE = 1_000_000_000.0
 _WALK_MISSING_BBOX_SCORE = 1_000_000_000_000.0
@@ -165,8 +166,8 @@ _EFP_SCAN_STEP_PX = 28
 _EFP_SCAN_MAX_PROBES = 80
 _EFP_SCAN_MAX_SECONDS = 1.0
 # Outer uia_call waits (must cover walk budget; enrich stacks refetch + EFP scan).
-_SNAPSHOT_UIA_TIMEOUT_S = 5.5
-_SNAPSHOT_UIA_ENRICH_TIMEOUT_S = 15.0
+_SNAPSHOT_UIA_TIMEOUT_S = 305.0
+_SNAPSHOT_UIA_ENRICH_TIMEOUT_S = 610.0
 
 
 @dataclass(frozen=True)

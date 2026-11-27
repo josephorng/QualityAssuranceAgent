@@ -199,8 +199,7 @@ async def move_mouse(
     name: str | None = None,
     value: str | None = None,
     hub_source: str | None = None,
-    parent: dict | None = None,
-    hub_parent: dict | None = None,
+    parents: list | None = None,
 ):
     '''
     Take a screenshot, detect UI targets (text, element, input, scrollbar), and move
@@ -228,13 +227,11 @@ async def move_mouse(
     control_type: optional recorded control token (button, list_item, icon, …) used with
     anchor_text for typed UIA/YOLO matching.
     vision_mode: optional "uia" or "yolo_ocr"; overrides a （UIA）/（YOLO+OCR） prefix.
-    name: optional recorded ElementFromPoint UIA Name (feasibility; not used for match).
-    value: optional recorded ElementFromPoint UIA Value (feasibility; not used for match).
-    hub_source: optional "findall" or "uia_efp" — recorded primary provenance; gates
-    hard constellation-EFP (only ``uia_efp``). Missing falls back to EFP↔hub agree.
-    parent: optional ControlView parent fingerprint of the EFP leaf
-    ({control_type, name, automation_id}).
-    hub_parent: optional ControlView parent fingerprint of the FindAll hub leaf.
+    name: optional recorded ElementFromPoint UIA Name (identity for EFP path).
+    value: optional recorded ElementFromPoint UIA Value (identity for EFP path).
+    hub_source: optional sole UIA hub provenance — only ``uia_efp`` when set.
+    parents: optional ControlView ancestor chain of the EFP leaf (immediate parent
+    first → root), each ``{control_type?, name?, automation_id?}``.
     '''
     duration: float = 0.0
     result = await _move_mouse(
@@ -249,8 +246,7 @@ async def move_mouse(
         name=name,
         value=value,
         hub_source=hub_source,
-        parent=parent,
-        hub_parent=hub_parent,
+        parents=parents,
     )
     result["instruction"] = instruction
     return result

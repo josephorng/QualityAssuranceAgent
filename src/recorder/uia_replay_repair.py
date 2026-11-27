@@ -1,18 +1,15 @@
-"""Repair a recorded （YOLO+OCR）pointer step from a live UIA element during cache replay.
+"""YOLO+OCR twin helpers and (disabled) live UIA replay repair.
 
-Only a side whose stored ``vision_path`` is ``yolo_ocr`` is repaired. The live
-FindAll runs beside YOLO+OCR. OCR must still show the recorded target, and one
-UIA label must cover that point, before the instruction is rewritten.
+New-format recordings stamp usable UIA hubs as ``hub_source=uia_efp`` with an
+EFP ``parents`` chain at analysis time. Live budgeted FindAll that promoted
+``（YOLO+OCR）`` → UIA during cache replay is **disabled** (Phase 5): repair
+slots always skip, and ``hub_source`` only accepts ``uia_efp``.
 
-Scrollbar and input class targets are special: OCR confirms ``滾動條`` /
-``輸入欄``, then the live UIA control under the mapped point becomes the
-primary (scrollbar keeps track percent). For ``輸入欄``, a usable
-``ElementFromPoint`` leaf Name/Value is preferred when present (named nav
-leaves inside a bare pane); ``滾動條`` stays class-only and never uses EFP.
+``choose_uia_replay_repair*`` / ``write_uia_replay_repair`` remain for tests and
+legacy call sites; ``replay_repair_slots`` no longer arms them for new runs.
 
-On a successful repair the live FindAll snapshot (same shape as a recorded
-``uia_snapshot``) is stored under ``analysis.uia_replay_repair`` for debug. The
-event's recorded ``uia_snapshot`` is not rewritten.
+YOLO twin fallbacks (``yolo_ocr_fallback`` / ``YoloOcrMoveFallback``) stay
+active so soft-miss select can adopt the recorded OCR sentence.
 """
 
 from __future__ import annotations
@@ -167,9 +164,10 @@ def _move_fallback_from_args(
         return None
     geometry = args.get("landmark_geometry")
     raw_hub = args.get("hub_source")
+    # Sole hub provenance is uia_efp; never accept legacy findall.
     hub_source = (
-        str(raw_hub).strip()
-        if isinstance(raw_hub, str) and str(raw_hub).strip() in ("findall", "uia_efp")
+        "uia_efp"
+        if isinstance(raw_hub, str) and str(raw_hub).strip().lower() == "uia_efp"
         else None
     )
     return YoloOcrMoveFallback(
@@ -1283,91 +1281,14 @@ def _load_request_with_reason(
     event_index: int,
     side: str,
 ) -> tuple[UiaReplayRepairRequest | None, str]:
-    """Build a repair request, or ``(None, reason)`` when this side is not repairable."""
-    run_dir = Path(recording_dir)
-    raw_event = read_json(event_json_path(run_dir, event_index), None)
-    if not isinstance(raw_event, dict):
-        return None, "no_event_json"
-    try:
-        event = RecordedEvent.from_dict(raw_event)
-    except (KeyError, TypeError, ValueError) as exc:
-        return None, f"bad_event_json:{type(exc).__name__}"
-    analysis = read_json(run_dir / "analysis" / f"event_{int(event_index):03d}.json", None)
-    instruction = ""
-    if isinstance(analysis, dict):
-        instruction = str(analysis.get("instruction") or "")
-    from cua_mcp.caption_buttons import caption_role_from_instruction
+    """Build a repair request, or ``(None, reason)`` when this side is not repairable.
 
-    if instruction and caption_role_from_instruction(instruction):
-        return None, "caption_button_instruction"
-    window = event.end_click_window if side == "end" else event.click_window
-    recorded_window = _window_xywh(window if isinstance(window, dict) else None)
-    if recorded_window is None:
-        return None, "no_recorded_click_window"
-    from src.recorder.vision_context import load_yolo_ocr_payload
-
-    suffix = "_end" if side == "end" else ""
-    payload = load_yolo_ocr_payload(run_dir, event_index, suffix=suffix)
-    if not isinstance(payload, dict):
-        return None, "no_yolo_ocr_payload"
-    vision_path = str(payload.get("vision_path") or "").strip()
-    if vision_path != "yolo_ocr":
-        return None, f"vision_path_not_yolo_ocr:{vision_path or 'missing'}"
-    scrollbar_primary = _recorded_scrollbar_primary(
-        payload, allow_off_track=(side == "end")
-    )
-    icon_primary = (
-        None if scrollbar_primary is not None else _recorded_icon_primary(payload)
-    )
-    input_primary = (
-        None
-        if scrollbar_primary is not None or icon_primary is not None
-        else _recorded_input_primary(payload)
-    )
-    recorded_is_icon = False
-    if scrollbar_primary is not None:
-        bbox, text = scrollbar_primary
-    elif icon_primary is not None:
-        bbox, text, recorded_is_icon = icon_primary
-    elif input_primary is not None:
-        bbox, text = input_primary
-    else:
-        snapshot = event.end_uia_snapshot if side == "end" else event.uia_snapshot
-        primary = _recorded_primary(payload)
-        if primary is None:
-            return None, "no_recorded_primary_candidate"
-        bbox, text, recorded_is_icon = primary
-        probe = _repair_probe_screen_xy(
-            event,
-            side,
-            recorded_window,
-            bbox,
-            snapshot if isinstance(snapshot, dict) else None,
-        )
-        covering = snapshot_usable_covering_labels(
-            snapshot if isinstance(snapshot, dict) else None,
-            probe,
-        )
-        # Soft-agree covering FindAll (OCR hub vs longer Accessibility Name)
-        # still opens a repair slot so replay can upgrade YOLO→UIA. Hard-
-        # disagree covering means recording intentionally kept YOLO.
-        if covering:
-            from src.recorder.uia_input_boxes import ocr_uia_labels_soft_agree
-
-            if not any(ocr_uia_labels_soft_agree(text, label) for label in covering):
-                return None, "recorded_uia_snapshot_already_usable"
-    return (
-        UiaReplayRepairRequest(
-            recording_dir=run_dir,
-            event_index=int(event_index),
-            side=side,
-            recorded_bbox=bbox,
-            recorded_text=text,
-            recorded_window_xywh=recorded_window,
-            recorded_is_icon=recorded_is_icon,
-        ),
-        "",
-    )
+    New format: live FindAll YOLO→UIA promotion is disabled. Usable UIA hubs
+    already carry ``hub_source=uia_efp`` + ``parents`` from analysis; pure
+    YOLO+OCR steps stay on the twin path without a budgeted FindAll walk.
+    """
+    _ = (recording_dir, event_index, side)
+    return None, "findall_repair_disabled"
 
 
 def _first_icon_chinese_id(cand: dict[str, Any]) -> str:

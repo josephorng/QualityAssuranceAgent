@@ -162,6 +162,8 @@ _VT_BSTR = 8
 # the top-level window area (or Window/Document / hwnd root).
 _HOVER_SUBTREE_AREA_FRAC = 0.15
 _HOVER_SUBTREE_MAX_CLIMB = 12
+# EFP ControlView ancestor climb (immediate parent → root).
+_EFP_PARENTS_MAX_CLIMB = 32
 # Hover-only caps (also min'd with agent-settings settle budgets).
 _HOVER_WALK_MAX_HITS = 120
 _HOVER_WALK_MAX_NODES = 1000
@@ -1576,33 +1578,62 @@ def uia_text_element_at_point(
     return None
 
 
-def _element_parent_signature(
-    automation: ctypes.c_void_p, element: ctypes.c_void_p
+def _element_signature(
+    element: ctypes.c_void_p,
 ) -> dict[str, str]:
-    """Lightweight ControlView parent fingerprint (omit empty keys).
+    """Lightweight ControlView fingerprint (omit empty keys).
 
-    Shape: ``{control_type?, name?, automation_id?}`` — same spirit as
-    :func:`uia_focused_element_snapshot`. One parent climb only.
+    Shape: ``{control_type?, name?, automation_id?}``.
     """
-    parent = _control_view_parent(automation, element)
-    if parent is None:
-        return {}
+    out: dict[str, str] = {}
+    control_type = control_type_token_from_id(_element_control_type(element))
+    if control_type:
+        out["control_type"] = control_type
+    name = canonicalize_uia_shell_status_label(
+        str(_element_current_name(element) or "").strip()
+    )
+    if name:
+        out["name"] = name
+    automation_id = str(_element_automation_id(element) or "").strip()
+    if automation_id:
+        out["automation_id"] = automation_id
+    return out
+
+
+def _element_parents_chain(
+    automation: ctypes.c_void_p,
+    element: ctypes.c_void_p,
+    *,
+    max_depth: int = _EFP_PARENTS_MAX_CLIMB,
+) -> list[dict[str, str]]:
+    """Climb ControlView parents: immediate parent first → root last."""
+    chain: list[dict[str, str]] = []
+    current = element
+    owned = False
+    seen: set[int] = set()
     try:
-        out: dict[str, str] = {}
-        control_type = control_type_token_from_id(_element_control_type(parent))
-        if control_type:
-            out["control_type"] = control_type
-        name = canonicalize_uia_shell_status_label(
-            str(_element_current_name(parent) or "").strip()
-        )
-        if name:
-            out["name"] = name
-        automation_id = str(_element_automation_id(parent) or "").strip()
-        if automation_id:
-            out["automation_id"] = automation_id
-        return out
+        for _ in range(max(1, int(max_depth))):
+            parent = _control_view_parent(automation, current)
+            if owned:
+                _com_release(current)
+                owned = False
+            if parent is None:
+                break
+            addr = int(getattr(parent, "value", 0) or 0)
+            if addr and addr in seen:
+                _com_release(parent)
+                break
+            if addr:
+                seen.add(addr)
+            sig = _element_signature(parent)
+            if sig:
+                chain.append(sig)
+            current = parent
+            owned = True
     finally:
-        _com_release(parent)
+        if owned:
+            _com_release(current)
+    return chain
 
 
 def _normalize_parent_signature(raw: Any) -> dict[str, str]:
@@ -1617,6 +1648,18 @@ def _normalize_parent_signature(raw: Any) -> dict[str, str]:
     return out
 
 
+def _normalize_parents_chain(raw: Any) -> list[dict[str, str]]:
+    """Normalize a parents list; drop empty nodes."""
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, str]] = []
+    for item in raw:
+        sig = _normalize_parent_signature(item)
+        if sig:
+            out.append(sig)
+    return out
+
+
 def format_parent_signature_compact(raw: Any) -> str:
     """Short LED/HTML parent token: name, else AutomationId, else control_type."""
     sig = _normalize_parent_signature(raw)
@@ -1627,6 +1670,17 @@ def format_parent_signature_compact(raw: Any) -> str:
         if text:
             return text
     return ""
+
+
+def format_parents_chain_compact(raw: Any) -> str:
+    """LED token from the first usable ancestor, else the first node."""
+    chain = _normalize_parents_chain(raw)
+    if not chain:
+        return ""
+    for sig in chain:
+        if parent_signature_usable(sig):
+            return format_parent_signature_compact(sig)
+    return format_parent_signature_compact(chain[0])
 
 
 def parent_signature_usable(signature: Any) -> bool:
@@ -1679,6 +1733,35 @@ def parent_signatures_agree(recorded: Any, live: Any) -> bool:
     return False
 
 
+def parents_chains_agree(recorded: Any, live: Any) -> bool:
+    """True when every usable recorded ancestor soft-agrees with live chain.
+
+    Walks recorded and live in lockstep (immediate parent first). Unusable
+    chrome nodes in the recorded chain are skipped without consuming a live
+    node when the live peer is also unusable; otherwise live advances with
+    recorded. Empty recorded chain never vetoes.
+    """
+    rec_chain = _normalize_parents_chain(recorded)
+    liv_chain = _normalize_parents_chain(live)
+    if not rec_chain:
+        return True
+    live_i = 0
+    for rec in rec_chain:
+        if not parent_signature_usable(rec):
+            # Skip weak recorded chrome; also skip a matching weak live peer.
+            if live_i < len(liv_chain) and not parent_signature_usable(
+                liv_chain[live_i]
+            ):
+                live_i += 1
+            continue
+        if live_i >= len(liv_chain):
+            return False
+        if not parent_signatures_agree(rec, liv_chain[live_i]):
+            return False
+        live_i += 1
+    return True
+
+
 def _uia_hr_u32(hr: int) -> int:
     return int(hr) & 0xFFFFFFFF
 
@@ -1711,17 +1794,17 @@ def _call_element_from_point_with_retry(
     return hr
 
 
-def _parent_signature_at_point_impl(x: int, y: int) -> dict[str, str]:
-    """ElementFromPoint + one parent climb; returns ``{}`` on failure."""
+def _parents_chain_at_point_impl(x: int, y: int) -> list[dict[str, str]]:
+    """ElementFromPoint + full parent climb; returns ``[]`` on failure."""
     if os.name != "nt":
-        return {}
+        return []
     ole32 = ctypes.windll.ole32
     initialized_here = False
     hr = ole32.CoInitializeEx(None, _COINIT_MULTITHREADED)
     if hr == _S_OK:
         initialized_here = True
     elif hr not in (_S_OK, _S_FALSE) and (hr & 0xFFFFFFFF) != 0x80010106:
-        return {}
+        return []
 
     automation: ctypes.c_void_p | None = None
     element: ctypes.c_void_p | None = None
@@ -1737,14 +1820,14 @@ def _parent_signature_at_point_impl(x: int, y: int) -> dict[str, str]:
             ctypes.byref(automation_ptr),
         )
         if hr != _S_OK or not automation_ptr:
-            return {}
+            return []
         automation = automation_ptr
         element = _element_from_point(automation, int(x), int(y))
         if not element:
-            return {}
-        return _element_parent_signature(automation, element)
+            return []
+        return _element_parents_chain(automation, element)
     except Exception:
-        return {}
+        return []
     finally:
         _com_release(element)
         _com_release(automation)
@@ -1755,24 +1838,30 @@ def _parent_signature_at_point_impl(x: int, y: int) -> dict[str, str]:
                 pass
 
 
-def parent_signature_at_point(x: int, y: int) -> dict[str, str]:
-    """ControlView parent fingerprint under a screen point (UIA worker)."""
+def parents_chain_at_point(x: int, y: int) -> list[dict[str, str]]:
+    """ControlView ancestor chain under a screen point (UIA worker)."""
     from src.recorder.uia_thread import uia_call
 
     try:
         result = uia_call(
-            _parent_signature_at_point_impl,
+            _parents_chain_at_point_impl,
             int(x),
             int(y),
             timeout_s=2.5,
         )
     except Exception:
-        return {}
-    return _normalize_parent_signature(result)
+        return []
+    return _normalize_parents_chain(result)
+
+
+def parent_signature_at_point(x: int, y: int) -> dict[str, str]:
+    """Immediate ControlView parent fingerprint under a screen point."""
+    chain = parents_chain_at_point(x, y)
+    return dict(chain[0]) if chain else {}
 
 
 def _element_from_point_name_value_impl(x: int, y: int) -> dict[str, Any]:
-    """EFP Name/Value/bbox/type plus optional parent signature (same leaf)."""
+    """EFP Name/Value/bbox/type plus optional parents chain (same leaf)."""
     started = time.perf_counter()
     out: dict[str, Any] = {}
     if os.name != "nt":
@@ -1823,9 +1912,9 @@ def _element_from_point_name_value_impl(x: int, y: int) -> dict[str, Any]:
         control_type = control_type_token_from_id(_element_control_type(element))
         if control_type:
             out["control_type"] = control_type
-        parent = _element_parent_signature(automation, element)
-        if parent:
-            out["parent"] = parent
+        parents = _element_parents_chain(automation, element)
+        if parents:
+            out["parents"] = parents
         return out
     except Exception:
         return out
@@ -1847,12 +1936,11 @@ def element_from_point_name_value(x: int, y: int) -> dict[str, Any]:
     Always returns ``{"element_from_point_s": float}`` for the wall time of
     the probe. When Name and/or Value are non-empty, also includes
     ``"name"`` / ``"value"``. When the live leaf has a box, also includes
-    screen ``"bbox"`` xywh and ``"control_type"`` (UIA suffix token). When the
-    ControlView parent is readable, also includes ``"parent"`` with
-    ``control_type`` / ``name`` / ``automation_id`` (empty keys omitted). Used to
-    stash ElementFromPoint results on recorded pointer steps without requiring
-    FindAll to expose the same leaf; analysis may inject the leaf as a
-    FindAll-shaped peer for instruction naming. Marshals onto the UIA worker.
+    screen ``"bbox"`` xywh and ``"control_type"`` (UIA suffix token). When
+    ControlView ancestors are readable, also includes ``"parents"`` — a list of
+    ``{control_type?, name?, automation_id?}`` from immediate parent to root.
+    Analysis uses the leaf as the UIA hub; nearby landmarks come from YOLO+OCR.
+    Marshals onto the UIA worker.
     """
     from src.recorder.uia_thread import uia_call
 
@@ -1981,6 +2069,37 @@ def _create_name_condition(
         hr = create_prop(
             automation,
             _UIA_NAME_PROPERTY_ID,
+            var,
+            ctypes.byref(cond_ptr),
+        )
+    finally:
+        _sys_free_string(bstr)
+    if hr != _S_OK or not cond_ptr:
+        return None
+    return cond_ptr
+
+
+def _create_automation_id_condition(
+    automation: ctypes.c_void_p, automation_id: str
+) -> ctypes.c_void_p | None:
+    """PropertyCondition on ``AutomationId``; frees the temporary BSTR."""
+    create_prop = ctypes.WINFUNCTYPE(
+        ctypes.HRESULT,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        VARIANT,
+        ctypes.POINTER(ctypes.c_void_p),
+    )(
+        _com_vtable(automation, _UIA_CREATE_PROPERTY_CONDITION + 1)[
+            _UIA_CREATE_PROPERTY_CONDITION
+        ]
+    )
+    var, bstr = _variant_bstr(str(automation_id))
+    cond_ptr = ctypes.c_void_p()
+    try:
+        hr = create_prop(
+            automation,
+            _UIA_AUTOMATION_ID_PROPERTY_ID,
             var,
             ctypes.byref(cond_ptr),
         )
@@ -4210,6 +4329,339 @@ def find_uia_elements_by_name(
         ):
             cleaned.append(item)  # type: ignore[arg-type]
     return cleaned
+
+
+def _find_first_under(
+    root: ctypes.c_void_p,
+    condition: ctypes.c_void_p,
+) -> ctypes.c_void_p | None:
+    find_first = ctypes.WINFUNCTYPE(
+        ctypes.HRESULT,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    )(_com_vtable(root, _UIA_FIND_FIRST + 1)[_UIA_FIND_FIRST])
+    found_ptr = ctypes.c_void_p()
+    hr = find_first(
+        root,
+        _TREE_SCOPE_DESCENDANTS,
+        condition,
+        ctypes.byref(found_ptr),
+    )
+    if hr not in (_S_OK, _S_FALSE) or not found_ptr:
+        return None
+    return found_ptr
+
+
+def _build_ancestor_scope_condition(
+    automation: ctypes.c_void_p, signature: dict[str, str]
+) -> ctypes.c_void_p | None:
+    """Build FindFirst condition for one recorded ancestor (caller releases)."""
+    name = str(signature.get("name") or "").strip()
+    automation_id = str(signature.get("automation_id") or "").strip()
+    type_token = str(signature.get("control_type") or "").strip()
+    type_id = control_type_id_from_token(type_token) if type_token else None
+
+    owned: list[ctypes.c_void_p] = []
+    try:
+        if name:
+            name_cond = _create_name_condition(automation, name)
+            if name_cond is None:
+                return None
+            owned.append(name_cond)
+            if type_id is not None and int(type_id) > 0:
+                type_cond = _create_control_type_condition(automation, int(type_id))
+                if type_cond is None:
+                    return None
+                owned.append(type_cond)
+                and_cond = _create_and_condition(automation, type_cond, name_cond)
+                if and_cond is None:
+                    return None
+                # Caller owns and_cond; release intermediates.
+                for ptr in owned:
+                    _com_release(ptr)
+                owned.clear()
+                return and_cond
+            owned.clear()
+            return name_cond
+
+        if automation_id:
+            auto_cond = _create_automation_id_condition(automation, automation_id)
+            if auto_cond is None:
+                return None
+            owned.append(auto_cond)
+            if type_id is not None and int(type_id) > 0:
+                type_cond = _create_control_type_condition(automation, int(type_id))
+                if type_cond is None:
+                    return None
+                owned.append(type_cond)
+                and_cond = _create_and_condition(automation, type_cond, auto_cond)
+                if and_cond is None:
+                    return None
+                for ptr in owned:
+                    _com_release(ptr)
+                owned.clear()
+                return and_cond
+            owned.clear()
+            return auto_cond
+
+        if type_id is not None and int(type_id) > 0 and parent_signature_usable(
+            signature
+        ):
+            return _create_control_type_condition(automation, int(type_id))
+        return None
+    finally:
+        for ptr in owned:
+            _com_release(ptr)
+
+
+def _resolve_ancestor_scope_element(
+    automation: ctypes.c_void_p,
+    window_root: ctypes.c_void_p,
+    parents: list[dict[str, str]],
+) -> tuple[ctypes.c_void_p, bool]:
+    """Return ``(scope_element, owned)`` — deepest usable ancestor, else window.
+
+    ``owned`` is True when the caller must ``_com_release`` the scope (a found
+    ancestor). Window root is never owned by this helper.
+    """
+    chain = _normalize_parents_chain(parents)
+    for sig in chain:
+        # Prefer named ancestors; AutomationId+type also scopes (e.g. tree_Control).
+        if not parent_signature_usable(sig) and not str(
+            sig.get("automation_id") or ""
+        ).strip():
+            continue
+        cond = _build_ancestor_scope_condition(automation, sig)
+        if cond is None:
+            continue
+        try:
+            found = _find_first_under(window_root, cond)
+        finally:
+            _com_release(cond)
+        if found is not None:
+            return found, True
+    return window_root, False
+
+
+def _collect_name_hits_under_root(
+    root: ctypes.c_void_p,
+    automation: ctypes.c_void_p,
+    name: str,
+    control_type_id: int | None,
+    *,
+    window_xywh: RectXywh | None,
+) -> list[tuple[RectXywh, str, str, str, list[dict[str, str]]]]:
+    """FindAll Name hits under ``root``; each hit includes its parents chain."""
+    target = str(name or "").strip()
+    if not target:
+        return []
+    type_cond: ctypes.c_void_p | None = None
+    name_cond: ctypes.c_void_p | None = None
+    and_cond: ctypes.c_void_p | None = None
+    found: ctypes.c_void_p | None = None
+    out: list[tuple[RectXywh, str, str, str, list[dict[str, str]]]] = []
+    try:
+        name_cond = _create_name_condition(automation, target)
+        if name_cond is None:
+            return []
+        query_cond: ctypes.c_void_p = name_cond
+        if control_type_id is not None and int(control_type_id) > 0:
+            type_cond = _create_control_type_condition(
+                automation, int(control_type_id)
+            )
+            if type_cond is None:
+                return []
+            and_cond = _create_and_condition(automation, type_cond, name_cond)
+            if and_cond is None:
+                return []
+            query_cond = and_cond
+
+        find_all = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        )(_com_vtable(root, _UIA_FIND_ALL + 1)[_UIA_FIND_ALL])
+        found_ptr = ctypes.c_void_p()
+        hr = find_all(
+            root,
+            _TREE_SCOPE_DESCENDANTS,
+            query_cond,
+            ctypes.byref(found_ptr),
+        )
+        if hr != _S_OK or not found_ptr:
+            return []
+        found = found_ptr
+        get_length = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_int),
+        )(_com_vtable(found, _UIA_ARRAY_GET_LENGTH + 1)[_UIA_ARRAY_GET_LENGTH])
+        get_element = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_void_p),
+        )(_com_vtable(found, _UIA_ARRAY_GET_ELEMENT + 1)[_UIA_ARRAY_GET_ELEMENT])
+        length = ctypes.c_int(0)
+        if get_length(found, ctypes.byref(length)) != _S_OK:
+            return []
+        hit_count = min(int(length.value), _NAME_FINDALL_MAX_HITS)
+        for index in range(hit_count):
+            elem_ptr = ctypes.c_void_p()
+            if get_element(found, index, ctypes.byref(elem_ptr)) != _S_OK or not elem_ptr:
+                continue
+            element = elem_ptr
+            try:
+                xywh = _positive_xywh_from_element(element, window_xywh)
+                if xywh is None:
+                    continue
+                _label, live_name, live_value = _element_label_parts(element)
+                ct = control_type_token_from_id(
+                    _element_control_type(element, cached=False)
+                )
+                parents = _element_parents_chain(automation, element)
+                out.append(
+                    (
+                        xywh,
+                        str(live_name or ""),
+                        str(live_value or ""),
+                        str(ct or ""),
+                        parents,
+                    )
+                )
+            finally:
+                _com_release(element)
+        return out
+    except Exception:
+        return []
+    finally:
+        _com_release(found)
+        _com_release(and_cond)
+        _com_release(name_cond)
+        _com_release(type_cond)
+
+
+def _find_uia_leaf_by_efp_path_impl(
+    hwnd: int,
+    name: str,
+    value: str,
+    control_type_id: int | None,
+    parents: list[dict[str, str]],
+) -> tuple[RectXywh, str, str, str] | None:
+    """Ancestor-scoped Name FindAll; keep unique Value/type match."""
+    target = str(name or "").strip()
+    if not int(hwnd or 0) or not target:
+        return None
+
+    ole32, initialized_here = _coinitialize_uia()
+    if ole32 is None:
+        return None
+
+    automation: ctypes.c_void_p | None = None
+    window_root: ctypes.c_void_p | None = None
+    scope: ctypes.c_void_p | None = None
+    scope_owned = False
+    try:
+        automation = _create_uia_automation()
+        if automation is None:
+            return None
+        window_root = _element_from_handle(automation, int(hwnd))
+        if window_root is None:
+            return None
+        scope, scope_owned = _resolve_ancestor_scope_element(
+            automation, window_root, parents
+        )
+        root_bounds = _element_bounding_xyxy(window_root)
+        window_xywh: RectXywh | None = None
+        if root_bounds is not None:
+            rx1, ry1, rx2, ry2 = (int(v) for v in root_bounds)
+            rw, rh = rx2 - rx1, ry2 - ry1
+            if rw > 0 and rh > 0:
+                window_xywh = (rx1, ry1, rw, rh)
+
+        hits = _collect_name_hits_under_root(
+            scope,
+            automation,
+            target,
+            control_type_id,
+            window_xywh=window_xywh,
+        )
+        target_value = str(value or "").strip()
+        matched: list[tuple[RectXywh, str, str, str]] = []
+        for bbox, live_name, live_value, live_ct, live_parents in hits:
+            if str(live_name or "").strip() != target:
+                continue
+            if target_value and str(live_value or "").strip():
+                if str(live_value or "").strip() != target_value:
+                    continue
+            if not parents_chains_agree(parents, live_parents):
+                continue
+            matched.append((bbox, live_name, live_value, live_ct))
+        if len(matched) != 1:
+            return None
+        return matched[0]
+    except Exception:
+        return None
+    finally:
+        if scope_owned:
+            _com_release(scope)
+        _com_release(window_root)
+        _com_release(automation)
+        if initialized_here:
+            try:
+                ole32.CoUninitialize()
+            except Exception:
+                pass
+
+
+def find_uia_leaf_by_efp_path(
+    hwnd: int,
+    name: str,
+    *,
+    value: str = "",
+    control_type_id: int | None = None,
+    parents: list[dict[str, str]] | None = None,
+    timeout_s: float = 2.5,
+) -> tuple[RectXywh, str, str, str] | None:
+    """Resolve a leaf under ``hwnd`` via ancestor-scoped Name FindAll + chain gate.
+
+    Finds the deepest usable recorded ancestor as search scope (falls back to the
+    window root), then Name(+ControlType) FindAll under that scope. Keeps the
+    hit only when exactly one match agrees on Value (when both sides expose it)
+    and ``parents_chains_agree`` with the recorded chain.
+
+    Returns ``(screen_xywh, live_name, live_value, control_type_token)`` or
+    ``None``. Marshals onto the UIA worker thread.
+    """
+    if os.name != "nt" or not int(hwnd or 0) or not str(name or "").strip():
+        return None
+    from src.recorder.uia_thread import uia_call
+
+    chain = _normalize_parents_chain(parents)
+    try:
+        result = uia_call(
+            _find_uia_leaf_by_efp_path_impl,
+            int(hwnd),
+            str(name),
+            str(value or ""),
+            int(control_type_id) if control_type_id is not None else None,
+            chain,
+            timeout_s=float(timeout_s),
+        )
+    except Exception:
+        return None
+    if (
+        isinstance(result, tuple)
+        and len(result) == 4
+        and isinstance(result[0], tuple)
+        and len(result[0]) == 4
+    ):
+        return result  # type: ignore[return-value]
+    return None
 
 
 def _element_set_focus(element: ctypes.c_void_p) -> bool:

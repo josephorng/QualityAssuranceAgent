@@ -1192,7 +1192,7 @@ async def test_resolve_mouse_point_merges_nearby_objects(monkeypatch: pytest.Mon
         assert "資料夾" in instruction
         return "「資料夾」圖示", 0, 0, ["「Chrome」圖示"], None, 0, None
 
-    def fake_filter(detections, anchor, nearby):
+    def fake_filter(detections, anchor, nearby, recorded_anchor=False, **_kwargs):
         captured_nearby["labels"] = list(nearby)
         return [detections[0]], []
 
@@ -1285,7 +1285,7 @@ async def test_find_mouse_point_parses_sync_before_vision(
         }
         return [1], ["shot.png"], [(1, np.zeros((10, 10, 3), dtype=np.uint8))], [det], timing
 
-    def fake_filter(detections, anchor, nearby):
+    def fake_filter(detections, anchor, nearby, recorded_anchor=False, **_kwargs):
         assert anchor == "目標"
         assert detections and detections[0].text == "目標"
         return [detections[0]], []
@@ -1492,7 +1492,10 @@ async def test_find_mouse_point_uses_vision_when_caption_hit_misses(
     )
     monkeypatch.setattr(
         "cua_mcp.select_mouse_target._filter_mouse_candidates",
-        lambda detections, _anchor, _nearby: ([detections[0]], []),
+        lambda detections, _anchor, _nearby, recorded_anchor=False, **_k: (
+            [detections[0]],
+            [],
+        ),
     )
 
     found = await find_mouse_point(
@@ -4332,7 +4335,7 @@ async def test_resolve_mouse_point_nearby_prefilter_skips_ollama(
     def fake_parse(instruction: str):
         return "文件", 0, 0, [], None, 0, None
 
-    def fake_filter(detections, anchor, nearby):
+    def fake_filter(detections, anchor, nearby, recorded_anchor=False, **_kwargs):
         return [wrong, correct], [landmark_mu, landmark_img]
 
     async def fail_ollama(*_args, **_kwargs):
@@ -4420,7 +4423,7 @@ async def test_resolve_mouse_point_does_not_run_function_describe(
     def fake_parse(instruction: str):
         return "搜尋欄位", 0, 0, [], None, 0, None
 
-    def fake_filter(detections, anchor, nearby):
+    def fake_filter(detections, anchor, nearby, recorded_anchor=False, **_kwargs):
         return [outlook, taskbar], []
 
     async def fake_ollama(anchor, candidates, image_paths, **_kwargs):
@@ -4507,7 +4510,7 @@ async def test_resolve_mouse_point_skips_describe_when_unique(
     def fake_parse(instruction: str):
         return "唯一按鈕", 0, 0, [], None, 0, None
 
-    def fake_filter(detections, anchor, nearby):
+    def fake_filter(detections, anchor, nearby, recorded_anchor=False, **_kwargs):
         return [only], []
 
     async def fail_describe(*_args, **_kwargs):
@@ -5233,7 +5236,7 @@ async def test_resolve_mouse_point_char_target_uses_span_center(
         assert "搜" in instruction
         return "「搜尋」文字", 0, 0, [], "搜", 0, None
 
-    def fake_filter(detections, anchor, nearby):
+    def fake_filter(detections, anchor, nearby, recorded_anchor=False, **_kwargs):
         return [detections[0]], []
 
     def fake_ocr_with_spans(_bgr, _bbox, **_kwargs):
@@ -5310,7 +5313,7 @@ async def test_resolve_mouse_point_scrollbar_track_percent(
         assert "60%" in instruction
         return "滾動條", 0, 0, [], None, 0, 60
 
-    def fake_filter(detections, anchor, nearby):
+    def fake_filter(detections, anchor, nearby, recorded_anchor=False, **_kwargs):
         return [detections[0]], []
 
     monkeypatch.setattr(
@@ -6559,43 +6562,28 @@ def test_anchor_suffix_and_uia_control_type_filter(
     assert _matches_landmark_fallback_type(text_box, "「開啟」按鈕")
     assert _matches_landmark_fallback_type(text_box, "「開啟」清單項目")
 
-    button = _detection_from_bbox(
-        (10, 10, 40, 16),
-        YOLO_CLASS_TEXT,
-        text="記事本",
-        source="uia",
-        uia_control_type="button",
-    )
-    text = _detection_from_bbox(
-        (100, 10, 40, 16),
-        YOLO_CLASS_TEXT,
-        text="記事本",
-        source="uia",
-        uia_control_type="text",
-    )
     hints = normalize_nearby_hints([])
+
+    def efp_path_button(name, value, type_id, parents):
+        return ((10, 10, 40, 16), "記事本", "", "button")
+
     chosen, reason = _try_uia_first_unique_select(
-        [button, text],
+        [],
         anchor="「記事本」按鈕",
         nearby_hints=hints,
         nearby_labels=[],
         nearby_phrases=[],
         filter_by_control_type=True,
+        control_type_token="button",
+        recorded_efp_name="記事本",
+        hub_source="uia_efp",
+        efp_path_lookup_fn=efp_path_button,
     )
-    assert reason == "hit"
-    assert chosen is button
+    assert reason == "efp_path_hit"
+    assert chosen is not None
+    assert chosen.uia_control_type == "button"
 
-    legacy, legacy_reason = _try_uia_first_unique_select(
-        [button],
-        anchor="「記事本」文字",
-        nearby_hints=hints,
-        nearby_labels=[],
-        nearby_phrases=[],
-        filter_by_control_type=False,
-    )
-    assert legacy_reason == "hit"
-    assert legacy is button
-
+    # Without EFP identity, UIA-first no longer Name-shortlists detections.
     only_text = _detection_from_bbox(
         (10, 40, 40, 16),
         YOLO_CLASS_TEXT,
@@ -6611,234 +6599,70 @@ def test_anchor_suffix_and_uia_control_type_filter(
         nearby_phrases=[],
         filter_by_control_type=True,
     )
-    assert fallback_reason == "hit"
-    assert fallback is only_text
-    assert any("control_type_fallback" in line for line in logs)
+    assert fallback is None
+    assert fallback_reason == "no_efp_identity"
 
 
 def test_try_uia_first_unique_select_hit_and_miss() -> None:
     from cua_mcp.select_mouse_target import _try_uia_first_unique_select
     from src.common.nearby_side import normalize_nearby_hints
 
-    unique = [
-        _detection_from_bbox(
-            (10, 10, 40, 20), YOLO_CLASS_TEXT, text="記事本", source="uia"
-        ),
-        _detection_from_bbox(
-            (100, 10, 40, 20), YOLO_CLASS_TEXT, text="Edge", source="uia"
-        ),
-    ]
     hints = normalize_nearby_hints([])
+    leaf = ((10, 10, 40, 20), "記事本", "", "text")
+
+    def efp_path(name, value, type_id, parents):
+        assert name == "記事本"
+        return leaf
+
     chosen, reason = _try_uia_first_unique_select(
-        unique,
+        [],
         anchor="「記事本」文字",
         nearby_hints=hints,
         nearby_labels=[],
         nearby_phrases=[],
+        recorded_efp_name="記事本",
+        recorded_efp_value="",
+        hub_source="uia_efp",
+        efp_path_lookup_fn=efp_path,
     )
-    assert reason == "hit"
+    assert reason == "efp_path_hit"
     assert chosen is not None
     assert chosen.text == "記事本"
 
-    dupes = [
-        _detection_from_bbox(
-            (10, 10, 40, 20), YOLO_CLASS_TEXT, text="記事本", source="uia"
-        ),
-        _detection_from_bbox(
-            (10, 50, 40, 20), YOLO_CLASS_TEXT, text="記事本", source="uia"
-        ),
-    ]
     chosen, reason = _try_uia_first_unique_select(
-        dupes,
+        [],
         anchor="「記事本」文字",
-        nearby_hints=normalize_nearby_hints(["在「Docker」文字的下面"]),
-        nearby_labels=["Docker"],
-        nearby_phrases=["在「Docker」文字的下面"],
+        nearby_hints=hints,
+        nearby_labels=[],
+        nearby_phrases=[],
+        recorded_efp_name="記事本",
+        recorded_efp_value="",
+        hub_source="uia_efp",
+        efp_path_lookup_fn=lambda *_a, **_k: None,
     )
     assert chosen is None
-    assert reason == "not_unique"
+    assert reason == "efp_path_miss"
 
 
-def test_try_uia_first_name_findall_recovers_unique_miss() -> None:
-    """Budgeted snapshot miss + legacy Name FindAll unique hit → UIA commit."""
+def test_try_uia_first_efp_path_recovers_unique_miss() -> None:
+    """Constellation/snapshot miss + ancestor-scoped path → efp_path_hit."""
     from cua_mcp.select_mouse_target import _try_uia_first_unique_select
     from src.common.nearby_side import normalize_nearby_hints
 
-    # Snapshot only has unrelated text — target truncated from budgeted walk.
-    snapshot = [
-        _detection_from_bbox(
-            (10, 10, 40, 16), YOLO_CLASS_TEXT, text="組織圖", source="uia"
-        ),
-    ]
     leaf_bbox = (228, 108, 125, 24)
-    calls: list[tuple[str, int | None]] = []
+    parents = [{"control_type": "tree", "name": "導覽"}]
+    calls: list[tuple] = []
 
-    def fake_name_findall(
-        name: str, control_type_id: int | None
-    ) -> list[tuple[tuple[int, int, int, int], str, str, str]]:
-        calls.append((name, control_type_id))
-        assert name == "龜速的網域 (3)"  # raw Name, not lookalike-folded
-        return [(leaf_bbox, "龜速的網域 (3)", "1", "tree_item")]
-
-    chosen, reason = _try_uia_first_unique_select(
-        snapshot,
-        anchor="龜速的網域 (3)|1",
-        nearby_hints=normalize_nearby_hints([]),
-        nearby_labels=[],
-        nearby_phrases=[],
-        filter_by_control_type=True,
-        control_type_token="text",
-        recorded_anchor=True,
-        name_findall_fn=fake_name_findall,
-    )
-    assert reason == "hit"
-    assert chosen is not None
-    assert chosen.bbox == leaf_bbox
-    assert "龜速的網域 (3)" in str(chosen.text or "")
-    assert calls == [("龜速的網域 (3)", None)]  # text token → no ControlType AND
-
-
-def test_try_uia_first_bring_into_view_recovers_with_refreshed_bbox() -> None:
-    """Snapshot miss + bring_into_view → name_findall_hit with refreshed bbox."""
-    from cua_mcp.select_mouse_target import _try_uia_first_unique_select
-    from src.common.nearby_side import normalize_nearby_hints
-
-    snapshot = [
-        _detection_from_bbox(
-            (10, 10, 40, 16), YOLO_CLASS_TEXT, text="組織圖", source="uia"
-        ),
-    ]
-    refreshed = (300, 200, 140, 28)
-    bring_calls: list[tuple[str, str, int | None]] = []
-    name_findall_calls: list[str] = []
-
-    def fake_bring(
-        name: str, value: str, control_type_id: int | None
-    ) -> tuple[tuple[int, int, int, int], str, str, str]:
-        bring_calls.append((name, value, control_type_id))
+    def efp_path(name, value, type_id, parents_arg):
+        calls.append((name, value, type_id, parents_arg))
         assert name == "龜速的網域 (3)"
         assert value == "1"
-        return (refreshed, "龜速的網域 (3)", "1", "tree_item")
-
-    def fake_name_findall(name: str, control_type_id: int | None):
-        name_findall_calls.append(name)
-        return [((1, 1, 10, 10), "龜速的網域 (3)", "1", "tree_item")]
+        assert parents_arg == parents
+        return (leaf_bbox, "龜速的網域 (3)", "1", "tree_item")
 
     chosen, reason = _try_uia_first_unique_select(
-        snapshot,
+        [],
         anchor="龜速的網域 (3)|1",
-        nearby_hints=normalize_nearby_hints([]),
-        nearby_labels=[],
-        nearby_phrases=[],
-        filter_by_control_type=True,
-        control_type_token="text",
-        recorded_anchor=True,
-        name_findall_fn=fake_name_findall,
-        bring_into_view_fn=fake_bring,
-    )
-    assert reason == "name_findall_hit"
-    assert chosen is not None
-    assert chosen.bbox == refreshed
-    assert "龜速的網域 (3)" in str(chosen.text or "")
-    assert bring_calls == [("龜速的網域 (3)", "1", None)]
-    assert name_findall_calls == []  # bring preferred over legacy FindAll
-
-
-def test_try_uia_first_snapshot_hit_skips_bring_into_view() -> None:
-    """Ordinary unique snapshot Name hit must not call bring_into_view."""
-    from cua_mcp.select_mouse_target import _try_uia_first_unique_select
-    from src.common.nearby_side import normalize_nearby_hints
-
-    leaf = _detection_from_bbox(
-        (50, 50, 80, 20),
-        YOLO_CLASS_TEXT,
-        text="空白活頁簿",
-        source="uia",
-    )
-    bring_calls: list[tuple[str, str, int | None]] = []
-
-    def fake_bring(
-        name: str, value: str, control_type_id: int | None
-    ) -> tuple[tuple[int, int, int, int], str, str, str] | None:
-        bring_calls.append((name, value, control_type_id))
-        return ((9, 9, 9, 9), "空白活頁簿", "", "list_item")
-
-    chosen, reason = _try_uia_first_unique_select(
-        [leaf],
-        anchor="空白活頁簿",
-        nearby_hints=normalize_nearby_hints([]),
-        nearby_labels=[],
-        nearby_phrases=[],
-        bring_into_view_fn=fake_bring,
-    )
-    assert reason == "hit"
-    assert chosen is leaf
-    assert bring_calls == []
-
-
-def test_try_uia_first_bring_into_view_skips_mismatched_efp_value() -> None:
-    """Details-cell EFP Value must not filter list_item Name recovery."""
-    from cua_mcp.select_mouse_target import _try_uia_first_unique_select
-    from src.common.nearby_side import normalize_nearby_hints
-    from src.recorder.uia_input_boxes import _UIA_LISTITEM_CONTROL_TYPE_ID
-
-    snapshot = [
-        _detection_from_bbox(
-            (10, 10, 40, 16), YOLO_CLASS_TEXT, text="組織圖", source="uia"
-        ),
-    ]
-    refreshed = (400, 500, 120, 24)
-    bring_calls: list[tuple[str, str, int | None]] = []
-
-    def fake_bring(
-        name: str, value: str, control_type_id: int | None
-    ) -> tuple[tuple[int, int, int, int], str, str, str]:
-        bring_calls.append((name, value, control_type_id))
-        return (refreshed, "活頁簿1.xlsx", "", "list_item")
-
-    chosen, reason = _try_uia_first_unique_select(
-        snapshot,
-        anchor="活頁簿1.xlsx",
-        nearby_hints=normalize_nearby_hints([]),
-        nearby_labels=[],
-        nearby_phrases=[],
-        filter_by_control_type=True,
-        control_type_token="list_item",
-        recorded_anchor=True,
-        recorded_efp_name="名稱",
-        recorded_efp_value="活頁簿1.xlsx",
-        bring_into_view_fn=fake_bring,
-    )
-    assert reason == "name_findall_hit"
-    assert chosen is not None
-    assert chosen.bbox == refreshed
-    assert bring_calls == [
-        ("活頁簿1.xlsx", "", _UIA_LISTITEM_CONTROL_TYPE_ID)
-    ]
-
-
-def test_try_uia_first_bring_into_view_keeps_matching_efp_value() -> None:
-    """When EFP Name equals hub Name, borrow EFP Value for disambiguation."""
-    from cua_mcp.select_mouse_target import _try_uia_first_unique_select
-    from src.common.nearby_side import normalize_nearby_hints
-
-    snapshot = [
-        _detection_from_bbox(
-            (10, 10, 40, 16), YOLO_CLASS_TEXT, text="組織圖", source="uia"
-        ),
-    ]
-    refreshed = (228, 108, 125, 24)
-    bring_calls: list[tuple[str, str, int | None]] = []
-
-    def fake_bring(
-        name: str, value: str, control_type_id: int | None
-    ) -> tuple[tuple[int, int, int, int], str, str, str]:
-        bring_calls.append((name, value, control_type_id))
-        return (refreshed, "龜速的網域 (3)", "1", "tree_item")
-
-    chosen, reason = _try_uia_first_unique_select(
-        snapshot,
-        anchor="龜速的網域 (3)",
         nearby_hints=normalize_nearby_hints([]),
         nearby_labels=[],
         nearby_phrases=[],
@@ -6847,47 +6671,47 @@ def test_try_uia_first_bring_into_view_keeps_matching_efp_value() -> None:
         recorded_anchor=True,
         recorded_efp_name="龜速的網域 (3)",
         recorded_efp_value="1",
-        bring_into_view_fn=fake_bring,
+        hub_source="uia_efp",
+        recorded_efp_parents=parents,
+        efp_path_lookup_fn=efp_path,
     )
-    assert reason == "name_findall_hit"
+    assert reason == "efp_path_hit"
     assert chosen is not None
-    assert chosen.bbox == refreshed
-    assert bring_calls == [("龜速的網域 (3)", "1", None)]
+    assert chosen.bbox == leaf_bbox
+    assert "龜速的網域 (3)" in str(chosen.text or "")
+    assert len(calls) == 1
 
 
-def test_try_uia_first_name_findall_duplicate_stays_not_unique() -> None:
-    """Name FindAll must not silent-pick the first of two same-Name hits."""
+def test_try_uia_first_efp_path_parents_chain_gate() -> None:
+    """Constellation hit rejected when live parents disagree; efp_path may still hit."""
     from cua_mcp.select_mouse_target import _try_uia_first_unique_select
     from src.common.nearby_side import normalize_nearby_hints
 
-    snapshot = [
-        _detection_from_bbox(
-            (10, 10, 40, 16), YOLO_CLASS_TEXT, text="組織圖", source="uia"
-        ),
-    ]
+    parents = [{"control_type": "tree", "name": "導覽"}]
+    leaf = ((64, 290, 34, 32), "文件 (已釘選)", "文件 (已釘選)", "tree_item")
 
-    def fake_name_findall(
-        name: str, control_type_id: int | None
-    ) -> list[tuple[tuple[int, int, int, int], str, str, str]]:
-        return [
-            ((100, 100, 80, 20), "下載", "", "text"),
-            ((100, 140, 80, 20), "下載", "", "text"),
-        ]
+    def efp_path(name, value, type_id, parents_arg):
+        return leaf
 
     chosen, reason = _try_uia_first_unique_select(
-        snapshot,
-        anchor="「下載」文字",
+        [],
+        anchor="文件",
         nearby_hints=normalize_nearby_hints([]),
         nearby_labels=[],
         nearby_phrases=[],
-        name_findall_fn=fake_name_findall,
+        recorded_efp_name="文件 (已釘選)",
+        recorded_efp_value="文件 (已釘選)",
+        hub_source="uia_efp",
+        recorded_efp_parents=parents,
+        efp_path_lookup_fn=efp_path,
     )
-    assert chosen is None
-    assert reason == "not_unique"
+    assert reason == "efp_path_hit"
+    assert chosen is not None
+    assert chosen.cx == 64 + 34 // 2
 
 
 def test_try_uia_first_unique_select_requires_exact_text() -> None:
-    """UIA path rejects fuzzy cousins (更多活頁簿 ≠ 空白活頁簿)."""
+    """Without efp_path / EFP identity, UIA-first does not Name-shortlist."""
     from cua_mcp.select_mouse_target import _try_uia_first_unique_select
     from src.common.nearby_side import normalize_nearby_hints
 
@@ -6895,9 +6719,6 @@ def test_try_uia_first_unique_select_requires_exact_text() -> None:
         _detection_from_bbox(
             (10, 10, 80, 20), YOLO_CLASS_TEXT, text="更多活頁簿", source="uia"
         ),
-        _detection_from_bbox(
-            (10, 40, 40, 20), YOLO_CLASS_TEXT, text="更多範本", source="uia"
-        ),
     ]
     hints = normalize_nearby_hints([])
     chosen, reason = _try_uia_first_unique_select(
@@ -6908,124 +6729,107 @@ def test_try_uia_first_unique_select_requires_exact_text() -> None:
         nearby_phrases=[],
     )
     assert chosen is None
-    assert reason == "no_anchor"
+    assert reason == "no_efp_identity"
 
-    exact = [
-        _detection_from_bbox(
-            (10, 10, 80, 20), YOLO_CLASS_TEXT, text="空白活頁簿", source="uia"
-        ),
-    ]
     chosen, reason = _try_uia_first_unique_select(
-        exact,
+        [],
         anchor="「空白活頁簿」文字",
         nearby_hints=hints,
         nearby_labels=[],
         nearby_phrases=[],
+        recorded_efp_name="空白活頁簿",
+        hub_source="uia_efp",
+        efp_path_lookup_fn=lambda *_a, **_k: (
+            (10, 10, 80, 20),
+            "空白活頁簿",
+            "",
+            "text",
+        ),
     )
-    assert reason == "hit"
+    assert reason == "efp_path_hit"
     assert chosen is not None
     assert chosen.text == "空白活頁簿"
 
 
 def test_try_uia_first_unique_select_name_then_value_tree_and_table() -> None:
-    """Name-primary match: transient Value optional; Value breaks table ties."""
+    """efp_path carries Name/Value identity (tree transient Value; table Value)."""
     from cua_mcp.select_mouse_target import _try_uia_first_unique_select
     from src.common.nearby_side import normalize_nearby_hints
 
     hints = normalize_nearby_hints([])
 
-    # Tree item: recorded Name|1, live Name only → hit.
-    tree_live = [
-        _detection_from_bbox(
-            (10, 10, 80, 20),
-            YOLO_CLASS_TEXT,
-            text="龜速的網域 (3)",
-            source="uia",
-        ),
-        _detection_from_bbox(
-            (10, 40, 80, 20),
-            YOLO_CLASS_TEXT,
-            text="新竹公司 (17)",
-            source="uia",
-        ),
-    ]
+    def tree_path(name, value, type_id, parents):
+        assert name == "龜速的網域 (3)"
+        assert value == "1"
+        return ((10, 10, 80, 20), "龜速的網域 (3)", "", "text")
+
     chosen, reason = _try_uia_first_unique_select(
-        tree_live,
+        [],
         anchor="龜速的網域 (3)|1",
         nearby_hints=hints,
         nearby_labels=[],
         nearby_phrases=[],
         recorded_anchor=True,
+        recorded_efp_name="龜速的網域 (3)",
+        recorded_efp_value="1",
+        hub_source="uia_efp",
+        efp_path_lookup_fn=tree_path,
     )
-    assert reason == "hit"
+    assert reason == "efp_path_hit"
     assert chosen is not None
-    assert chosen.text == "龜速的網域 (3)"
+    assert "龜速的網域 (3)" in str(chosen.text or "")
 
-    # Table cells: shared Name, Value picks the row.
-    table_live = [
-        _detection_from_bbox(
-            (10, 10, 120, 20),
-            YOLO_CLASS_TEXT,
-            text="電腦名稱|lannie-Ubuntu26",
-            source="uia",
-        ),
-        _detection_from_bbox(
-            (10, 40, 120, 20),
-            YOLO_CLASS_TEXT,
-            text="電腦名稱|Red-Hat10",
-            source="uia",
-        ),
-    ]
+    def table_path(name, value, type_id, parents):
+        assert name == "電腦名稱"
+        assert value == "lannie-Ubuntu26"
+        return ((10, 10, 120, 20), "電腦名稱", "lannie-Ubuntu26", "text")
+
     chosen, reason = _try_uia_first_unique_select(
-        table_live,
+        [],
         anchor="電腦名稱|lannie-Ubuntu26",
         nearby_hints=hints,
         nearby_labels=[],
         nearby_phrases=[],
         recorded_anchor=True,
+        recorded_efp_name="電腦名稱",
+        recorded_efp_value="lannie-Ubuntu26",
+        hub_source="uia_efp",
+        efp_path_lookup_fn=table_path,
     )
-    assert reason == "hit"
+    assert reason == "efp_path_hit"
     assert chosen is not None
-    assert chosen.text == "電腦名稱|lannie-Ubuntu26"
+    assert "lannie-Ubuntu26" in str(chosen.text or "")
 
-    # Guardrail: unique Name whose Value disagrees with the query → miss.
-    disagree = [
-        _detection_from_bbox(
-            (10, 10, 120, 20),
-            YOLO_CLASS_TEXT,
-            text="電腦名稱|HeaderOnlyValue",
-            source="uia",
-        ),
-    ]
     chosen, reason = _try_uia_first_unique_select(
-        disagree,
+        [],
         anchor="電腦名稱|CellValue",
         nearby_hints=hints,
         nearby_labels=[],
         nearby_phrases=[],
         recorded_anchor=True,
+        recorded_efp_name="電腦名稱",
+        recorded_efp_value="CellValue",
+        hub_source="uia_efp",
+        efp_path_lookup_fn=lambda *_a, **_k: None,
     )
     assert chosen is None
-    assert reason == "no_anchor"
+    assert reason == "efp_path_miss"
 
 
 def test_try_uia_first_unique_select_name_then_value_with_control_type() -> None:
-    """Control-type pool still uses Name-then-Value for the structured anchor."""
+    """efp_path uses control_type_id from the structured control token."""
     from cua_mcp.select_mouse_target import _try_uia_first_unique_select
     from src.common.nearby_side import normalize_nearby_hints
 
     hints = normalize_nearby_hints([])
-    dets = [
-        _detection_from_bbox(
-            (10, 10, 80, 20),
-            YOLO_CLASS_TEXT,
-            text="龜速的網域 (3)",
-            source="uia",
-            uia_control_type="text",
-        ),
-    ]
+    seen: list[int | None] = []
+
+    def efp_path(name, value, type_id, parents):
+        seen.append(type_id)
+        return ((10, 10, 80, 20), "龜速的網域 (3)", "1", "text")
+
     chosen, reason = _try_uia_first_unique_select(
-        dets,
+        [],
         anchor="龜速的網域 (3)|1",
         nearby_hints=hints,
         nearby_labels=[],
@@ -7033,10 +6837,15 @@ def test_try_uia_first_unique_select_name_then_value_with_control_type() -> None
         filter_by_control_type=True,
         control_type_token="text",
         recorded_anchor=True,
+        recorded_efp_name="龜速的網域 (3)",
+        recorded_efp_value="1",
+        hub_source="uia_efp",
+        efp_path_lookup_fn=efp_path,
     )
-    assert reason == "hit"
+    assert reason == "efp_path_hit"
     assert chosen is not None
-    assert chosen.text == "龜速的網域 (3)"
+    assert "龜速的網域 (3)" in str(chosen.text or "")
+    assert seen  # control_type_id_from_token("text") may be None
 
 
 def test_pick_captured_monitor_for_window_prefers_center(
@@ -7314,6 +7123,11 @@ async def test_find_mouse_point_uia_first_hit_skips_ocr(
     monkeypatch.setattr(smt, "_finish_deferred_ocr_pendings", fake_finish)
     monkeypatch.setattr(
         smt,
+        "_try_uia_first_unique_select",
+        lambda *_a, **_k: (uia_det, "efp_path_hit"),
+    )
+    monkeypatch.setattr(
+        smt,
         "parse_mouse_target_instruction",
         lambda _i: ("「記事本」文字", 0, 0, [], None, 0, None),
     )
@@ -7332,11 +7146,15 @@ async def test_find_mouse_point_uia_first_hit_skips_ocr(
         )(),
     )
 
-    found = await smt.find_mouse_point("將滑鼠移到「記事本」文字")
+    found = await smt.find_mouse_point(
+        "將滑鼠移到「記事本」文字",
+        recorded_efp_name="記事本",
+        hub_source="uia_efp",
+    )
     assert found is not None
     gx, gy, meta = found
     assert (gx, gy) == (uia_det.cx, uia_det.cy)
-    assert meta["selection_method"] == "uia_first_unique"
+    assert meta["selection_method"] == "efp_path_hit"
     assert meta["timing"]["ocr_s"] == 0.0
     assert meta["timing"].get("uia_first_hit") is True
     assert finish_calls == []
@@ -7546,12 +7364,10 @@ def _quiet_run_manager() -> object:
 
 
 @pytest.mark.asyncio
-async def test_yolo_ocr_replay_overlaps_uia_walk_and_repairs(
+async def test_yolo_ocr_replay_skips_findall_repair(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """（YOLO+OCR）replay starts FindAll before OCR returns, then may repair."""
-    import threading
-
+    """Phase 5: （YOLO+OCR）never arms budgeted FindAll YOLO→UIA repair."""
     import numpy as np
 
     from cua_mcp import select_mouse_target as smt
@@ -7560,21 +7376,17 @@ async def test_yolo_ocr_replay_overlaps_uia_walk_and_repairs(
         bind_uia_replay_repairs,
     )
 
-    snapshot_entered = threading.Event()
-    capture_entered = threading.Event()
-    calls = {"repair": 0}
+    ocr = _detection_from_bbox(
+        (10, 20, 30, 14), YOLO_CLASS_TEXT, text="文件", source="ocr"
+    )
+    repair_calls: list[str] = []
+    snapshot_calls: list[str] = []
 
     def fake_snapshot(_click_window):
-        snapshot_entered.set()
-        assert capture_entered.wait(2)
+        snapshot_calls.append("walk")
         return None
 
     def fake_capture(*_a, **_k):
-        assert snapshot_entered.wait(2)
-        capture_entered.set()
-        ocr = _detection_from_bbox(
-            (10, 20, 30, 14), YOLO_CLASS_TEXT, text="文件", source="ocr"
-        )
         timing = {
             "capture_s": 0.01,
             "yolo_s": 0.1,
@@ -7589,10 +7401,8 @@ async def test_yolo_ocr_replay_overlaps_uia_walk_and_repairs(
         frame = np.zeros((40, 40, 3), dtype=np.uint8)
         return [1], ["shot.png"], [(1, frame)], [ocr], timing
 
-    def fake_attempt(_request, _click_window, uia_boxes, ocr_boxes, **_kwargs):
-        calls["repair"] += 1
-        assert uia_boxes == []
-        assert ocr_boxes and ocr_boxes[0][1] == "文件"
+    def fake_attempt(*_a, **_k):
+        repair_calls.append("repair")
         return 11, 22, {"target_text": "文件"}
 
     monkeypatch.setattr(smt, "_live_uia_snapshot_for_click_window", fake_snapshot)
@@ -7622,178 +7432,11 @@ async def test_yolo_ocr_replay_overlaps_uia_walk_and_repairs(
                 },
             )
     assert found is not None
-    assert found[0:2] == (11, 22)
-    assert calls["repair"] == 1
+    assert found[0:2] == (ocr.cx, ocr.cy)
+    assert repair_calls == []
+    assert snapshot_calls == []
     phases = found[2]["timing"]["phases"]
-    assert any(phase.get("name") == "uia_replay_repair" for phase in phases)
-
-
-@pytest.mark.asyncio
-async def test_uia_replay_repair_unique_yolo_subtarget(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Same-run repair hit + one YOLO icon inside the UIA box → click the icon."""
-    import numpy as np
-
-    from cua_mcp import select_mouse_target as smt
-    from src.recorder.uia_replay_repair import (
-        UiaReplayRepairRequest,
-        bind_uia_replay_repairs,
-    )
-
-    expand_icon = _detection_from_bbox(
-        (14, 14, 12, 12),
-        YOLO_CLASS_ELEMENT,
-        icons=[{"chinese_id": "展開節點"}],
-        source="yolo",
-    )
-
-    def fake_snapshot(_click_window):
-        return None
-
-    def fake_capture(*_a, **_k):
-        timing = {
-            "capture_s": 0.01,
-            "yolo_s": 0.1,
-            "line_s": 0.0,
-            "uia_input_s": 0.0,
-            "uia_scrollbar_s": 0.0,
-            "uia_text_s": 0.0,
-            "ocr_s": 0.2,
-            "icon_ocr_retry_s": 0.0,
-            "total_s": 0.31,
-        }
-        frame = np.zeros((80, 160, 3), dtype=np.uint8)
-        return [1], ["shot.png"], [(1, frame)], [expand_icon], timing
-
-    def fake_attempt(_request, _click_window, _uia_boxes, _ocr_boxes, **_kwargs):
-        return 70, 24, {
-            "selection_method": "uia_replay_repair",
-            "target_kind": "text",
-            "target_text": "龜速的網域|1",
-            "target_bbox": {"x": 10, "y": 10, "w": 120, "h": 28},
-            "image_center": {"x": 70, "y": 24},
-            "resolved_center": {"x": 70, "y": 24},
-        }
-
-    monkeypatch.setattr(smt, "_live_uia_snapshot_for_click_window", fake_snapshot)
-    monkeypatch.setattr(smt, "_capture_and_detect_mouse_candidates", fake_capture)
-    monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
-    monkeypatch.setattr(
-        "src.recorder.uia_replay_repair.attempt_uia_replay_repair",
-        fake_attempt,
-    )
-    request = UiaReplayRepairRequest(
-        recording_dir=Path("."),
-        event_index=3,
-        side="click",
-        recorded_bbox=(14, 14, 12, 12),
-        recorded_text="展開節點",
-        recorded_window_xywh=(0, 0, 200, 200),
-        recorded_is_icon=True,
-    )
-    with bind_uia_replay_repairs([request]):
-        with smt.require_similarity_match():
-            found = await smt.find_mouse_point(
-                "（YOLO+OCR）將滑鼠移到「展開節點」圖示，並點擊滑鼠一下。",
-                click_window={
-                    "hwnd": 5,
-                    "title": "資產",
-                    "process_name": "app.exe",
-                    "rect": [0, 0, 200, 200],
-                },
-            )
-    assert found is not None
-    assert found[0:2] == (expand_icon.cx, expand_icon.cy)
-    assert found[2]["selection_method"] == "uia_yolo_subtarget"
-    phases = found[2]["timing"]["phases"]
-    assert any(phase.get("name") == "uia_yolo_subtarget" for phase in phases)
-
-
-@pytest.mark.asyncio
-async def test_uia_replay_repair_ambiguous_yolo_subtarget_keeps_uia(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Same-run repair with two in-box YOLO matches → keep UIA repair center."""
-    import numpy as np
-
-    from cua_mcp import select_mouse_target as smt
-    from src.recorder.uia_replay_repair import (
-        UiaReplayRepairRequest,
-        bind_uia_replay_repairs,
-    )
-
-    icon_a = _detection_from_bbox(
-        (14, 14, 12, 12),
-        YOLO_CLASS_ELEMENT,
-        icons=[{"chinese_id": "展開節點"}],
-        source="yolo",
-    )
-    icon_b = _detection_from_bbox(
-        (90, 14, 12, 12),
-        YOLO_CLASS_ELEMENT,
-        icons=[{"chinese_id": "展開節點"}],
-        source="yolo",
-    )
-
-    def fake_snapshot(_click_window):
-        return None
-
-    def fake_capture(*_a, **_k):
-        timing = {
-            "capture_s": 0.01,
-            "yolo_s": 0.1,
-            "line_s": 0.0,
-            "uia_input_s": 0.0,
-            "uia_scrollbar_s": 0.0,
-            "uia_text_s": 0.0,
-            "ocr_s": 0.2,
-            "icon_ocr_retry_s": 0.0,
-            "total_s": 0.31,
-        }
-        frame = np.zeros((80, 160, 3), dtype=np.uint8)
-        return [1], ["shot.png"], [(1, frame)], [icon_a, icon_b], timing
-
-    def fake_attempt(_request, _click_window, _uia_boxes, _ocr_boxes, **_kwargs):
-        return 70, 24, {
-            "selection_method": "uia_replay_repair",
-            "target_kind": "text",
-            "target_text": "龜速的網域|1",
-            "target_bbox": {"x": 10, "y": 10, "w": 120, "h": 28},
-            "image_center": {"x": 70, "y": 24},
-            "resolved_center": {"x": 70, "y": 24},
-        }
-
-    monkeypatch.setattr(smt, "_live_uia_snapshot_for_click_window", fake_snapshot)
-    monkeypatch.setattr(smt, "_capture_and_detect_mouse_candidates", fake_capture)
-    monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
-    monkeypatch.setattr(
-        "src.recorder.uia_replay_repair.attempt_uia_replay_repair",
-        fake_attempt,
-    )
-    request = UiaReplayRepairRequest(
-        recording_dir=Path("."),
-        event_index=4,
-        side="click",
-        recorded_bbox=(14, 14, 12, 12),
-        recorded_text="展開節點",
-        recorded_window_xywh=(0, 0, 200, 200),
-        recorded_is_icon=True,
-    )
-    with bind_uia_replay_repairs([request]):
-        with smt.require_similarity_match():
-            found = await smt.find_mouse_point(
-                "（YOLO+OCR）將滑鼠移到「展開節點」圖示，並點擊滑鼠一下。",
-                click_window={
-                    "hwnd": 5,
-                    "title": "資產",
-                    "process_name": "app.exe",
-                    "rect": [0, 0, 200, 200],
-                },
-            )
-    assert found is not None
-    assert found[0:2] == (70, 24)
-    assert found[2]["selection_method"] == "uia_replay_repair"
+    assert not any(phase.get("name") == "uia_replay_repair" for phase in phases)
 
 
 @pytest.mark.asyncio
@@ -7870,7 +7513,6 @@ async def test_uia_instruction_does_not_replay_repair(
     assert found is not None
     assert found[0:2] == (target.cx, target.cy)
     assert found[2]["selection_method"] == "uia_first_unique"
-
 
 def test_yolo_subtargets_inside_uia_filters_and_matches() -> None:
     from cua_mcp.select_mouse_target import _yolo_subtargets_inside_uia
@@ -8167,6 +7809,11 @@ async def test_uia_hit_offset_efp_synth_when_in_hub_pool_empty(
     )
     monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", fake_finish)
     monkeypatch.setattr(smt, "_probe_efp_name_value_at", fake_probe)
+    monkeypatch.setattr(
+        smt,
+        "_verify_geometry_candidates_with_efp",
+        lambda *_a, **_k: (None, (synth_x, synth_y), "synth_hit"),
+    )
     monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
 
     fallback = YoloOcrMoveFallback(
@@ -8189,6 +7836,7 @@ async def test_uia_hit_offset_efp_synth_when_in_hub_pool_empty(
             control_type="list_item",
             recorded_efp_name="文件1",
             recorded_efp_value="",
+            hub_source="uia_efp",
         )
     assert found is not None
     assert found[0:2] == (synth_x, synth_y)
@@ -8695,10 +8343,10 @@ async def test_uia_hit_with_fallback_ambiguous_keeps_uia_center(
 
 
 @pytest.mark.asyncio
-async def test_findall_efp_hit_coreinput_intersect_keeps_findall_center(
+async def test_uia_efp_hit_coreinput_soft_miss_keeps_uia_center(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """FindAll∩CoreInput gate; OCR miss must not click pane center."""
+    """Verified uia_efp hub + CoreInput EFP soft-miss must keep hub center."""
     import numpy as np
 
     from cua_mcp import select_mouse_target as smt
@@ -8769,7 +8417,7 @@ async def test_findall_efp_hit_coreinput_intersect_keeps_findall_center(
     monkeypatch.setattr(
         smt,
         "_try_uia_first_unique_select",
-        lambda *_a, **_k: (uia_leaf, "hit"),
+        lambda *_a, **_k: (uia_leaf, "efp_path_hit"),
     )
     monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", fake_finish)
     monkeypatch.setattr(
@@ -8793,7 +8441,7 @@ async def test_findall_efp_hit_coreinput_intersect_keeps_findall_center(
 
     fallback = YoloOcrMoveFallback(
         instruction="（YOLO+OCR）將滑鼠移到「控制台」文字，並點擊滑鼠一下。",
-        hub_source="findall",
+        hub_source="uia_efp",
     )
     with bind_yolo_ocr_fallbacks([fallback]):
         found = await smt.find_mouse_point(
@@ -8807,22 +8455,22 @@ async def test_findall_efp_hit_coreinput_intersect_keeps_findall_center(
             vision_mode="uia",
             anchor_text="控制台 系統 12 天前",
             control_type="button",
-            hub_source="findall",
+            hub_source="uia_efp",
             recorded_efp_name="CoreInput",
             recorded_efp_value="",
         )
     assert found is not None
-    # Must keep FindAll leaf center — not CoreInput pane [1091, 454].
+    # Must keep efp_path hub center — not CoreInput pane [1091, 454].
     assert found[0:2] == (uia_leaf.cx, uia_leaf.cy)
-    assert found[2]["selection_method"] == "uia_first_unique"
+    assert found[2]["selection_method"] == "efp_path_hit"
     assert found[1] != 454
 
 
 @pytest.mark.asyncio
-async def test_findall_efp_soft_miss_empty_pool_keeps_uia_center(
+async def test_uia_efp_soft_miss_empty_pool_keeps_uia_center(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """FindAll leaf + poisoned CoreInput EFP + empty in-hub YOLO → keep FindAll."""
+    """uia_efp hub + poisoned CoreInput EFP + empty in-hub YOLO → keep hub."""
     import numpy as np
 
     from cua_mcp import select_mouse_target as smt
@@ -8871,14 +8519,14 @@ async def test_findall_efp_soft_miss_empty_pool_keeps_uia_center(
     monkeypatch.setattr(
         smt,
         "_try_uia_first_unique_select",
-        lambda *_a, **_k: (uia_leaf, "hit"),
+        lambda *_a, **_k: (uia_leaf, "landmark_efp_hit"),
     )
     monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", fake_finish)
     monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
 
     fallback = YoloOcrMoveFallback(
         instruction="（YOLO+OCR）將滑鼠移到「控制台」文字，並點擊滑鼠一下。",
-        hub_source="findall",
+        hub_source="uia_efp",
     )
     with bind_yolo_ocr_fallbacks([fallback]):
         found = await smt.find_mouse_point(
@@ -8892,13 +8540,13 @@ async def test_findall_efp_soft_miss_empty_pool_keeps_uia_center(
             vision_mode="uia",
             anchor_text="控制台 系統 12 天前",
             control_type="button",
-            hub_source="findall",
+            hub_source="uia_efp",
             recorded_efp_name="CoreInput",
             recorded_efp_value="",
         )
     assert found is not None
     assert found[0:2] == (uia_leaf.cx, uia_leaf.cy)
-    assert found[2]["selection_method"] == "uia_first_unique"
+    assert found[2]["selection_method"] == "landmark_efp_hit"
     # Initial deferred YOLO + EMPTY_IN_HUB_YOLO_MAX_EXTRA recaptures.
     assert len(finish_calls) == 1 + smt.EMPTY_IN_HUB_YOLO_MAX_EXTRA
 
@@ -9070,7 +8718,7 @@ async def test_empty_in_hub_yolo_retry_then_unique_box(
 
     fallback = YoloOcrMoveFallback(
         instruction="（YOLO+OCR）將滑鼠移到「控制台」文字，並點擊滑鼠一下。",
-        hub_source="findall",
+        hub_source="uia_efp",
     )
     with bind_yolo_ocr_fallbacks([fallback]):
         found = await smt.find_mouse_point(
@@ -9084,7 +8732,7 @@ async def test_empty_in_hub_yolo_retry_then_unique_box(
             vision_mode="uia",
             anchor_text="控制台 系統 12 天前",
             control_type="button",
-            hub_source="findall",
+            hub_source="uia_efp",
         )
     assert found is not None
     assert found[0:2] == (130, 116)  # center of twin_box
@@ -9664,6 +9312,11 @@ async def test_uia_empty_constellation_desktop_uses_ocr_fallback(
     monkeypatch.setattr(smt, "_grab_selected_monitors", fake_grab)
     monkeypatch.setattr(smt, "_uia_only_detections_for_click_window", fake_uia)
     monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", fake_finish)
+    monkeypatch.setattr(
+        smt,
+        "_try_uia_first_unique_select",
+        lambda *_a, **_k: (None, "landmark_efp_miss"),
+    )
     monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
     monkeypatch.setattr(
         "src.recorder.window_snapshot.ensure_recorded_click_window_on_screen",
@@ -9706,9 +9359,11 @@ async def test_uia_empty_constellation_desktop_uses_ocr_fallback(
             landmark_geometry=landmark_geometry,
             recorded_efp_name="WinMaster7 Console",
             recorded_efp_value="",
+            hub_source="uia_efp",
         )
-    assert snapshots == [1, 1]
-    assert finish_calls == ["yolo"]
+    # Phase 4: no budgeted FindAll snapshot for uia_efp identity.
+    assert snapshots == []
+    assert "yolo" in finish_calls
     assert found is not None
     assert found[2]["target_text"] == "WinMaster7 Console"
     assert found[2]["timing"]["vision_path"] == "yolo_ocr"

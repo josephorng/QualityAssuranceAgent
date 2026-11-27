@@ -3662,107 +3662,33 @@ def _detection_to_dict(
     return payload
 
 
-def _attach_findall_hub_parent(
-    candidates: list[dict[str, Any]],
-    *,
-    element_from_point: dict[str, Any] | None,
-    monitor_offset: tuple[int, int],
-) -> None:
-    """Attach ``hub_parent`` on FindAll primary ``candidates[0]`` (in place).
-
-    Reuses press-time EFP ``parent`` when the primary soft-agrees with EFP and
-    the press point lies in the primary box; otherwise probes parent at the
-    primary screen center.
-    """
-    if not candidates:
-        return
-    primary = candidates[0]
-    if not isinstance(primary, dict):
-        return
-    if str(primary.get("source") or "").strip().lower() != "uia":
-        return
-    from src.recorder.uia_input_boxes import (
-        _normalize_parent_signature,
-        ocr_uia_labels_soft_agree,
-        parent_signature_at_point,
-        resolve_usable_uia_probe_label,
-    )
-
-    efp = element_from_point if isinstance(element_from_point, dict) else None
-    efp_parent = (
-        _normalize_parent_signature(efp.get("parent")) if efp is not None else {}
-    )
-    reuse = False
-    if efp is not None and efp_parent:
-        efp_name = str(efp.get("name") or "").strip()
-        efp_value = str(efp.get("value") or "").strip()
-        efp_label = resolve_usable_uia_probe_label(name=efp_name, value=efp_value)
-        primary_text = _visible_text(primary.get("text"))
-        label_ok = bool(efp_label) and (
-            primary_text.casefold() == efp_label.casefold()
-            or ocr_uia_labels_soft_agree(primary_text, efp_label)
-        )
-        center = primary.get("center")
-        bbox = primary.get("bbox")
-        press_in_box = False
-        if (
-            isinstance(bbox, (list, tuple))
-            and len(bbox) == 4
-            and isinstance(efp.get("bbox"), (list, tuple))
-            and len(efp.get("bbox")) == 4
-        ):
-            try:
-                ex, ey, ew, eh = (int(v) for v in efp["bbox"][:4])
-                press_cx = ex + ew // 2
-                press_cy = ey + eh // 2
-                left, top = int(monitor_offset[0]), int(monitor_offset[1])
-                local_px = press_cx - left
-                local_py = press_cy - top
-                press_in_box = point_in_rect_xywh(
-                    local_px, local_py, tuple(int(v) for v in bbox[:4])
-                )
-            except (TypeError, ValueError):
-                press_in_box = False
-        if not press_in_box and isinstance(center, (list, tuple)) and len(center) >= 2:
-            # Centers within ~24px count as the same leaf for parent reuse.
-            try:
-                left, top = int(monitor_offset[0]), int(monitor_offset[1])
-                if isinstance(efp.get("bbox"), (list, tuple)) and len(efp["bbox"]) == 4:
-                    ex, ey, ew, eh = (int(v) for v in efp["bbox"][:4])
-                    efp_cx = ex + ew // 2 - left
-                    efp_cy = ey + eh // 2 - top
-                    dx = abs(int(center[0]) - efp_cx)
-                    dy = abs(int(center[1]) - efp_cy)
-                    press_in_box = dx <= 24 and dy <= 24
-            except (TypeError, ValueError):
-                press_in_box = False
-        reuse = bool(label_ok and press_in_box)
-
-    if reuse:
-        primary["hub_parent"] = dict(efp_parent)
-        return
-
-    center = primary.get("center")
-    if not (isinstance(center, (list, tuple)) and len(center) >= 2):
-        return
-    try:
-        screen_x = int(center[0]) + int(monitor_offset[0])
-        screen_y = int(center[1]) + int(monitor_offset[1])
-    except (TypeError, ValueError):
-        return
-    try:
-        probed = parent_signature_at_point(screen_x, screen_y)
-    except Exception:
-        probed = {}
-    hub_parent = _normalize_parent_signature(probed)
-    if hub_parent:
-        primary["hub_parent"] = hub_parent
-
-
 VISION_PATH_REPAIR_REASON = "重播修復改為 UIA"
 VISION_PATH_UIA_NOT_UNIQUE_REASON = "UIA 地標無法唯一鎖定目標"
 VISION_PATH_WEAK_EFP_OCR_DISAGREE_REASON = "弱 EFP 且 OCR 與 UIA 目標不一致"
+VISION_PATH_EFP_MISS_REASON = "沒有可用的 EFP"
 _VISION_PATHS = frozenset({"uia", "yolo_ocr"})
+
+
+def _press_efp_opens_uia_hub(element_from_point: dict[str, Any] | None) -> bool:
+    """True when press EFP alone opens the UIA analysis hub (no FindAll).
+
+    Usable labeled leaf / ``data_item`` (``efp_payload_is_usable_labeled_leaf``)
+    or a WinForms scrollbar thumb (``Position``) with a screen bbox.
+    """
+    from src.recorder.uia_input_boxes import (
+        efp_payload_is_usable_labeled_leaf,
+        efp_payload_screen_bbox_xywh,
+        is_winforms_scrollbar_thumb_efp_name,
+    )
+
+    if efp_payload_is_usable_labeled_leaf(element_from_point):
+        return True
+    if not isinstance(element_from_point, dict):
+        return False
+    name = str(element_from_point.get("name") or "").strip()
+    if not is_winforms_scrollbar_thumb_efp_name(name):
+        return False
+    return efp_payload_screen_bbox_xywh(element_from_point) is not None
 
 
 def _press_efp_is_weak_hub(element_from_point: dict[str, Any] | None) -> bool:
@@ -4164,8 +4090,9 @@ def recording_uia_skip_reason(
 ) -> str | None:
     """Why a UIA snapshot cannot name the click, or ``None`` when it can.
 
-    ``None`` means UIA alone can select the click target. Callers that have no
-    snapshot use ``沒有 UIA 快照`` themselves.
+    ``None`` means UIA alone can select the click target. Recording analysis
+    gates the UIA path on usable press EFP instead (EFP-miss → YOLO); this
+    helper remains for LED / readiness checks over FindAll detections.
 
     A usable text box under the pointer wins. Otherwise a UIA input or
     scrollbar under the pointer is enough; those controls have no label.
@@ -4342,12 +4269,12 @@ def recording_uia_findall_hub_label_at_point(
     screen_xy: tuple[int, int],
     monitor_offset: tuple[int, int] | None = None,
 ) -> str:
-    """FindAll hub text analysis would pick at ``screen_xy``, or ``\"\"``.
+    """Legacy FindAll covering-primary label at ``screen_xy``, or ``\"\"``.
 
-    Uses the same covering primary as ``_pick_uia_click_primary`` (FindAll
-    detections only — no press EFP injection). Recording LED FA strip calls
-    this so nested leaves (e.g. ``Launch 檔案總管``) win over larger parents
-    (``Top apps``) the same way analysis sets ``hub_source=findall``.
+    Uses the same covering primary as ``_pick_uia_click_primary`` (snapshot
+    detections only — no press EFP injection). New-format analysis stamps
+    ``hub_source=uia_efp`` from EFP only; this helper remains for LED/debug
+    against older ``uia_snapshot`` payloads and is not a current hub source.
     """
     built = _recording_uia_detections_at_screen_xy(
         snapshot,
@@ -4477,66 +4404,25 @@ def _detect_recording_mouse_targets(
     efp_monitor_offset: tuple[int, int] | None = None,
     focused_element: dict[str, Any] | None = None,
 ) -> tuple[list[UiDetection], dict[str, Any]]:
-    """UIA candidates when the usable-label gate passes; otherwise YOLO+OCR.
+    """EFP hub + YOLO nearby when press EFP is usable; otherwise YOLO+OCR.
 
-    When UIA wins, YOLO+OCR still runs and is stored on
-    ``vision_timing["yolo_ocr_fallback_detections"]`` so analysis can keep a
-    durable OCR twin under ``yolo_ocr_fallback``. On the YOLO primary path,
-    ``uia_prefetched`` is still passed so UIA inputs and scrollbars can
-    prefer-replace overlapping YOLO boxes. UIA labeled text is not mixed into
-    OCR candidates.
-
-    Press-time ``element_from_point`` is always merged as a FindAll-shaped
-    ``uia_efp`` peer **before** ``recording_uia_skip_reason`` (including when
-    FindAll covers the click with a different label). Typed primary precedence
-    then prefers concrete FindAll leaves over disagreeing cell EFP, and usable
-    ``data_item`` EFP over generic ``清單 row`` / tree_item hubs. Post-settle
-    ``focused_element`` may repair the peer bbox when press EFP geometry misses
-    the click.
+    YOLO+OCR always runs. Nearby landmarks / landmark geometry come only from
+    YOLO(+OCR) peers — never FindAll snapshot texts. When press EFP is a usable
+    labeled leaf / ``data_item`` / scrollbar thumb, the primary is an injected
+    ``uia_efp`` peer and ``vision_path`` is ``uia`` (even without a FindAll
+    snapshot). Otherwise ``vision_path=yolo_ocr`` with an EFP-miss reason.
+    ``uia_prefetched`` is still passed into the YOLO detector so inputs and
+    scrollbars can prefer-replace overlapping YOLO boxes on the YOLO path.
+    Post-settle ``focused_element`` may repair the peer bbox when press EFP
+    geometry misses the click.
     """
-    _ = live_input_hwnd, live_input_monitor_offset, live_input_window_screen_xywh
+    _ = (
+        live_input_hwnd,
+        live_input_monitor_offset,
+        live_input_window_screen_xywh,
+        forced_scrollbar_bbox,
+    )
     vision_timing: dict[str, Any] = timing_out if timing_out is not None else {}
-    uia_detections = _detections_from_uia_prefetched(uia_prefetched)
-    efp_peer: UiDetection | None = None
-    if (
-        element_from_point is not None
-        and local_x is not None
-        and local_y is not None
-    ):
-        ox, oy = (
-            (int(efp_monitor_offset[0]), int(efp_monitor_offset[1]))
-            if efp_monitor_offset is not None
-            else (int(coord_offset[0]), int(coord_offset[1]))
-        )
-        efp_peer = _efp_peer_detection_from_payload(
-            element_from_point,
-            monitor_offset=(ox, oy),
-            local_x=int(local_x),
-            local_y=int(local_y),
-            existing=uia_detections,
-            focused_element=focused_element,
-            timing_out=vision_timing,
-        )
-        if efp_peer is not None:
-            uia_detections = [*uia_detections, efp_peer]
-            vision_timing["efp_peer_injected"] = True
-    if uia_prefetched is None and efp_peer is None:
-        skip_reason: str | None = "沒有 UIA 快照"
-    elif uia_prefetched is None and efp_peer is not None:
-        # EFP-only DataItem leaf (no FindAll snapshot) can still open UIA path.
-        skip_reason = recording_uia_skip_reason(
-            uia_detections,
-            local_x=local_x,
-            local_y=local_y,
-            forced_scrollbar_bbox=forced_scrollbar_bbox,
-        )
-    else:
-        skip_reason = recording_uia_skip_reason(
-            uia_detections,
-            local_x=local_x,
-            local_y=local_y,
-            forced_scrollbar_bbox=forced_scrollbar_bbox,
-        )
     ocr_timing: dict[str, Any] = {}
     detections = _detect_mouse_targets_from_bgr(
         bgr,
@@ -4558,25 +4444,42 @@ def _detect_recording_mouse_targets(
         vision_timing[key] = value
     vision_timing["recording_ocr_deferred"] = False
 
-    if skip_reason is None:
+    efp_peer: UiDetection | None = None
+    opens_uia = _press_efp_opens_uia_hub(element_from_point)
+    if (
+        opens_uia
+        and element_from_point is not None
+        and local_x is not None
+        and local_y is not None
+    ):
+        ox, oy = (
+            (int(efp_monitor_offset[0]), int(efp_monitor_offset[1]))
+            if efp_monitor_offset is not None
+            else (int(coord_offset[0]), int(coord_offset[1]))
+        )
+        # Empty existing: FindAll must not suppress or outrank the EFP hub.
+        efp_peer = _efp_peer_detection_from_payload(
+            element_from_point,
+            monitor_offset=(ox, oy),
+            local_x=int(local_x),
+            local_y=int(local_y),
+            existing=[],
+            focused_element=focused_element,
+            timing_out=vision_timing,
+        )
+
+    if efp_peer is not None:
         vision_timing["vision_path"] = "uia"
         vision_timing.pop("vision_path_reason", None)
         vision_timing["recording_uia_sufficient"] = True
+        vision_timing["efp_peer_injected"] = True
         vision_timing["yolo_ocr_fallback_detections"] = detections
-        # Sparse UIA (Excel cells / EFP-only chrome): borrow YOLO peers for nearby.
-        merged = merge_sparse_uia_detections_with_yolo_peers(
-            uia_detections, detections
-        )
-        if len(merged) > len(uia_detections):
-            vision_timing["uia_yolo_nearby_peers_merged"] = True
-        return merged, vision_timing
+        # Primary = EFP; nearby peers = YOLO(+OCR) only.
+        return [efp_peer, *detections], vision_timing
 
     vision_timing["vision_path"] = "yolo_ocr"
-    vision_timing["vision_path_reason"] = skip_reason
+    vision_timing["vision_path_reason"] = VISION_PATH_EFP_MISS_REASON
     vision_timing["recording_uia_sufficient"] = False
-    # Keep EFP peer on the YOLO pool for naming (same as pre-gate injection).
-    if efp_peer is not None:
-        return [*detections, efp_peer], vision_timing
     return detections, vision_timing
 
 
@@ -5271,11 +5174,6 @@ def build_vision_context_at_point(
         )
         for det in nearest
     ]
-    _attach_findall_hub_parent(
-        candidate_dicts,
-        element_from_point=efp_payload,
-        monitor_offset=screenshot_offset,
-    )
     if all_detections and candidate_dicts:
         _annotate_clicked_char_target(bgr, candidate_dicts, local_x, local_y)
     payload: dict[str, Any] = {

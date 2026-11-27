@@ -14,39 +14,10 @@ from src.common.monitor_prompt import (
 )
 from src.common.settings import (
     BACKEND_PRESETS,
-    UIA_FINDALL_HOVER_MAX_HITS_DEFAULT,
-    UIA_FINDALL_HOVER_MAX_HITS_MAX,
-    UIA_FINDALL_HOVER_MAX_HITS_MIN,
-    UIA_FINDALL_HOVER_MAX_NODES_DEFAULT,
-    UIA_FINDALL_HOVER_MAX_NODES_MAX,
-    UIA_FINDALL_HOVER_MAX_NODES_MIN,
-    UIA_FINDALL_HOVER_MAX_SECONDS_DEFAULT,
-    UIA_FINDALL_HOVER_MAX_SECONDS_MAX,
-    UIA_FINDALL_HOVER_MAX_SECONDS_MIN,
-    UIA_FINDALL_HOVER_ROI_HALF_PX_DEFAULT,
-    UIA_FINDALL_HOVER_ROI_HALF_PX_MAX,
-    UIA_FINDALL_HOVER_ROI_HALF_PX_MIN,
-    UIA_FINDALL_MAX_HITS_DEFAULT,
-    UIA_FINDALL_MAX_HITS_MAX,
-    UIA_FINDALL_MAX_HITS_MIN,
-    UIA_FINDALL_MAX_NODES_DEFAULT,
-    UIA_FINDALL_MAX_NODES_MAX,
-    UIA_FINDALL_MAX_NODES_MIN,
-    UIA_FINDALL_MAX_SECONDS_DEFAULT,
-    UIA_FINDALL_MAX_SECONDS_MAX,
-    UIA_FINDALL_MAX_SECONDS_MIN,
-    UIA_FINDALL_SCENARIO_PRESETS,
     VISION_BACKEND_PRESETS,
     canonicalize_llm_backend,
     canonicalize_vision_backend,
-    clamp_uia_findall_hover_max_hits,
-    clamp_uia_findall_hover_max_nodes,
-    clamp_uia_findall_hover_max_seconds,
-    clamp_uia_findall_hover_roi_half_px,
-    clamp_uia_findall_max_hits,
-    clamp_uia_findall_max_nodes,
-    clamp_uia_findall_max_seconds,
-    clamp_uia_findall_scenario_values,
+    default_uia_findall_settings,
     load_agent_settings_dict,
     preset_for_backend,
     preset_for_vision_backend,
@@ -167,8 +138,6 @@ def open_agent_settings_dialog(
     tab_agent = tabs.add("代理設定")
     tab_script = tabs.add("腳本編輯器")
     tab_monitor = tabs.add("螢幕畫面")
-    tab_findall = tabs.add("FindAll 走訪")
-
     backend_var = ctk.StringVar(value=_backend_to_label(backend_initial))
     vision_var = ctk.StringVar(value=_vision_backend_to_label(vision_initial))
 
@@ -379,188 +348,6 @@ def open_agent_settings_dialog(
         text_color=("gray30", "gray70"),
     ).pack(anchor="w", pady=(4, 0))
 
-    # ── Tab: FindAll 走訪 ───────────────────────────────────────────
-    findall_scroll = ctk.CTkScrollableFrame(tab_findall, fg_color="transparent")
-    findall_scroll.pack(fill="both", expand=True)
-
-    ctk.CTkLabel(
-        findall_scroll,
-        text=(
-            "預算化 ControlView 走訪在命中數、節點數、時間三者中最先達到的上限停止。"
-            "較慢的 VM 可提高時間並降低命中／節點以減輕負擔。"
-        ),
-        font=ctk.CTkFont(size=12),
-        text_color=("gray30", "gray70"),
-        wraplength=520,
-        justify="left",
-        anchor="w",
-    ).pack(anchor="w", pady=(8, 10))
-
-    initial_findall_seconds = clamp_uia_findall_max_seconds(
-        initial.get("uia_findall_max_seconds", UIA_FINDALL_MAX_SECONDS_DEFAULT)
-    )
-    initial_findall_hits = clamp_uia_findall_max_hits(
-        initial.get("uia_findall_max_hits", UIA_FINDALL_MAX_HITS_DEFAULT)
-    )
-    initial_findall_nodes = clamp_uia_findall_max_nodes(
-        initial.get("uia_findall_max_nodes", UIA_FINDALL_MAX_NODES_DEFAULT)
-    )
-    initial_hover_seconds = clamp_uia_findall_hover_max_seconds(
-        initial.get(
-            "uia_findall_hover_max_seconds",
-            UIA_FINDALL_HOVER_MAX_SECONDS_DEFAULT,
-        )
-    )
-    initial_hover_hits = clamp_uia_findall_hover_max_hits(
-        initial.get(
-            "uia_findall_hover_max_hits",
-            UIA_FINDALL_HOVER_MAX_HITS_DEFAULT,
-        )
-    )
-    initial_hover_nodes = clamp_uia_findall_hover_max_nodes(
-        initial.get(
-            "uia_findall_hover_max_nodes",
-            UIA_FINDALL_HOVER_MAX_NODES_DEFAULT,
-        )
-    )
-    initial_hover_roi = clamp_uia_findall_hover_roi_half_px(
-        initial.get(
-            "uia_findall_hover_roi_half_px",
-            UIA_FINDALL_HOVER_ROI_HALF_PX_DEFAULT,
-        )
-    )
-
-    findall_seconds_var = ctk.StringVar(value=str(initial_findall_seconds))
-    findall_hits_var = ctk.StringVar(value=str(initial_findall_hits))
-    findall_nodes_var = ctk.StringVar(value=str(initial_findall_nodes))
-    hover_seconds_var = ctk.StringVar(value=str(initial_hover_seconds))
-    hover_hits_var = ctk.StringVar(value=str(initial_hover_hits))
-    hover_nodes_var = ctk.StringVar(value=str(initial_hover_nodes))
-    hover_roi_var = ctk.StringVar(value=str(initial_hover_roi))
-
-    def _findall_entry_row(
-        parent: Any,
-        *,
-        label: str,
-        variable: Any,
-        hint: str,
-    ) -> None:
-        row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(fill="x", pady=(0, 8))
-        ctk.CTkLabel(row, text=label, width=150, anchor="w").pack(side="left")
-        ctk.CTkEntry(row, textvariable=variable, width=110).pack(side="left")
-        ctk.CTkLabel(
-            row,
-            text=hint,
-            font=ctk.CTkFont(size=11),
-            text_color=("gray40", "gray60"),
-            anchor="w",
-        ).pack(side="left", padx=(10, 0))
-
-    def _apply_findall_scenario(preset: dict[str, Any]) -> None:
-        values = clamp_uia_findall_scenario_values(preset)
-        findall_seconds_var.set(str(values["uia_findall_max_seconds"]))
-        findall_hits_var.set(str(values["uia_findall_max_hits"]))
-        findall_nodes_var.set(str(values["uia_findall_max_nodes"]))
-        hover_seconds_var.set(str(values["uia_findall_hover_max_seconds"]))
-        hover_hits_var.set(str(values["uia_findall_hover_max_hits"]))
-        hover_nodes_var.set(str(values["uia_findall_hover_max_nodes"]))
-        hover_roi_var.set(str(values["uia_findall_hover_roi_half_px"]))
-
-    ctk.CTkLabel(
-        findall_scroll,
-        text="情境預設",
-        font=ctk.CTkFont(size=13, weight="bold"),
-        anchor="w",
-    ).pack(anchor="w", pady=(0, 6))
-    preset_row = ctk.CTkFrame(findall_scroll, fg_color="transparent")
-    preset_row.pack(fill="x", pady=(0, 4))
-    for preset in UIA_FINDALL_SCENARIO_PRESETS:
-        ctk.CTkButton(
-            preset_row,
-            text=str(preset["label"]),
-            width=100,
-            command=lambda p=preset: _apply_findall_scenario(p),
-        ).pack(side="left", padx=(0, 8))
-    ctk.CTkLabel(
-        findall_scroll,
-        text="點選後仍需按「儲存」才會生效。",
-        font=ctk.CTkFont(size=11),
-        text_color=("gray40", "gray60"),
-        anchor="w",
-    ).pack(anchor="w", pady=(0, 12))
-
-    ctk.CTkLabel(
-        findall_scroll,
-        text="Settle / 種子",
-        font=ctk.CTkFont(size=13, weight="bold"),
-        anchor="w",
-    ).pack(anchor="w", pady=(0, 6))
-    _findall_entry_row(
-        findall_scroll,
-        label="最長時間（秒）",
-        variable=findall_seconds_var,
-        hint=f"{UIA_FINDALL_MAX_SECONDS_MIN:g}–{UIA_FINDALL_MAX_SECONDS_MAX:g}",
-    )
-    _findall_entry_row(
-        findall_scroll,
-        label="最大命中數",
-        variable=findall_hits_var,
-        hint=f"{UIA_FINDALL_MAX_HITS_MIN}–{UIA_FINDALL_MAX_HITS_MAX}",
-    )
-    _findall_entry_row(
-        findall_scroll,
-        label="最大節點數",
-        variable=findall_nodes_var,
-        hint=f"{UIA_FINDALL_MAX_NODES_MIN}–{UIA_FINDALL_MAX_NODES_MAX}",
-    )
-
-    ctk.CTkLabel(
-        findall_scroll,
-        text="Hover 懸停",
-        font=ctk.CTkFont(size=13, weight="bold"),
-        anchor="w",
-    ).pack(anchor="w", pady=(8, 6))
-    _findall_entry_row(
-        findall_scroll,
-        label="最長時間（秒）",
-        variable=hover_seconds_var,
-        hint=(
-            f"{UIA_FINDALL_HOVER_MAX_SECONDS_MIN:g}–"
-            f"{UIA_FINDALL_HOVER_MAX_SECONDS_MAX:g}"
-        ),
-    )
-    _findall_entry_row(
-        findall_scroll,
-        label="最大命中數",
-        variable=hover_hits_var,
-        hint=f"{UIA_FINDALL_HOVER_MAX_HITS_MIN}–{UIA_FINDALL_HOVER_MAX_HITS_MAX}",
-    )
-    _findall_entry_row(
-        findall_scroll,
-        label="最大節點數",
-        variable=hover_nodes_var,
-        hint=(
-            f"{UIA_FINDALL_HOVER_MAX_NODES_MIN}–{UIA_FINDALL_HOVER_MAX_NODES_MAX}"
-        ),
-    )
-    _findall_entry_row(
-        findall_scroll,
-        label="游標 ROI 半寬（px）",
-        variable=hover_roi_var,
-        hint=(
-            f"{UIA_FINDALL_HOVER_ROI_HALF_PX_MIN}–"
-            f"{UIA_FINDALL_HOVER_ROI_HALF_PX_MAX}"
-        ),
-    )
-
-    ctk.CTkLabel(
-        findall_scroll,
-        text="儲存後下一次 FindAll / Hover 即生效（無需重啟）。",
-        font=ctk.CTkFont(size=12),
-        text_color=("gray30", "gray70"),
-    ).pack(anchor="w", pady=(8, 4))
-
     btn_row = ctk.CTkFrame(inner, fg_color="transparent")
     btn_row.pack(fill="x")
 
@@ -578,27 +365,10 @@ def open_agent_settings_dialog(
             vision_backend = _label_to_vision_backend(vision_var.get())
             payload.update(preset_for_vision_backend(vision_backend))
             payload["vision_backend"] = vision_backend
-            payload["uia_findall_max_seconds"] = clamp_uia_findall_max_seconds(
-                findall_seconds_var.get()
-            )
-            payload["uia_findall_max_hits"] = clamp_uia_findall_max_hits(
-                findall_hits_var.get()
-            )
-            payload["uia_findall_max_nodes"] = clamp_uia_findall_max_nodes(
-                findall_nodes_var.get()
-            )
-            payload["uia_findall_hover_max_seconds"] = (
-                clamp_uia_findall_hover_max_seconds(hover_seconds_var.get())
-            )
-            payload["uia_findall_hover_max_hits"] = clamp_uia_findall_hover_max_hits(
-                hover_hits_var.get()
-            )
-            payload["uia_findall_hover_max_nodes"] = (
-                clamp_uia_findall_hover_max_nodes(hover_nodes_var.get())
-            )
-            payload["uia_findall_hover_roi_half_px"] = (
-                clamp_uia_findall_hover_roi_half_px(hover_roi_var.get())
-            )
+            # Preserve unused FindAll defaults (hidden from UI; replay may still read).
+            findall_defaults = default_uia_findall_settings()
+            for key, default in findall_defaults.items():
+                payload[key] = initial.get(key, default)
             validated = validate_agent_settings_dict(payload)
             save_agent_settings_dict(validated)
         except ValueError as e:

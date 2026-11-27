@@ -88,8 +88,7 @@ async def _move_mouse(
     name: str | None = None,
     value: str | None = None,
     hub_source: str | None = None,
-    parent: dict | None = None,
-    hub_parent: dict | None = None,
+    parents: list | None = None,
 ) -> dict[str, Any]:
     gx, gy, meta = await resolve_mouse_point(
         instruction,
@@ -102,8 +101,7 @@ async def _move_mouse(
         recorded_efp_name=name,
         recorded_efp_value=value,
         hub_source=hub_source,
-        recorded_hub_parent=hub_parent,
-        recorded_efp_parent=parent,
+        recorded_efp_parents=parents,
     )
     move_started = time.perf_counter()
     result = hand_tools.move(x=gx, y=gy, duration=duration)
@@ -130,10 +128,8 @@ async def _move_mouse(
         merged["value"] = value
     if hub_source is not None:
         merged["hub_source"] = hub_source
-    if parent is not None:
-        merged["parent"] = parent
-    if hub_parent is not None:
-        merged["hub_parent"] = hub_parent
+    if parents is not None:
+        merged["parents"] = parents
     return _with_unified_target_metadata(
         merged,
         target_kind=str(meta.get("target_kind", "mouse_target")),

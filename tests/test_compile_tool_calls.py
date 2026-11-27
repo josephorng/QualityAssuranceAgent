@@ -139,11 +139,14 @@ def test_compile_click_copies_element_from_point_name_value() -> None:
         element_from_point={
             "name": "展開",
             "value": "1",
-            "parent": {
-                "control_type": "tool_bar",
-                "name": "功能區",
-                "automation_id": "Ribbon",
-            },
+            "parents": [
+                {
+                    "control_type": "tool_bar",
+                    "name": "功能區",
+                    "automation_id": "Ribbon",
+                },
+                {"control_type": "window", "name": "Excel"},
+            ],
         },
     )
     instruction = "將滑鼠移到「展開」按鈕，並點擊滑鼠一下。"
@@ -152,14 +155,19 @@ def test_compile_click_copies_element_from_point_name_value() -> None:
     assert calls[0]["name"] == "move_mouse"
     assert calls[0]["arguments"]["name"] == "展開"
     assert calls[0]["arguments"]["value"] == "1"
-    assert calls[0]["arguments"]["parent"] == {
-        "control_type": "tool_bar",
-        "name": "功能區",
-        "automation_id": "Ribbon",
-    }
+    assert calls[0]["arguments"]["parents"] == [
+        {
+            "control_type": "tool_bar",
+            "name": "功能區",
+            "automation_id": "Ribbon",
+        },
+        {"control_type": "window", "name": "Excel"},
+    ]
+    assert "parent" not in calls[0]["arguments"]
 
 
-def test_compile_hub_source_findall_from_uia_primary() -> None:
+def test_compile_hub_source_omitted_for_findall_uia_primary() -> None:
+    """FindAll ``source=uia`` must never compile to ``hub_source=findall``."""
     event = _event(kind="click", click_count=1)
     instruction = "（UIA）將滑鼠移到「WinMaster7 Console」清單項目，並點擊滑鼠一下。"
     vision = {
@@ -181,12 +189,9 @@ def test_compile_hub_source_findall_from_uia_primary() -> None:
     }
     calls = compile_tool_calls(event, instruction, vision=vision)
     assert calls is not None
-    assert calls[0]["arguments"]["hub_source"] == "findall"
-    assert calls[0]["arguments"]["hub_parent"] == {
-        "control_type": "tree",
-        "name": "導覽",
-        "automation_id": "ProperTreeHost",
-    }
+    assert "hub_source" not in calls[0]["arguments"]
+    assert calls[0]["arguments"].get("hub_source") != "findall"
+    assert "hub_parent" not in calls[0]["arguments"]
 
 
 def test_compile_hub_source_uia_efp_from_efp_primary() -> None:
@@ -207,6 +212,7 @@ def test_compile_hub_source_uia_efp_from_efp_primary() -> None:
     calls = compile_tool_calls(event, instruction, vision=vision)
     assert calls is not None
     assert calls[0]["arguments"]["hub_source"] == "uia_efp"
+    assert "hub_parent" not in calls[0]["arguments"]
 
 
 def test_compile_hub_source_omitted_for_yolo_primary() -> None:
@@ -226,6 +232,7 @@ def test_compile_hub_source_omitted_for_yolo_primary() -> None:
     calls = compile_tool_calls(event, instruction, vision=vision)
     assert calls is not None
     assert "hub_source" not in calls[0]["arguments"]
+    assert calls[0]["arguments"].get("hub_source") != "findall"
 
 
 def test_compile_click_office_bracket_tab_structured_fields() -> None:

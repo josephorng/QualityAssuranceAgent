@@ -17,7 +17,6 @@ from cua_mcp.select_mouse_target import (
     _efp_gate_required_for_hub,
     _efp_name_value_matches,
     _filter_yolo_for_near_synth_pool,
-    _findall_efp_intersect_gate,
     _findall_pool_near_synth,
     _intersect_bbox_xywh,
     _keep_uia_first_on_subtarget_efp_soft_miss,
@@ -29,7 +28,6 @@ from cua_mcp.select_mouse_target import (
     _phrase_match_pool,
     _prefer_pool_over_efp_leaf,
     _preferred_yolo_class_for_near_synth,
-    _recorded_efp_agrees_with_hub,
     _recorded_efp_present,
     _scan_efp_neighbors_for_name,
     _should_run_constellation_efp,
@@ -469,6 +467,7 @@ def test_uia_first_findall_near_synth_efp_wins_without_name_match() -> None:
         landmark_geometry=geom,
         recorded_efp_name="下載 (已釘選)",
         recorded_efp_value="下載 (已釘選)",
+        hub_source="uia_efp",
         point_probe_fn=probe,
     )
     assert reason == "landmark_efp_hit"
@@ -506,6 +505,7 @@ def test_uia_first_joint_yolo_leaf_efp_hit() -> None:
         landmark_geometry=geom,
         recorded_efp_name="下載 (已釘選)",
         recorded_efp_value="下載 (已釘選)",
+        hub_source="uia_efp",
         point_probe_fn=probe,
     )
     assert reason == "landmark_efp_hit"
@@ -598,6 +598,7 @@ def test_uia_first_text_hub_skips_nearer_yolo_icon() -> None:
         landmark_geometry=geom,
         recorded_efp_name="圖片 (已釘選)",
         recorded_efp_value="圖片 (已釘選)",
+        hub_source="uia_efp",
         point_probe_fn=probe,
     )
     assert reason == "landmark_efp_hit"
@@ -646,6 +647,7 @@ def test_uia_first_bare_match_anchor_text_control_skips_nearer_icon() -> None:
         landmark_geometry=geom,
         recorded_efp_name="圖片 (已釘選)",
         recorded_efp_value="圖片 (已釘選)",
+        hub_source="uia_efp",
         point_probe_fn=probe,
     )
     assert reason == "landmark_efp_hit"
@@ -693,6 +695,7 @@ def test_uia_first_icon_hub_skips_nearer_yolo_text() -> None:
         landmark_geometry=geom,
         recorded_efp_name="圖片 (已釘選)",
         recorded_efp_value="圖片 (已釘選)",
+        hub_source="uia_efp",
         point_probe_fn=probe,
     )
     assert reason == "landmark_efp_hit"
@@ -740,6 +743,7 @@ def test_uia_first_ambiguous_hub_keeps_nearer_yolo_icon() -> None:
         landmark_geometry=geom,
         recorded_efp_name="圖片 (已釘選)",
         recorded_efp_value="圖片 (已釘選)",
+        hub_source="uia_efp",
         point_probe_fn=probe,
     )
     assert reason == "landmark_efp_hit"
@@ -806,6 +810,7 @@ def test_verify_pool_first_findall_over_synth_coreinput() -> None:
         landmark_geometry=geom,
         recorded_efp_name="CoreInput",
         recorded_efp_value="",
+        hub_source="uia_efp",
         point_probe_fn=probe,
     )
     assert reason == "landmark_efp_hit"
@@ -848,14 +853,16 @@ def test_uia_first_findall_near_synth_efp_miss() -> None:
         landmark_geometry=geom,
         recorded_efp_name="下載 (已釘選)",
         recorded_efp_value="下載 (已釘選)",
+        hub_source="uia_efp",
         point_probe_fn=probe,
+        efp_path_lookup_fn=lambda *_a, **_k: None,
     )
     assert reason == "landmark_efp_miss"
     assert chosen is None
 
 
-def test_uia_first_input_hub_efp_miss_continues_name_shortlist() -> None:
-    """Input hubs soft-miss constellation EFP and continue into Name unique."""
+def test_uia_first_input_hub_efp_miss_continues_efp_path() -> None:
+    """Input hubs soft-miss constellation EFP and continue into efp_path."""
     geom = _simple_landmark_geometry()
     landmark = _det(100, 100, text="LM", class_name="text")
     named_input = _det(
@@ -864,6 +871,9 @@ def test_uia_first_input_hub_efp_miss_continues_name_shortlist() -> None:
 
     def probe(x: int, y: int):
         return ("label", None, "text", "其他", "")
+
+    def efp_path(name, value, type_id, parents):
+        return ((140, 90, 20, 20), "密碼|Textbox|txt_Password", "", "input")
 
     chosen, reason = _try_uia_first_unique_select(
         [landmark, named_input],
@@ -877,21 +887,26 @@ def test_uia_first_input_hub_efp_miss_continues_name_shortlist() -> None:
         landmark_geometry=geom,
         recorded_efp_name="密碼|Textbox|txt_Password",
         recorded_efp_value="",
+        hub_source="uia_efp",
         point_probe_fn=probe,
+        efp_path_lookup_fn=efp_path,
     )
-    assert reason != "landmark_efp_miss"
-    assert reason == "hit"
-    assert chosen is named_input
+    assert reason == "efp_path_hit"
+    assert chosen is not None
+    assert "密碼" in str(chosen.text or "")
 
 
-def test_uia_first_labeled_hub_efp_miss_continues_name_shortlist() -> None:
-    """Labeled uia_efp hub: constellation miss still unique-hits live FindAll Name."""
+def test_uia_first_labeled_hub_efp_miss_continues_efp_path() -> None:
+    """Labeled uia_efp hub: constellation miss still unique-hits via efp_path."""
     geom = _simple_landmark_geometry()
     landmark = _det(100, 100, text="LM", class_name="text")
     tree_leaf = _det(200, 120, text="龜速的網域 (3)|1", class_name="text")
 
     def probe(x: int, y: int):
         return ("label", None, "text", "其他", "")
+
+    def efp_path(name, value, type_id, parents):
+        return ((190, 110, 20, 20), "龜速的網域 (3)", "1", "text")
 
     chosen, reason = _try_uia_first_unique_select(
         [landmark, tree_leaf],
@@ -907,13 +922,15 @@ def test_uia_first_labeled_hub_efp_miss_continues_name_shortlist() -> None:
         recorded_efp_value="1",
         hub_source="uia_efp",
         point_probe_fn=probe,
+        efp_path_lookup_fn=efp_path,
     )
-    assert reason == "hit"
-    assert chosen is tree_leaf
+    assert reason == "efp_path_hit"
+    assert chosen is not None
+    assert "龜速的網域 (3)" in str(chosen.text or "")
 
 
-def test_uia_first_labeled_hub_efp_miss_name_findall_recovery() -> None:
-    """Constellation miss + empty snapshot Name → Name FindAll recovers the leaf."""
+def test_uia_first_labeled_hub_efp_miss_efp_path_recovery() -> None:
+    """Constellation miss + empty snapshot → efp_path recovers the leaf."""
     geom = _simple_landmark_geometry()
     landmark = _det(100, 100, text="LM", class_name="text")
     near_empty = _det(148, 100, text="", class_name="input")
@@ -921,9 +938,9 @@ def test_uia_first_labeled_hub_efp_miss_name_findall_recovery() -> None:
     def probe(x: int, y: int):
         return ("label", None, "text", "其他", "")
 
-    def name_findall(name: str, type_id):
+    def efp_path(name, value, type_id, parents):
         assert name == "龜速的網域 (3)"
-        return [([195, 115, 30, 20], "龜速的網域 (3)", "1", "tree_item")]
+        return ((195, 115, 30, 20), "龜速的網域 (3)", "1", "tree_item")
 
     chosen, reason = _try_uia_first_unique_select(
         [landmark, near_empty],
@@ -939,9 +956,9 @@ def test_uia_first_labeled_hub_efp_miss_name_findall_recovery() -> None:
         recorded_efp_value="1",
         hub_source="uia_efp",
         point_probe_fn=probe,
-        name_findall_fn=name_findall,
+        efp_path_lookup_fn=efp_path,
     )
-    assert reason == "hit"
+    assert reason == "efp_path_hit"
     assert chosen is not None
     assert "龜速的網域 (3)" in str(chosen.text)
 
@@ -971,13 +988,14 @@ def test_uia_first_labeled_hub_efp_miss_ignores_yolo_name() -> None:
         recorded_efp_value="1",
         hub_source="uia_efp",
         point_probe_fn=probe,
+        efp_path_lookup_fn=lambda *_a, **_k: None,
     )
     assert reason == "landmark_efp_miss"
     assert chosen is None
 
 
 def test_uia_first_input_hub_matches_automation_id_tail() -> None:
-    """FindAll Name|AutomationId agrees with recorded Name|Textbox|AutomationId."""
+    """Ancestor-path lookup resolves Name|Textbox|AutomationId input."""
     geom = _simple_landmark_geometry()
     landmark = _det(100, 100, text="LM", class_name="text")
     named_input = _det(148, 100, text="傳真號碼|txt_Fax", class_name="input")
@@ -985,6 +1003,10 @@ def test_uia_first_input_hub_matches_automation_id_tail() -> None:
 
     def probe(x: int, y: int):
         return ("label", None, "text", "其他", "")
+
+    def efp_path(name, value, type_id, parents):
+        assert "傳真號碼" in name
+        return ((140, 90, 20, 20), "傳真號碼|txt_Fax", "", "input")
 
     chosen, reason = _try_uia_first_unique_select(
         [landmark, named_input, sibling],
@@ -998,10 +1020,13 @@ def test_uia_first_input_hub_matches_automation_id_tail() -> None:
         landmark_geometry=geom,
         recorded_efp_name="傳真號碼|Textbox|txt_Fax",
         recorded_efp_value="",
+        hub_source="uia_efp",
         point_probe_fn=probe,
+        efp_path_lookup_fn=efp_path,
     )
-    assert reason == "hit"
-    assert chosen is named_input
+    assert reason == "efp_path_hit"
+    assert chosen is not None
+    assert "傳真號碼" in str(chosen.text or "")
 
 
 def test_phrase_match_pool_keeps_input_and_scrollbar_by_class_name() -> None:
@@ -1059,17 +1084,22 @@ def test_uia_first_input_hub_soft_miss_does_not_unique_hit_sibling_text() -> Non
         landmark_geometry=geom,
         recorded_efp_name="密碼|Textbox|txt_Password",
         recorded_efp_value="",
+        hub_source="uia_efp",
         point_probe_fn=probe,
+        efp_path_lookup_fn=lambda *_a, **_k: None,
     )
-    # Constellation ran; Name shortlist also empty → preserve landmark_efp_miss.
+    # Constellation ran; efp_path miss → preserve landmark_efp_miss.
     assert reason == "landmark_efp_miss"
     assert chosen is None
 
 
-def test_uia_first_geom_unavailable_continues_name_unique() -> None:
-    """Missing landmarks → no synth; unique Name still commits."""
+def test_uia_first_geom_unavailable_continues_efp_path() -> None:
+    """Missing landmarks → no synth; efp_path still commits."""
     geom = _simple_landmark_geometry(landmark_label="MISSING")
     only = _det(148, 100, text="下載", class_name="text")
+
+    def efp_path(name, value, type_id, parents):
+        return ((140, 90, 20, 20), "下載", "", "text")
 
     chosen, reason = _try_uia_first_unique_select(
         [only],
@@ -1080,13 +1110,16 @@ def test_uia_first_geom_unavailable_continues_name_unique() -> None:
         landmark_geometry=geom,
         recorded_efp_name="下載 (已釘選)",
         recorded_efp_value="",
+        hub_source="uia_efp",
         point_probe_fn=lambda x, y: ("", None, "", "X", "Y"),
+        efp_path_lookup_fn=efp_path,
     )
-    assert reason == "hit"
-    assert chosen is only
+    assert reason == "efp_path_hit"
+    assert chosen is not None
 
 
-def test_uia_first_blank_efp_keeps_name_unique() -> None:
+def test_uia_first_blank_efp_skips_uia_identity() -> None:
+    """Blank EFP Name/Value does not run uia_efp identity path."""
     geom = _simple_landmark_geometry()
     landmark = _det(100, 100, text="LM", class_name="text")
     only_download = _det(500, 500, text="下載", class_name="text")
@@ -1107,8 +1140,8 @@ def test_uia_first_blank_efp_keeps_name_unique() -> None:
         recorded_efp_value="",
         point_probe_fn=probe,
     )
-    assert reason == "hit"
-    assert chosen is only_download
+    assert chosen is None
+    assert reason == "no_efp_identity"
     assert probes == []
 
 
@@ -1136,6 +1169,7 @@ def test_uia_first_empty_pool_synth_hit() -> None:
         landmark_geometry=geom_far,
         recorded_efp_name="下載 (已釘選)",
         recorded_efp_value="下載 (已釘選)",
+        hub_source="uia_efp",
         point_probe_fn=probe,
     )
     assert reason == "landmark_efp_synth_hit"
@@ -1212,6 +1246,7 @@ def test_uia_first_data_item_neighbor_hit() -> None:
         landmark_geometry=geom_far,
         recorded_efp_name="K10",
         recorded_efp_value="",
+        hub_source="uia_efp",
         point_probe_fn=probe,
     )
     assert reason == "landmark_efp_neighbor_hit"
@@ -1252,6 +1287,7 @@ def test_uia_first_data_item_name_findfirst_hit_before_scan() -> None:
         landmark_geometry=geom_far,
         recorded_efp_name="N15",
         recorded_efp_value="",
+        hub_source="uia_efp",
         point_probe_fn=probe,
         data_item_lookup_fn=lookup,
     )
@@ -1291,6 +1327,7 @@ def test_uia_first_data_item_findfirst_miss_then_neighbor_hit() -> None:
         landmark_geometry=geom_far,
         recorded_efp_name="K10",
         recorded_efp_value="",
+        hub_source="uia_efp",
         point_probe_fn=probe,
         data_item_lookup_fn=lambda _name: None,
     )
@@ -1324,6 +1361,7 @@ def test_uia_first_data_item_findfirst_and_neighbor_miss() -> None:
         landmark_geometry=geom_far,
         recorded_efp_name="N15",
         recorded_efp_value="",
+        hub_source="uia_efp",
         point_probe_fn=probe,
         data_item_lookup_fn=lambda _name: None,
     )
@@ -1355,6 +1393,7 @@ def test_uia_first_data_item_geom_unavailable_findfirst_hit() -> None:
         ),
         recorded_efp_name="N15",
         recorded_efp_value="",
+        hub_source="uia_efp",
         point_probe_fn=lambda *_a: ("x", None, "text", "x", ""),
         data_item_lookup_fn=lookup,
     )
@@ -1429,17 +1468,29 @@ def test_uia_first_data_item_unique_value_hit_geom_unavailable() -> None:
     assert chosen.text == "電腦名稱|Red-Hat10"
 
 
-def test_recorded_efp_agrees_with_hub_rejects_overlay_poison() -> None:
-    assert _recorded_efp_agrees_with_hub(
-        "下載", "下載 (已釘選)", "下載 (已釘選)"
+def test_uia_first_efp_path_hit_and_parents_gate() -> None:
+    parents = [{"control_type": "tree", "name": "導覽"}]
+    leaf = ((100, 200, 40, 20), "下載", "下載", "tree_item")
+
+    def efp_path(name, value, type_id, parents_arg):
+        assert parents_arg == parents
+        return leaf
+
+    chosen, reason = _try_uia_first_unique_select(
+        [],
+        anchor="下載",
+        nearby_hints=[],
+        nearby_labels=[],
+        nearby_phrases=[],
+        recorded_efp_name="下載",
+        recorded_efp_value="下載",
+        hub_source="uia_efp",
+        recorded_efp_parents=parents,
+        efp_path_lookup_fn=efp_path,
     )
-    assert not _recorded_efp_agrees_with_hub(
-        "WinMaster7 Console", "NVIDIA GeForce Overlay", ""
-    )
-    # Weak chrome Names still allow constellation FindAll-over-EFP.
-    assert _recorded_efp_agrees_with_hub(
-        "Launch 檔案總管", "CoreInput", ""
-    )
+    assert reason == "efp_path_hit"
+    assert chosen is not None
+    assert (chosen.cx, chosen.cy) == (120, 210)
 
 
 def test_should_run_constellation_efp_hub_source_gate() -> None:
@@ -1451,6 +1502,7 @@ def test_should_run_constellation_efp_hub_source_gate() -> None:
         recorded_efp_value="",
         anchor="K11",
     )
+    # Legacy findall / missing hub_source never enable constellation.
     assert not _should_run_constellation_efp(
         hub_source="findall",
         landmark_geometry=geom,
@@ -1458,8 +1510,7 @@ def test_should_run_constellation_efp_hub_source_gate() -> None:
         recorded_efp_value="下載 (已釘選)",
         anchor="下載",
     )
-    # Legacy: missing hub_source uses EFP↔hub agree.
-    assert _should_run_constellation_efp(
+    assert not _should_run_constellation_efp(
         hub_source=None,
         landmark_geometry=geom,
         recorded_efp_name="下載 (已釘選)",
@@ -1536,16 +1587,18 @@ def test_uia_first_skips_constellation_efp_when_hub_disagrees() -> None:
         landmark_geometry=geom,
         recorded_efp_name="NVIDIA GeForce Overlay",
         recorded_efp_value="",
+        hub_source=None,
         point_probe_fn=probe,
+        efp_path_lookup_fn=lambda *_a, **_k: None,
     )
     assert reason != "landmark_efp_hit"
     assert reason != "landmark_efp_synth_hit"
-    assert chosen is not overlay
-    assert chosen is hub
+    assert chosen is None
+    assert reason == "efp_path_miss"
 
 
-def test_uia_first_findall_hub_source_skips_constellation_efp() -> None:
-    """Explicit findall hub_source skips hard constellation-EFP even if EFP agrees."""
+def test_uia_first_missing_hub_source_skips_constellation_efp() -> None:
+    """Missing hub_source never hard-runs constellation even with EFP Name."""
     geom = _simple_landmark_geometry(
         landmark_label="側欄地標",
         landmark_xy=(50.0, 50.0),
@@ -1588,184 +1641,99 @@ def test_uia_first_findall_hub_source_skips_constellation_efp() -> None:
         landmark_geometry=geom,
         recorded_efp_name="NVIDIA GeForce Overlay",
         recorded_efp_value="",
-        hub_source="findall",
+        hub_source=None,
         point_probe_fn=probe,
+        efp_path_lookup_fn=lambda *_a, **_k: None,
     )
-    assert reason == "hit"
-    assert chosen is hub
-
-
-def test_uia_first_findall_hub_parent_agree_keeps_hit() -> None:
-    hub = UiDetection(
-        bbox=(60, 290, 40, 30),
-        cx=80,
-        cy=305,
-        class_id=YOLO_CLASS_TEXT,
-        class_name="text",
-        text="文件",
-        source="uia",
-        uia_control_type="text",
-    )
-    tree_parent = {
-        "control_type": "tree",
-        "name": "導覽",
-        "automation_id": "ProperTreeHost",
-    }
-
-    def parent_probe(x: int, y: int):
-        return dict(tree_parent)
-
-    chosen, reason = _try_uia_first_unique_select(
-        [hub],
-        anchor="文件",
-        nearby_hints=[],
-        nearby_labels=[],
-        nearby_phrases=[],
-        filter_by_control_type=False,
-        control_type_token="text",
-        recorded_anchor=True,
-        hub_source="findall",
-        recorded_hub_parent=tree_parent,
-        parent_probe_fn=parent_probe,
-    )
-    assert reason == "hit"
-    assert chosen is hub
-
-
-def test_uia_first_findall_hub_parent_disagree_efp_recovery_hit() -> None:
-    breadcrumb = UiDetection(
-        bbox=(550, 40, 40, 36),
-        cx=570,
-        cy=58,
-        class_id=YOLO_CLASS_TEXT,
-        class_name="text",
-        text="文件",
-        source="uia",
-        uia_control_type="menu_item",
-    )
-    tree_parent = {
-        "control_type": "tree",
-        "automation_id": "ProperTreeHost",
-    }
-    crumb_parent = {"control_type": "tool_bar", "name": "位址列"}
-    efp_parent = dict(tree_parent)
-
-    def parent_probe(x: int, y: int):
-        if int(y) < 100:
-            return dict(crumb_parent)
-        return dict(tree_parent)
-
-    def bring_into_view(name: str, value: str, control_type_id):
-        assert name == "文件 (已釘選)"
-        return ((64, 290, 34, 32), "文件 (已釘選)", "文件 (已釘選)", "tree_item")
-
-    chosen, reason = _try_uia_first_unique_select(
-        [breadcrumb],
-        anchor="文件",
-        nearby_hints=[],
-        nearby_labels=[],
-        nearby_phrases=[],
-        filter_by_control_type=False,
-        control_type_token="text",
-        recorded_anchor=True,
-        hub_source="findall",
-        recorded_efp_name="文件 (已釘選)",
-        recorded_efp_value="文件 (已釘選)",
-        recorded_hub_parent=tree_parent,
-        recorded_efp_parent=efp_parent,
-        parent_probe_fn=parent_probe,
-        bring_into_view_fn=bring_into_view,
-    )
-    assert reason == "efp_parent_recovery_hit"
-    assert chosen is not None
-    assert chosen.cx == 64 + 34 // 2
-    assert chosen.cy == 290 + 32 // 2
-
-
-def test_uia_first_findall_hub_parent_disagree_efp_recovery_miss() -> None:
-    breadcrumb = UiDetection(
-        bbox=(550, 40, 40, 36),
-        cx=570,
-        cy=58,
-        class_id=YOLO_CLASS_TEXT,
-        class_name="text",
-        text="文件",
-        source="uia",
-        uia_control_type="menu_item",
-    )
-    tree_parent = {
-        "control_type": "tree",
-        "automation_id": "ProperTreeHost",
-    }
-    crumb_parent = {"control_type": "tool_bar", "name": "位址列"}
-
-    def parent_probe(x: int, y: int):
-        return dict(crumb_parent)
-
-    chosen, reason = _try_uia_first_unique_select(
-        [breadcrumb],
-        anchor="文件",
-        nearby_hints=[],
-        nearby_labels=[],
-        nearby_phrases=[],
-        filter_by_control_type=False,
-        control_type_token="text",
-        recorded_anchor=True,
-        hub_source="findall",
-        recorded_efp_name="文件 (已釘選)",
-        recorded_efp_value="文件 (已釘選)",
-        recorded_hub_parent=tree_parent,
-        recorded_efp_parent=tree_parent,
-        parent_probe_fn=parent_probe,
-        bring_into_view_fn=lambda *_a, **_k: None,
-        name_findall_fn=lambda *_a, **_k: [],
-    )
+    assert reason != "landmark_efp_hit"
+    assert reason != "landmark_efp_synth_hit"
     assert chosen is None
-    assert reason == "parent_signature_miss"
+    assert reason == "efp_path_miss"
 
 
-def test_uia_first_findall_input_hub_source_no_hard_constellation_efp() -> None:
-    """findall input hub must not hard-commit via poisoned constellation-EFP."""
+def test_uia_first_efp_path_parents_agree_hit() -> None:
+    parents = [
+        {"control_type": "tree", "name": "導覽", "automation_id": "ProperTreeHost"}
+    ]
+
+    def efp_path(name, value, type_id, parents_arg):
+        assert name == "文件"
+        return ((60, 290, 40, 30), "文件", "", "text")
+
+    chosen, reason = _try_uia_first_unique_select(
+        [],
+        anchor="文件",
+        nearby_hints=[],
+        nearby_labels=[],
+        nearby_phrases=[],
+        control_type_token="text",
+        recorded_anchor=True,
+        hub_source="uia_efp",
+        recorded_efp_name="文件",
+        recorded_efp_parents=parents,
+        efp_path_lookup_fn=efp_path,
+    )
+    assert reason == "efp_path_hit"
+    assert chosen is not None
+    assert chosen.cx == 80
+
+
+def test_uia_first_constellation_parents_chain_miss_falls_to_efp_path() -> None:
     geom = _simple_landmark_geometry(
         landmark_label="側欄地標",
         landmark_xy=(50.0, 50.0),
-        target_xy=(100.0, 100.0),
+        target_xy=(200.0, 200.0),
         scale=100.0,
     )
     landmark = _det(50, 50, text="側欄地標", class_name="text")
-    hub = UiDetection(
-        bbox=(90, 90, 20, 20),
-        cx=100,
-        cy=100,
-        class_id=YOLO_CLASS_INPUT,
-        class_name="input",
-        text="",
-        source="uia",
-        uia_control_type="input",
+    cell = UiDetection(
+        bbox=(190, 190, 20, 20),
+        cx=200,
+        cy=200,
+        class_id=YOLO_CLASS_TEXT,
+        class_name="text",
+        text="K11",
+        source="uia_efp",
+        uia_control_type="data_item",
     )
+    parents = [{"control_type": "table", "name": "Sheet1"}]
+    path_leaf = ((300, 300, 20, 20), "K11", "", "data_item")
 
     def probe(x: int, y: int):
-        return ("label", None, "input", "NVIDIA GeForce Overlay", "")
+        if abs(x - 200) <= 5 and abs(y - 200) <= 5:
+            return ("K11", (190, 190, 20, 20), "data_item", "K11", "")
+        return ("", None, None, "", "")
+
+    def parents_probe(x: int, y: int):
+        # Disagree at constellation center; agree after path lookup center.
+        if abs(x - 200) <= 5:
+            return [{"control_type": "pane", "name": "wrong"}]
+        return list(parents)
+
+    def efp_path(name, value, type_id, parents_arg):
+        return path_leaf
 
     chosen, reason = _try_uia_first_unique_select(
-        [landmark, hub],
-        anchor="輸入欄",
+        [landmark, cell],
+        anchor="K11",
         nearby_hints=[],
         nearby_labels=[],
         nearby_phrases=[],
         filter_by_control_type=True,
-        control_type_token="input",
+        control_type_token="data_item",
         recorded_anchor=True,
         landmark_geometry=geom,
-        recorded_efp_name="NVIDIA GeForce Overlay",
+        recorded_efp_name="K11",
         recorded_efp_value="",
-        hub_source="findall",
+        hub_source="uia_efp",
+        recorded_efp_parents=parents,
         point_probe_fn=probe,
+        parents_probe_fn=parents_probe,
+        efp_path_lookup_fn=efp_path,
     )
-    assert reason != "landmark_efp_hit"
-    assert reason != "landmark_efp_synth_hit"
-    assert reason == "hit"
-    assert chosen is hub
+    assert reason == "efp_path_hit"
+    assert chosen is not None
+    assert (chosen.cx, chosen.cy) == (310, 310)
 
 
 def test_uia_first_uia_efp_hub_source_runs_constellation_efp() -> None:
@@ -1872,6 +1840,7 @@ def test_uia_first_oversize_overlay_does_not_win_efp_even_if_name_matches() -> N
         landmark_geometry=geom,
         recorded_efp_name="下載",
         recorded_efp_value="",
+        hub_source="uia_efp",
         point_probe_fn=probe,
     )
     assert reason == "landmark_efp_hit"
@@ -2052,6 +2021,7 @@ def test_uia_first_landmark_efp_hit_snaps_to_leaf_bbox() -> None:
         landmark_geometry=geom,
         recorded_efp_name="Value",
         recorded_efp_value="RufusYan",
+        hub_source="uia_efp",
         point_probe_fn=probe,
     )
     assert reason == "landmark_efp_hit"
@@ -2066,19 +2036,14 @@ def test_keep_uia_first_on_subtarget_efp_soft_miss_reasons() -> None:
     assert _keep_uia_first_on_subtarget_efp_soft_miss("landmark_efp_synth_hit") is True
     assert _keep_uia_first_on_subtarget_efp_soft_miss("landmark_efp_neighbor_hit") is True
     assert _keep_uia_first_on_subtarget_efp_soft_miss("uia_data_item_name_hit") is True
+    assert _keep_uia_first_on_subtarget_efp_soft_miss("efp_path_hit") is True
     assert _keep_uia_first_on_subtarget_efp_soft_miss("hit") is False
     assert _keep_uia_first_on_subtarget_efp_soft_miss("uia_first_unique") is False
     assert _keep_uia_first_on_subtarget_efp_soft_miss("") is False
-    # FindAll hubs keep the Name leaf even on plain hit / unique soft-miss.
+    # Legacy findall is not a soft-miss keep path.
     assert (
         _keep_uia_first_on_subtarget_efp_soft_miss("hit", hub_source="findall")
-        is True
-    )
-    assert (
-        _keep_uia_first_on_subtarget_efp_soft_miss(
-            "uia_first_unique", hub_source="findall"
-        )
-        is True
+        is False
     )
     assert (
         _keep_uia_first_on_subtarget_efp_soft_miss("hit", hub_source="uia_efp")
@@ -2125,66 +2090,6 @@ def test_intersect_bbox_xywh_cases() -> None:
         25,
     )
     assert _intersect_bbox_xywh((0, 0, 10, 10), (20, 20, 10, 10)) is None
-
-
-def test_findall_efp_intersect_gate_clears_pane_fallback() -> None:
-    findall = UiDetection(
-        bbox=(697, 114, 788, 56),
-        cx=1091,
-        cy=142,
-        class_id=YOLO_CLASS_TEXT,
-        class_name="text",
-        text="控制台 系統 12 天前",
-        source="uia",
-    )
-    pane = UiDetection(
-        bbox=(675, 49, 832, 810),
-        cx=1091,
-        cy=454,
-        class_id=YOLO_CLASS_TEXT,
-        class_name="text",
-        text="CoreInput",
-        source="uia",
-    )
-    gate, kept = _findall_efp_intersect_gate(
-        leaf_bbox=pane.bbox,
-        uia_hub=findall,
-        efp_fallback=pane,
-        pad=12,
-    )
-    assert gate is not None
-    # Padded intersection ≈ padded FindAll button, not full pane.
-    assert gate.bbox == _pad_bbox_xywh(findall.bbox, 12)
-    assert gate.bbox[2] < 900
-    assert gate.bbox[3] < 100
-    # Pane center is outside the intersection gate → fallback cleared.
-    assert kept is None
-
-
-def test_findall_efp_intersect_gate_empty_clears_all() -> None:
-    findall = UiDetection(
-        bbox=(0, 0, 40, 20),
-        cx=20,
-        cy=10,
-        class_id=YOLO_CLASS_TEXT,
-        class_name="text",
-        source="uia",
-    )
-    pane = UiDetection(
-        bbox=(100, 100, 50, 50),
-        cx=125,
-        cy=125,
-        class_id=YOLO_CLASS_TEXT,
-        class_name="text",
-        source="uia",
-    )
-    gate, kept = _findall_efp_intersect_gate(
-        leaf_bbox=pane.bbox,
-        uia_hub=findall,
-        efp_fallback=pane,
-    )
-    assert gate is None
-    assert kept is None
 
 
 def test_subtarget_must_ocr_before_efp_fallback() -> None:

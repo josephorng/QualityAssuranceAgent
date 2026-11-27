@@ -26,16 +26,11 @@ AGENT_SETTINGS_KEYS = (
     "uia_findall_hover_roi_half_px",
 )
 
+# FindAll density knobs stay in AGENT_SETTINGS_KEYS / defaults for replay walks,
+# but are hidden from settings UI after recording FindAll was removed (Phase 2).
 AGENT_SETTINGS_SCHEMA: tuple[tuple[str, str, str], ...] = (
     ("llm_backend", "LLM 後端", "option"),
     ("vision_backend", "Vision 後端", "option"),
-    ("uia_findall_max_seconds", "FindAll 最長時間（秒）", "number"),
-    ("uia_findall_max_hits", "FindAll 最大命中數", "number"),
-    ("uia_findall_max_nodes", "FindAll 最大節點數", "number"),
-    ("uia_findall_hover_max_seconds", "Hover FindAll 最長時間（秒）", "number"),
-    ("uia_findall_hover_max_hits", "Hover FindAll 最大命中數", "number"),
-    ("uia_findall_hover_max_nodes", "Hover FindAll 最大節點數", "number"),
-    ("uia_findall_hover_roi_half_px", "Hover 游標 ROI 半寬（px）", "number"),
 )
 
 # Recording FindAll / budgeted ControlView walk (agent_settings.json).

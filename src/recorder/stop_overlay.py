@@ -15,7 +15,7 @@ from src.recorder.hotkey import RECORDING_HOTKEY_DISPLAY
 
 # Windows: keep recording HUD out of BitBlt/mss screenshots (Win10 2004+).
 # Skip on RDP / Enhanced Session / VM guests — those view paths treat the
-# affinity as "not on a monitor", so the FindAll LED + EFP strip vanish.
+# affinity as "not on a monitor", so the UIA LED + EFP strip vanish.
 _WDA_EXCLUDEFROMCAPTURE = 0x00000011
 _GWL_EXSTYLE = -20
 _WS_EX_LAYERED = 0x00080000
@@ -50,7 +50,7 @@ _UIA_LED_PULSE_COLORS = {
 }
 _UIA_LED_SIZE = 14
 _UIA_STATUS_PULSE_MS = 350
-# Dual FA + EFP (+ parent) strip; keep generous so the plate can grow to fit.
+# EFP (+ parent/scroll) strip; keep generous so the plate can grow to fit.
 _UIA_EFP_LABEL_WIDTH = 256
 _UIA_BG_LABEL_WIDTH = 36
 _UIA_BG_LABEL_COLOR = "#f39c12"
@@ -769,7 +769,7 @@ class RecordingUiaStatusOverlay:
             width = max(int(win.winfo_reqwidth()), _UIA_STATUS_MIN_WIDTH)
             height = max(int(win.winfo_reqheight()), _UIA_STATUS_MIN_HEIGHT)
             if mon is not None:
-                # Keep the plate on-screen; long dual FA|EFP strips can exceed a
+                # Keep the plate on-screen; long EFP strips can exceed a
                 # narrow monitor once the label is fully expanded.
                 max_w = max(
                     _UIA_STATUS_MIN_WIDTH,
@@ -935,17 +935,13 @@ class RecordingUiaStatusOverlay:
         *,
         control_type: str | None = None,
         scroll: str | None = None,
-        findall_label: str | None = None,
-        findall_parent: str | None = None,
         efp_parent: str | None = None,
-        findall_nearby: str | None = None,
         pending: bool = False,
     ) -> None:
-        """Paint dual FindAll + EFP strip (always both sides).
+        """Paint EFP strip (label / parent / scroll).
 
-        Missing non-pending sides use ``(empty)``; an in-flight EFP probe uses
-        ``…``. Parent tokens append as ``· ⌂{parent}``. Qualified FindAll
-        landmark count appends on the FA side as ``· n12``.
+        Missing non-pending uses ``(empty)``; an in-flight EFP probe uses ``…``.
+        Parent tokens append as ``· ⌂{parent}``.
         """
         if self._destroyed or self._label is None:
             return
@@ -953,10 +949,7 @@ class RecordingUiaStatusOverlay:
         value_s = str(value or "").strip()
         type_s = str(control_type or "").strip()
         scroll_s = str(scroll or "").strip()
-        fa_s = str(findall_label or "").strip()
-        fa_parent_s = str(findall_parent or "").strip()
         efp_parent_s = str(efp_parent or "").strip()
-        nearby_s = str(findall_nearby or "").strip()
         if pending and not name_s and not value_s and not scroll_s:
             efp_text = "…"
         elif name_s and value_s:
@@ -977,21 +970,12 @@ class RecordingUiaStatusOverlay:
             efp_text = f"{efp_text} · {scroll_s}"
         if efp_parent_s and efp_text and efp_text != "…":
             efp_text = f"{efp_text} · ⌂{efp_parent_s}"
-        fa_display = fa_s
-        if fa_s and fa_parent_s:
-            fa_display = f"{fa_s} · ⌂{fa_parent_s}"
-        if fa_display and nearby_s:
-            fa_display = f"{fa_display} · n{nearby_s}"
-        elif nearby_s and not fa_display:
-            fa_display = f"(empty) · n{nearby_s}"
-        fa_out = fa_display if fa_display else "(empty)"
         if efp_text:
-            efp_out = efp_text
+            text = f"EFP {efp_text}"
         elif pending:
-            efp_out = "…"
+            text = "EFP …"
         else:
-            efp_out = "(empty)"
-        text = f"FA {fa_out} | EFP {efp_out}"
+            text = "EFP (empty)"
         if len(text) > _UIA_EFP_LABEL_WIDTH:
             text = text[: _UIA_EFP_LABEL_WIDTH - 1] + "…"
         if text == getattr(self, "_efp_text", None):
@@ -1001,11 +985,11 @@ class RecordingUiaStatusOverlay:
             self._label.configure(text=text)
         except Exception:
             pass
-        # Reqwidth grows with the dual FA|EFP strip; remeasure the plate.
+        # Reqwidth grows with the EFP strip; remeasure the plate.
         self._refit_to_content()
 
     def set_bg_activities(self, activities: list[str] | tuple[str, ...] | None) -> None:
-        """Show active background UIA work (EFP / FindAll:settle / …) beside the LED."""
+        """Show active background UIA work (``EFP``) beside the LED."""
         if self._destroyed or self._bg_label is None:
             return
         parts: list[str] = []
@@ -1055,10 +1039,7 @@ class RecordingUiaStatusOverlay:
             str(payload.get("efp_value") or ""),
             control_type=str(payload.get("efp_control_type") or ""),
             scroll=str(payload.get("efp_scroll") or ""),
-            findall_label=str(payload.get("findall_label") or ""),
-            findall_parent=str(payload.get("findall_parent") or ""),
             efp_parent=str(payload.get("efp_parent") or ""),
-            findall_nearby=str(payload.get("findall_nearby") or ""),
             pending=bool(payload.get("efp_pending")),
         )
 

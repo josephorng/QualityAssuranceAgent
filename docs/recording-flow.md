@@ -11,14 +11,14 @@ Interactive overview (open in a browser; switch Replay / Recording): [`uia-repla
 ```mermaid
 flowchart TD
   A[Hub: start RecordingSession] --> B[Live capture]
-  B --> C[events/event_NNN.json<br/>screenshot + uia_snapshot + EFP]
+  B --> C[events/event_NNN.json<br/>screenshot + EFP parents]
   C --> D[Vision prefetch<br/>yolo_ocr/event_NNN.json]
   A2[Hub: begin_stop / finalize_stop] --> E[session.json + final_after.jpeg]
   E --> F[analyze_recording_session]
-  F --> G{recording_uia_skip_reason?}
-  G -->|None → UIA sufficient| H["instruction （UIA）"]
-  G -->|reason → YOLO| I["instruction （YOLO+OCR）"]
-  H --> J[analysis/event_NNN.json<br/>tool_calls + optional yolo_ocr_fallback twin]
+  F --> G{usable EFP leaf?}
+  G -->|yes| H["instruction （UIA） hub_source=uia_efp"]
+  G -->|no| I["instruction （YOLO+OCR） no hub_source"]
+  H --> J[analysis/event_NNN.json<br/>tool_calls + YOLO nearby + optional twin]
   I --> K[analysis/event_NNN.json<br/>tool_calls]
   J --> L[Ready for cache replay]
   K --> L
@@ -82,8 +82,8 @@ A pointer event typically stores:
 
 - `index`, `kind`, `cursor_xy`, button / modifiers / click count
 - `screenshot_path`, `monitor_index`, `monitor_offset`, `click_window`
-- `uia_snapshot` — press-time FindAll when settle cache hwnd + generation match
-- `element_from_point` — Name / Value / bbox / control_type (worker probe, not the mouse hook)
+- `element_from_point` — Name / Value / bbox / control_type / **`parents`** (ControlView ancestor chain; worker probe, not the mouse hook)
+- no budgeted FindAll / useful `uia_snapshot` on new recordings (fields absent or empty)
 - later patches: `window_change`, `focused_element`, drag `end_*`
 
 Key APIs: `RecordingSession._persist_queued_event`, `models.write_event_json`.
@@ -124,17 +124,14 @@ Core decision in `_detect_recording_mouse_targets` (`vision_context.py`):
 
 ```mermaid
 flowchart TD
-  Load[Load UIA from uia_snapshot] --> EFP[Inject EFP peer if usable]
-  EFP --> YOLO[Always run YOLO+OCR on screenshot]
-  YOLO --> Skip{recording_uia_skip_reason is None?}
-  Skip -->|yes UIA sufficient| UIA["vision_path = uia<br/>primary = UIA (+ sparse YOLO nearby peers)<br/>store YOLO as yolo_ocr_fallback_detections"]
-  Skip -->|no| YO["vision_path = yolo_ocr<br/>primary = YOLO (+ EFP peer)"]
-  UIA --> Weak{_maybe_demote_uia_path_for_weak_efp_ocr_disagree?}
-  Weak -->|disagree| YO
-  Weak -->|ok| KeepUIA[Keep UIA path]
+  YOLO[Always run YOLO+OCR on screenshot] --> EFP{usable press EFP leaf?}
+  EFP -->|yes| UIA["vision_path = uia<br/>primary source=uia_efp<br/>nearby = YOLO+OCR only<br/>optional yolo_ocr_fallback twin"]
+  EFP -->|no| YO["vision_path = yolo_ocr<br/>primary = YOLO/OCR<br/>omit hub_source"]
 ```
 
-UIA is sufficient when there is a usable UIA text / textless input / scrollbar under the click, or a uniquely landmark-selected UIA hub, or a primary EFP-labeled leaf. Otherwise the path is YOLO (`vision_path_reason` = skip reason).
+- **Sole UIA hub:** press-time EFP (`source=uia_efp`). No FindAll hub; no `hub_source=findall`.
+- **Nearby / `landmark_geometry`:** YOLO+OCR peers only.
+- Compile stamps `hub_source=uia_efp` only for EFP primaries; emits EFP `name` / `value` / `parents` (never singular `parent` / `hub_parent`).
 
 Chrome icons such as `展開節點` are in `_CONTROL_CHROME_ICON_IDS` and can rank as the primary click target over overlapping OCR text.
 
@@ -155,11 +152,11 @@ Disk: `yolo_ocr/event_NNN.json` (candidates, `vision_path`, optional nested fall
 | `window_verify` | Foreground / appear-disappear checks |
 | `landmark_geometry` | Inside `move_mouse` args when nearby / offset / scroll-hover |
 
-`move_mouse` args also carry `hub_source` (`findall` \| `uia_efp`), recorded EFP `name`/`value`, and `click_window`.
+`move_mouse` args also carry sole `hub_source=uia_efp` (when EFP hub), recorded EFP `name` / `value` / `parents`, and `click_window`. Pure YOLO steps omit `hub_source`.
 
 Twin build: `build_yolo_ocr_fallback_from_vision` when `vision["yolo_ocr_fallback_vision"]` exists.
 
-> **Note:** rewriting a YOLO icon step into a UIA hub (`write_uia_replay_repair`) happens at **cache replay**, not inside `analyze_recording_session`. Analyze prepares the twin; replay may promote the hub. See [`replay-flow.md`](replay-flow.md).
+> **Note:** live FindAll YOLO→UIA replay repair is **disabled** for new format (EFP already stamped at analysis). Twins remain for soft-miss select. See [`replay-flow.md`](replay-flow.md).
 
 ---
 
@@ -177,9 +174,9 @@ sequenceDiagram
   Capture->>Capture: events/event_NNN.json + screenshot + EFP
   Capture->>Vision: prefetch / analyze YOLO+OCR
   Note over Vision: Icon chinese_id=展開節點<br/>UIA often insufficient at glyph
-  Vision->>Analyze: vision_path=yolo_ocr
+  Vision->>Analyze: vision_path=yolo_ocr (no usable EFP leaf)
   Analyze->>Analysis: （YOLO+OCR）「展開節點」圖示 tool_calls
-  Note over Analysis: Later replay may repair to<br/>（UIA）「龜速的網域 (3)|1」文字<br/>+ yolo_ocr_fallback twin for the icon
+  Note over Analysis: Stays YOLO at replay<br/>(no FindAll repair promotion)
 ```
 
 ---

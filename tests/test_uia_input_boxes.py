@@ -709,11 +709,14 @@ def test_element_from_point_name_value_extracts_raw_strings(monkeypatch) -> None
             "value": "1",
             "bbox": [10, 20, 30, 40],
             "control_type": "button",
-            "parent": {
-                "control_type": "tool_bar",
-                "name": "功能區",
-                "automation_id": "Ribbon",
-            },
+            "parents": [
+                {
+                    "control_type": "tool_bar",
+                    "name": "功能區",
+                    "automation_id": "Ribbon",
+                },
+                {"control_type": "window", "name": "App"},
+            ],
         },
     )
     payload = element_from_point_name_value(100, 200)
@@ -721,7 +724,8 @@ def test_element_from_point_name_value_extracts_raw_strings(monkeypatch) -> None
     assert payload["value"] == "1"
     assert payload["bbox"] == [10, 20, 30, 40]
     assert payload["control_type"] == "button"
-    assert payload["parent"]["name"] == "功能區"
+    assert payload["parents"][0]["name"] == "功能區"
+    assert payload["parents"][1]["control_type"] == "window"
     assert isinstance(payload["element_from_point_s"], float)
     assert payload["element_from_point_s"] >= 0.0
 
@@ -736,15 +740,17 @@ def test_element_from_point_name_value_keeps_timing_when_empty(monkeypatch) -> N
     assert "value" not in payload
     assert "bbox" not in payload
     assert "control_type" not in payload
-    assert "parent" not in payload
+    assert "parents" not in payload
     assert isinstance(payload["element_from_point_s"], float)
     assert payload["element_from_point_s"] >= 0.0
 
 
 def test_parent_signature_usable_and_agree() -> None:
     from src.recorder.uia_input_boxes import (
+        format_parents_chain_compact,
         parent_signature_usable,
         parent_signatures_agree,
+        parents_chains_agree,
     )
 
     assert not parent_signature_usable({})
@@ -780,6 +786,27 @@ def test_parent_signature_usable_and_agree() -> None:
         {"automation_id": "ProperTreeHost"},
         {"control_type": "tool_bar"},
     )
+
+    recorded = [
+        {"control_type": "tree_item", "name": "清單 row 1"},
+        {"control_type": "pane"},
+        {"control_type": "tree", "automation_id": "tree_Control"},
+        {"control_type": "window", "name": "電腦資產"},
+    ]
+    live_ok = [
+        {"control_type": "tree_item", "name": "清單 row 1"},
+        {"control_type": "pane"},
+        {"control_type": "tree", "automation_id": "tree_Control"},
+        {"control_type": "window", "name": "電腦資產"},
+    ]
+    live_bad = [
+        {"control_type": "tree_item", "name": "清單 row 2"},
+        {"control_type": "tree", "automation_id": "tree_Control"},
+    ]
+    assert parents_chains_agree(recorded, live_ok)
+    assert not parents_chains_agree(recorded, live_bad)
+    assert parents_chains_agree([], live_ok)
+    assert format_parents_chain_compact(recorded) == "清單 row 1"
 
 
 def test_merge_nested_element_boxes_keeps_larger() -> None:

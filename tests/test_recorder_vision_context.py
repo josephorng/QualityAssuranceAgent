@@ -16,6 +16,7 @@ from cua_mcp.yolo_onnx import (
 )
 from src.recorder.models import RecordedEvent
 from src.recorder.vision_context import (
+    VISION_PATH_EFP_MISS_REASON,
     VISION_PATH_UIA_NOT_UNIQUE_REASON,
     _BBOX_HIT_TOLERANCE_PX,
     _MIN_NEARBY_TEXT_CANDIDATES,
@@ -1433,10 +1434,10 @@ def test_recording_uia_accepts_textless_scrollbar_or_input() -> None:
     click = (100, 100)
     landmarks = _uia_landmark_texts(_MIN_NEARBY_TEXT_CANDIDATES)
     scrollbar = _detection_from_bbox(
-        (90, 40, 16, 160), YOLO_CLASS_SCROLLBAR, source="uia"
+        (90, 40, 16, 160), YOLO_CLASS_SCROLLBAR, source="uia_efp"
     )
     field = _detection_from_bbox(
-        (80, 90, 40, 24), YOLO_CLASS_INPUT, source="uia"
+        (80, 90, 40, 24), YOLO_CLASS_INPUT, source="uia_efp"
     )
     assert recording_uia_detections_sufficient(
         [*landmarks, scrollbar], local_x=click[0], local_y=click[1]
@@ -1451,10 +1452,12 @@ def test_recording_uia_accepts_textless_scrollbar_or_input() -> None:
     ocr_bar = _detection_from_bbox(
         (90, 40, 16, 160), YOLO_CLASS_SCROLLBAR, source="ocr"
     )
-    # OCR scrollbar is not a UIA hub; unique nearby UIA texts still win via
-    # empty-point synth when nothing usable covers the click.
-    assert recording_uia_detections_sufficient(
-        [*landmarks, ocr_bar], local_x=click[0], local_y=click[1]
+    # OCR scrollbar is not a UIA hub; FindAll-only landmark empty-synth is gone.
+    assert (
+        recording_uia_detections_sufficient(
+            [*landmarks, ocr_bar], local_x=click[0], local_y=click[1]
+        )
+        is False
     )
     assert (
         recording_uia_detections_sufficient(
@@ -1507,11 +1510,11 @@ def test_recording_uia_text_on_click_still_passes_with_scrollbar() -> None:
     )
 
 
-def test_recording_uia_empty_point_accepts_unique_nearest_hub() -> None:
-    """Whitespace with a uniquely selectable nearby UIA hub is UIA-sufficient."""
+def test_recording_uia_empty_point_accepts_efp_labeled_hub() -> None:
+    """Whitespace with a covering EFP labeled leaf is UIA-sufficient (no FindAll hub)."""
     empty = (200, 200)
     hub = _detection_from_bbox(
-        (10, 10, 40, 16), YOLO_CLASS_TEXT, text="唯一標籤", source="uia"
+        (190, 190, 40, 16), YOLO_CLASS_TEXT, text="唯一標籤", source="uia_efp"
     )
     landmarks = _uia_landmark_texts(3)
     assert recording_uia_detections_sufficient(
@@ -1520,6 +1523,16 @@ def test_recording_uia_empty_point_accepts_unique_nearest_hub() -> None:
     assert (
         recording_uia_skip_reason([hub, *landmarks], local_x=empty[0], local_y=empty[1])
         is None
+    )
+    # FindAll-only nearest hub without EFP is not sufficient for new format.
+    findall_only = _detection_from_bbox(
+        (10, 10, 40, 16), YOLO_CLASS_TEXT, text="唯一標籤", source="uia"
+    )
+    assert (
+        recording_uia_detections_sufficient(
+            [findall_only, *landmarks], local_x=empty[0], local_y=empty[1]
+        )
+        is False
     )
 
 
@@ -1549,9 +1562,10 @@ def test_recording_uia_empty_point_rejects_ambiguous_nearest_hubs() -> None:
 def test_recording_uia_release_past_track_counts_as_press_scrollbar() -> None:
     bar = (100, 100, 20, 200)
     landmarks = _uia_landmark_texts(_MIN_NEARBY_TEXT_CANDIDATES)
-    # Left of the bar / above the track: empty-synth via unique landmarks wins.
-    assert recording_uia_detections_sufficient(
-        landmarks, local_x=90, local_y=40
+    # FindAll landmarks alone no longer open a UIA hub (EFP-only sufficiency).
+    assert (
+        recording_uia_detections_sufficient(landmarks, local_x=90, local_y=40)
+        is False
     )
     # No hubs at all → only forced press scrollbar can cover the release.
     assert (
@@ -1784,9 +1798,10 @@ def test_select_click_primary_prefers_uia_text_over_ocr_at_same_place() -> None:
     assert primary["source"] == "uia"
 
 
-def test_detect_recording_mouse_targets_keeps_ocr_twin_when_uia_rich(
+def test_detect_recording_mouse_targets_findall_rich_without_efp_uses_yolo(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """FindAll snapshot alone is not a UIA hub; EFP miss → YOLO nearby/path."""
     bgr = np.zeros((200, 400, 3), dtype=np.uint8)
     yolo_calls: list[object] = []
     ocr = _detection_from_bbox(
@@ -1814,14 +1829,56 @@ def test_detect_recording_mouse_targets_keeps_ocr_twin_when_uia_rich(
         uia_prefetched=(None, None, labeled),
     )
     assert yolo_calls == ["yolo"]
+    assert timing.get("vision_path") == "yolo_ocr"
+    assert timing.get("vision_path_reason") == VISION_PATH_EFP_MISS_REASON
+    assert timing.get("recording_ocr_deferred") is False
+    assert timing.get("recording_uia_sufficient") is False
+    assert [d.text for d in detections] == ["主按鈕OCR"]
+    assert timing.get("yolo_ocr_fallback_detections") is None
+
+
+def test_detect_recording_mouse_targets_efp_hub_keeps_yolo_nearby(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Usable press EFP opens UIA path; nearby peers stay YOLO(+OCR) only."""
+    bgr = np.zeros((200, 400, 3), dtype=np.uint8)
+    ocr = _detection_from_bbox(
+        (10, 10, 40, 14), YOLO_CLASS_TEXT, text="附近OCR", source="ocr"
+    )
+
+    def fake_detect(*_a, **_k):
+        return [ocr]
+
+    monkeypatch.setattr(
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
+        fake_detect,
+    )
+    efp = {
+        "name": "主按鈕",
+        "value": "",
+        "control_type": "button",
+        "bbox": [95, 95, 20, 20],
+    }
+    timing: dict = {}
+    detections, timing = _detect_recording_mouse_targets(
+        bgr,
+        timing_out=timing,
+        local_x=100,
+        local_y=100,
+        uia_prefetched=(None, None, [((95, 95, 20, 20), "主按鈕")]),
+        element_from_point=efp,
+        efp_monitor_offset=(0, 0),
+    )
     assert timing.get("vision_path") == "uia"
     assert "vision_path_reason" not in timing
-    assert timing.get("recording_ocr_deferred") is False
     assert timing.get("recording_uia_sufficient") is True
-    assert any(d.text == "主按鈕" and d.source == "uia" for d in detections)
-    assert all(d.source == "uia" for d in detections)
+    assert timing.get("efp_peer_injected") is True
+    assert detections[0].text == "主按鈕"
+    assert detections[0].source == "uia_efp"
+    assert any(d.text == "附近OCR" and d.source == "ocr" for d in detections)
+    assert all(d.source != "uia" for d in detections)
     twin = timing.get("yolo_ocr_fallback_detections")
-    assert isinstance(twin, list) and [d.text for d in twin] == ["主按鈕OCR"]
+    assert isinstance(twin, list) and [d.text for d in twin] == ["附近OCR"]
 
 
 def test_detect_recording_mouse_targets_finishes_ocr_when_uia_thin(
@@ -1855,17 +1912,17 @@ def test_detect_recording_mouse_targets_finishes_ocr_when_uia_thin(
         uia_prefetched=thin_prefetched,
     )
     assert timing.get("vision_path") == "yolo_ocr"
-    assert timing.get("vision_path_reason") == "點擊處沒有可用的 UIA 文字"
+    assert timing.get("vision_path_reason") == VISION_PATH_EFP_MISS_REASON
     assert timing.get("recording_ocr_deferred") is False
     assert timing.get("recording_uia_sufficient") is False
     assert [d.text for d in detections] == ["搜尋"]
     assert all(d.source != "uia" for d in detections)
 
 
-def test_detect_recording_empty_click_uses_unique_uia_hub(
+def test_detect_recording_empty_click_findall_hubs_without_efp_uses_yolo(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Empty whitespace with unique UIA hubs stays on the UIA path (offset synth)."""
+    """FindAll landmarks alone no longer open UIA path for empty-space clicks."""
     bgr = np.zeros((200, 400, 3), dtype=np.uint8)
     neighbor = _detection_from_bbox(
         (10, 10, 40, 14), YOLO_CLASS_TEXT, text="搜尋", source="ocr"
@@ -1890,10 +1947,10 @@ def test_detect_recording_empty_click_uses_unique_uia_hub(
         local_y=150,
         uia_prefetched=empty_click_prefetched,
     )
-    assert timing.get("vision_path") == "uia"
-    assert timing.get("recording_uia_sufficient") is True
-    assert timing.get("yolo_ocr_fallback_detections") is not None
-    assert any(d.source == "uia" for d in detections)
+    assert timing.get("vision_path") == "yolo_ocr"
+    assert timing.get("vision_path_reason") == VISION_PATH_EFP_MISS_REASON
+    assert timing.get("recording_uia_sufficient") is False
+    assert [d.text for d in detections] == ["搜尋"]
 
 
 def test_detect_recording_empty_click_no_uia_hubs_uses_yolo(
@@ -1920,7 +1977,7 @@ def test_detect_recording_empty_click_no_uia_hubs_uses_yolo(
         uia_prefetched=empty_click_prefetched,
     )
     assert timing.get("vision_path") == "yolo_ocr"
-    assert timing.get("vision_path_reason") == "點擊處沒有可用的 UIA 文字"
+    assert timing.get("vision_path_reason") == VISION_PATH_EFP_MISS_REASON
     assert [d.text for d in detections] == ["搜尋"]
     assert all(d.source != "uia" for d in detections)
 
@@ -1928,7 +1985,7 @@ def test_detect_recording_empty_click_no_uia_hubs_uses_yolo(
 def test_detect_recording_yolo_fallback_merges_uia_scrollbar(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Ambiguous UIA scrollbars fall back to YOLO but still merge the UIA bar."""
+    """Without usable EFP, YOLO path still receives prefer-replaced UIA bars."""
     from cua_mcp.yolo_onnx import YOLO_CLASS_SCROLLBAR
 
     bgr = np.zeros((200, 400, 3), dtype=np.uint8)
@@ -1937,7 +1994,6 @@ def test_detect_recording_yolo_fallback_merges_uia_scrollbar(
     )
     uia_bar_bbox = (178, 8, 18, 100)
     peer_bar_bbox = (40, 8, 18, 100)
-    # Two scrollbars and no usable texts → cannot uniquely select → YOLO path.
     prefetched = (None, [uia_bar_bbox, peer_bar_bbox], [])
 
     def fake_detect(*_a, **kwargs):
@@ -1960,7 +2016,7 @@ def test_detect_recording_yolo_fallback_merges_uia_scrollbar(
         uia_prefetched=prefetched,
     )
     assert timing.get("vision_path") == "yolo_ocr"
-    assert timing.get("vision_path_reason") == VISION_PATH_UIA_NOT_UNIQUE_REASON
+    assert timing.get("vision_path_reason") == VISION_PATH_EFP_MISS_REASON
     assert any(
         d.source == "uia" and d.class_id == YOLO_CLASS_SCROLLBAR for d in detections
     )

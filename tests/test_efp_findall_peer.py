@@ -698,13 +698,14 @@ def test_uia_first_miss_reaches_yolo_path_gate() -> None:
         recorded_anchor=True,
     )
     assert chosen is None
-    assert reason == "no_anchor"
+    # Without hub_source=uia_efp / recorded EFP identity, UIA-first is skipped.
+    assert reason == "no_efp_identity"
 
 
 def test_efp_data_item_before_gate_opens_uia_path_over_covering_scrollbar(
     monkeypatch,
 ) -> None:
-    """FindAll without DataItems + EFP G8 → vision_path=uia; cell beats scrollbar."""
+    """EFP G8 alone opens UIA path; FindAll scrollbar is not the hub pool."""
     import numpy as np
 
     from src.recorder.vision_context import (
@@ -747,9 +748,12 @@ def test_efp_data_item_before_gate_opens_uia_path_over_covering_scrollbar(
     assert timing.get("recording_uia_sufficient") is True
     assert timing.get("efp_peer_injected") is True
     assert any(
-        d.text == "G8" and getattr(d, "uia_control_type", None) == "data_item"
+        d.text == "G8"
+        and d.source == "uia_efp"
+        and getattr(d, "uia_control_type", None) == "data_item"
         for d in detections
     )
+    assert all(d.source != "uia" for d in detections)
     assert recording_uia_skip_reason(detections, local_x=500, local_y=488) is None
     primary = select_click_primary_candidate(
         [_detection_to_dict(d) for d in detections],
@@ -758,6 +762,7 @@ def test_efp_data_item_before_gate_opens_uia_path_over_covering_scrollbar(
     )
     assert primary is not None
     assert primary.get("text") == "G8"
+    assert primary.get("source") == "uia_efp"
     assert primary.get("uia_control_type") == "data_item"
 
 
@@ -817,10 +822,10 @@ def test_efp_peer_injects_when_findall_covers_click_disagrees() -> None:
     assert primary.get("text") == "儲存(S)"
 
 
-def test_efp_event009_shape_findall_save_beats_k15_but_keeps_efp_peer(
+def test_efp_event009_shape_efp_hub_ignores_findall_save(
     monkeypatch,
 ) -> None:
-    """event_009-shaped Save click: FindAll 儲存(S) wins; K15 stays in pool."""
+    """EFP-only hub: K15 is primary; FindAll 儲存(S) is not in the UIA pool."""
     import numpy as np
 
     from src.recorder.vision_context import (
@@ -840,9 +845,15 @@ def test_efp_event009_shape_findall_save_beats_k15_but_keeps_efp_peer(
             ((826, 614, 88, 28), "取消", "button"),
         ],
     )
+    yolo_save = _detection_from_bbox(
+        (715, 614, 99, 28),
+        YOLO_CLASS_TEXT,
+        text="儲存(S)",
+        source="ocr",
+    )
 
     def fake_detect(*_a, **_k):
-        return []
+        return [yolo_save]
 
     monkeypatch.setattr(
         "src.recorder.vision_context._detect_mouse_targets_from_bgr",
@@ -864,10 +875,10 @@ def test_efp_event009_shape_findall_save_beats_k15_but_keeps_efp_peer(
     )
     assert timing.get("vision_path") == "uia"
     assert timing.get("efp_peer_injected") is True
-    assert timing.get("efp_findall_label_disagree") is True
     assert any(
         d.text == "K15" and d.source == "uia_efp" for d in detections
     )
+    assert all(d.source != "uia" for d in detections)
     nearest = _nearest_candidates(detections, 798, 632)
     nearest = _promote_click_primary_detections(nearest, 798, 632)
     primary = select_click_primary_candidate(
@@ -876,11 +887,12 @@ def test_efp_event009_shape_findall_save_beats_k15_but_keeps_efp_peer(
         632,
     )
     assert primary is not None
-    assert primary.get("text") == "儲存(S)"
+    assert primary.get("text") == "K15"
+    assert primary.get("source") == "uia_efp"
 
 
 def test_efp_data_item_beats_generic_list_row_hub(monkeypatch) -> None:
-    """Grid cell EFP outranks FindAll ``清單 row N`` / tree_item covering hub."""
+    """Grid cell EFP opens UIA path; FindAll row hubs are not in the pool."""
     import numpy as np
 
     from src.recorder.vision_context import (
@@ -924,7 +936,7 @@ def test_efp_data_item_beats_generic_list_row_hub(monkeypatch) -> None:
     )
     assert timing.get("vision_path") == "uia"
     assert timing.get("efp_peer_injected") is True
-    assert timing.get("efp_findall_label_disagree") is True
+    assert all(d.source != "uia" for d in detections)
     assert recording_uia_skip_reason(detections, local_x=512, local_y=168) is None
     primary = select_click_primary_candidate(
         [_detection_to_dict(d) for d in detections],

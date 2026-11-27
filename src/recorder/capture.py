@@ -50,9 +50,6 @@ from src.recorder.verify_signals import (
 from src.recorder.window_snapshot import (
     ClickWindowInfo,
     WindowInfo,
-    _MINIMIZED_COORD_THRESHOLD,
-    _TASKBAR_CLASS_NAMES,
-    _window_class_name,
     _windows_debug_list,
     diff_snapshots_with_debug,
     resolve_click_window,
@@ -66,18 +63,6 @@ from src.recorder.text_choose import is_masked_ocr_text
 _DOUBLE_CLICK_INTERVAL_S = 0.35
 _DOUBLE_CLICK_MAX_DIST_PX = 8
 _DRAG_THRESHOLD_PX = 8
-# Non-interactive shell helpers skipped by the event-1 multi-hwnd UIA seed.
-_SEED_UIA_NOISE_CLASS_NAMES = frozenset(
-    {
-        "DummyDWMListenerWindow",
-        "EdgeUiInputTopWndClass",
-        "ThumbnailDeviceHelperWnd",
-        "CEF-OSC-WIDGET",
-    }
-)
-# Desktop icon host (Progman or wallpaper WorkerW). Retained across settles
-# like the taskbar so icon clicks can attach FindAll UIA instead of YOLO+OCR.
-_DESKTOP_SHELL_UIA_CLASS_NAMES = frozenset({"Progman", "WorkerW"})
 # Distinct from None, which means mouse-up reserved the drag-end slot
 # before the mouse-down monitor grab finished.
 _DRAG_END_UNCLAIMED = object()
@@ -168,7 +153,7 @@ class _DeferredCaptureJob:
     # | emit_left_gesture | emit_right_gesture | mouse_pointer_event
     # | seed_settle_windows | read_clipboard_paste | idle_efp
     # | append_record_log | restart_keyboard_listener
-    # idle_efp: ElementFromPoint LED label, then optional hover FindAll warm
+    # idle_efp: ElementFromPoint LED label (no FindAll warm)
     meta: dict[str, Any] | None = None
     pending_pre_type: _PendingPreTypeShot | None = None
     pending_pre_key: _PendingPreTypeShot | None = None
@@ -1100,19 +1085,7 @@ class RecordingSession:
         ] = {}
         self._left_press_click_windows: dict[int, ClickWindowInfo | None] = {}
         self._right_press_click_windows: dict[int, ClickWindowInfo | None] = {}
-        # Settled FindAll from the previous window-step (or recording seed).
-        # Press copies this as uia_snapshot when hwnd matches and the settle
-        # was published after that previous event (see after_index).
-        self._last_settle_uia: dict[str, Any] | None = None
-        # Seed: FindAll under each shown top-level (incl. taskbar). Later
-        # single-hwnd settles drop non-shell seed entries but keep taskbar-class
-        # and hover-warmed (cache_kind=hover) snapshots for later presses.
-        self._last_settle_uia_by_hwnd: dict[int, dict[str, Any]] = {}
-        # Event index whose window-step published ``_last_settle_uia`` (0 = seed).
-        self._last_settle_uia_after_index: int | None = None
-        # Bumped on each typing/edit key that dirties settle; typing-pause
-        # FindAll publishes only when the generation still matches.
-        self._typing_uia_generation: int = 0
+        # Press-time FindAll caches removed (Phase 2); slots stay None.
         self._left_press_uia: dict[int, dict[str, Any] | None] = {}
         self._right_press_uia: dict[int, dict[str, Any] | None] = {}
         # Feasibility: ElementFromPoint Name/Value probed on the capture worker
@@ -1122,9 +1095,7 @@ class RecordingSession:
         # Pre-click idle EFP latched on the press hook when near press xy.
         self._left_press_efp_idle: dict[int, dict[str, Any] | None] = {}
         self._right_press_efp_idle: dict[int, dict[str, Any] | None] = {}
-        # Drag emit waits for window-step end_uia before notifying vision.
-        # Click/press UIA prefers settle-cache; ComboLBox popup miss FindAlls
-        # under click_window on the worker. Same-hwnd generation miss stays empty.
+        # Drag emit waits for window-step before notifying vision (end_uia unused).
         self._uia_notify_wait: dict[int, int] = {}
         self._drag_end_captures: dict[int, dict[int, tuple[str, int, tuple[int, int]]]] = {}
         self._pending_right_coords: tuple[int, int] | None = None
@@ -1217,21 +1188,13 @@ class RecordingSession:
         self._uia_status_efp_control_type: str = ""
         self._uia_status_efp_scroll: str = ""
         self._uia_status_efp_pending: bool = False
-        # FindAll covering leaf text at the idle/readiness cursor (LED dual strip).
-        self._uia_status_findall_label: str = ""
-        self._uia_status_findall_parent: str = ""
         self._uia_status_efp_parent: str = ""
-        # Unique usable FindAll text labels in the cursor's settle/hover cache.
-        self._uia_status_findall_nearby: str = ""
-        # Active background UIA work for the LED strip (EFP / FindAll:* kinds).
+        # Active background UIA work for the LED strip (EFP).
         # Insertion-ordered; keys are short labels shown on the overlay.
         self._uia_bg_active: dict[str, bool] = {}
-        # Idle hover FindAll LED claim; settle/seed yellow bumps the token.
-        self._hover_uia_led_active: bool = False
-        self._hover_uia_led_token: int = 0
         self._idle_efp_generation: int = 0
         self._idle_efp_timer: threading.Timer | None = None
-        # Last idle probe used to re-evaluate LED after settle/hover FindAll.
+        # Last idle probe used to re-evaluate LED after EFP.
         self._idle_efp_cursor_xy: tuple[int, int] | None = None
         self._idle_efp_probed_name: str = ""
         self._idle_efp_probed_value: str = ""
@@ -1343,10 +1306,6 @@ class RecordingSession:
             self._right_press_captures = {}
             self._left_press_click_windows = {}
             self._right_press_click_windows = {}
-            self._last_settle_uia = None
-            self._last_settle_uia_by_hwnd = {}
-            self._last_settle_uia_after_index = None
-            self._typing_uia_generation = 0
             self._left_press_uia = {}
             self._right_press_uia = {}
             self._left_press_efp = {}
@@ -1385,10 +1344,6 @@ class RecordingSession:
             self._before_shot_frame_id = 0
             self._last_settle_windows = None
             self._last_settle_signals = None
-            self._last_settle_uia = None
-            self._last_settle_uia_by_hwnd = {}
-            self._last_settle_uia_after_index = None
-            self._typing_uia_generation = 0
             self._start_windows = None
             self._start_signals = None
             self._settle_windows_ready.clear()
@@ -1406,13 +1361,8 @@ class RecordingSession:
             self._uia_status_efp_control_type = ""
             self._uia_status_efp_scroll = ""
             self._uia_status_efp_pending = False
-            self._uia_status_findall_label = ""
-            self._uia_status_findall_parent = ""
             self._uia_status_efp_parent = ""
-            self._uia_status_findall_nearby = ""
             self._uia_bg_active = {}
-            self._hover_uia_led_active = False
-            self._hover_uia_led_token = 0
             self._idle_efp_generation = 0
             self._idle_efp_cursor_xy = None
             self._idle_efp_probed_name = ""
@@ -1992,101 +1942,15 @@ class RecordingSession:
             return "…"
         return cleaned[: _IDLE_EFP_LABEL_MAX_CHARS - 1] + "…"
 
-    def _findall_led_snapshot_at_cursor(
-        self, cursor_xy: tuple[int, int] | None
-    ) -> dict[str, Any] | None:
-        """Settle/hover FindAll cache for ``cursor_xy``, or ``None``.
-
-        Must not be called while holding ``_lock``. Never raises.
-        """
-        if cursor_xy is None:
-            return None
-        try:
-            x, y = int(cursor_xy[0]), int(cursor_xy[1])
-        except (TypeError, ValueError, IndexError):
-            return None
-        try:
-            click_window = self._click_window_payload_at(x, y)
-            snapshot = self._cached_uia_before(click_window, cursor_xy=(x, y))
-            return snapshot if isinstance(snapshot, dict) else None
-        except Exception:
-            return None
-
-    def _findall_cover_label_at_cursor(
-        self, cursor_xy: tuple[int, int] | None
-    ) -> str:
-        """FindAll hub text analysis would pick at ``cursor_xy``, or ``""``.
-
-        Same covering primary as analysis ``_pick_uia_click_primary`` (nested
-        leaf over larger parent), so the LED FA strip matches
-        ``hub_source=findall`` anchors. Must not be called while holding
-        ``_lock`` (cache lookup takes the lock). Never raises — LED callers
-        treat miss as empty.
-        """
-        if cursor_xy is None:
-            return ""
-        try:
-            x, y = int(cursor_xy[0]), int(cursor_xy[1])
-        except (TypeError, ValueError, IndexError):
-            return ""
-        try:
-            snapshot = self._findall_led_snapshot_at_cursor((x, y))
-            if not isinstance(snapshot, dict):
-                return ""
-            from src.recorder.vision_context import (
-                recording_uia_findall_hub_label_at_point,
-            )
-
-            return recording_uia_findall_hub_label_at_point(
-                snapshot,
-                screen_xy=(x, y),
-            )
-        except Exception:
-            return ""
-
-    def _findall_nearby_count_at_cursor(
-        self, cursor_xy: tuple[int, int] | None
-    ) -> int | None:
-        """Unique usable FindAll text labels in the cursor cache, or ``None``.
-
-        Matches ``count_usable_snapshot_text_labels`` (qualified landmark pool
-        that can supply nearby hints). ``None`` when no settle/hover snapshot.
-        """
-        snapshot = self._findall_led_snapshot_at_cursor(cursor_xy)
-        if not isinstance(snapshot, dict):
-            return None
-        try:
-            from src.recorder.uia_input_boxes import count_usable_snapshot_text_labels
-
-            return int(count_usable_snapshot_text_labels(snapshot))
-        except Exception:
-            return None
-
-    def _findall_nearby_token_at_cursor(
-        self, cursor_xy: tuple[int, int] | None
-    ) -> str:
-        """Decimal nearby-count token for the LED, or ``""`` when no snapshot."""
-        count = self._findall_nearby_count_at_cursor(cursor_xy)
-        return "" if count is None else str(int(count))
-
-    def _led_parent_labels(
+    def _led_efp_parent(
         self,
         *,
-        findall_label: str,
-        efp_name: str = "",
-        efp_value: str = "",
         efp_payload: dict[str, Any] | None = None,
-    ) -> tuple[str, str]:
-        """Return ``(findall_parent, efp_parent)`` compact tokens for the LED.
-
-        EFP parent comes from the idle/probe payload. FindAll parent reuses it
-        when the covering FA label soft-agrees with the EFP leaf (same as
-        analysis hub_parent reuse); otherwise left blank (no extra COM on LED).
-        """
+    ) -> str:
+        """Compact parent token for the LED from EFP ``parents`` (or legacy ``parent``)."""
         from src.recorder.uia_input_boxes import (
             format_parent_signature_compact,
-            ocr_uia_labels_soft_agree,
-            resolve_usable_uia_probe_label,
+            format_parents_chain_compact,
         )
 
         payload = efp_payload
@@ -2094,22 +1958,11 @@ class RecordingSession:
             with self._lock:
                 stored = self._idle_efp_payload
             payload = stored if isinstance(stored, dict) else None
-        efp_parent = ""
-        if isinstance(payload, dict):
-            efp_parent = format_parent_signature_compact(payload.get("parent"))
-        fa = str(findall_label or "").strip()
-        findall_parent = ""
-        if fa and efp_parent:
-            efp_label = resolve_usable_uia_probe_label(
-                name=str(efp_name or "").strip(),
-                value=str(efp_value or "").strip(),
-            )
-            if efp_label and (
-                fa.casefold() == efp_label.casefold()
-                or ocr_uia_labels_soft_agree(fa, efp_label)
-            ):
-                findall_parent = efp_parent
-        return findall_parent, efp_parent
+        if not isinstance(payload, dict):
+            return ""
+        if "parents" in payload:
+            return format_parents_chain_compact(payload.get("parents"))
+        return format_parent_signature_compact(payload.get("parent"))
 
     def _emit_uia_status(
         self,
@@ -2122,23 +1975,18 @@ class RecordingSession:
         efp_control_type: str | None | object = _EFP_UNSET,
         efp_scroll: str | None | object = _EFP_UNSET,
         efp_pending: bool | None = None,
-        findall_label: str | None | object = _EFP_UNSET,
-        findall_parent: str | None | object = _EFP_UNSET,
         efp_parent: str | None | object = _EFP_UNSET,
-        findall_nearby: str | None | object = _EFP_UNSET,
         bg_add: str | None = None,
         bg_remove: str | None = None,
         bg_clear: bool = False,
     ) -> None:
-        """Publish settle-UIA LED + idle EFP / FindAll labels. Safe from worker threads.
+        """Publish settle-UIA LED + idle EFP labels. Safe from worker threads.
 
         ``bg_add`` / ``bg_remove`` / ``bg_clear`` maintain the overlay's
-        background-work strip (``EFP``, ``FindAll:settle``, ``FindAll:hover``, …).
-        ``efp_scroll`` is a compact ScrollPattern/RangeValue percent label
-        (``V37%``) shown only for scrollbar-like leaves.
-        ``findall_label`` is the FindAll covering leaf at the cursor (dual LED).
-        ``findall_parent`` / ``efp_parent`` are compact parent tokens (``⌂`` on UI).
-        ``findall_nearby`` is the unique usable FindAll landmark count (``n12``).
+        background-work strip (``EFP``). ``efp_scroll`` is a compact
+        ScrollPattern/RangeValue percent label (``V37%``) shown only for
+        scrollbar-like leaves. ``efp_parent`` is a compact parent token
+        (``⌂`` on UI) from the EFP ``parents`` chain.
         """
         with self._lock:
             bg_changed = False
@@ -2195,32 +2043,12 @@ class RecordingSession:
             if efp_pending is not None:
                 self._uia_status_efp_pending = bool(efp_pending)
                 status_changed = True
-            if findall_label is not _EFP_UNSET:
-                next_fa = self._truncate_uia_status_label(
-                    "" if findall_label is None else str(findall_label)
-                )
-                if next_fa != self._uia_status_findall_label:
-                    self._uia_status_findall_label = next_fa
-                    status_changed = True
-            if findall_parent is not _EFP_UNSET:
-                next_fa_parent = self._truncate_uia_status_label(
-                    "" if findall_parent is None else str(findall_parent)
-                )
-                if next_fa_parent != self._uia_status_findall_parent:
-                    self._uia_status_findall_parent = next_fa_parent
-                    status_changed = True
             if efp_parent is not _EFP_UNSET:
                 next_efp_parent = self._truncate_uia_status_label(
                     "" if efp_parent is None else str(efp_parent)
                 )
                 if next_efp_parent != self._uia_status_efp_parent:
                     self._uia_status_efp_parent = next_efp_parent
-                    status_changed = True
-            if findall_nearby is not _EFP_UNSET:
-                raw_nearby = "" if findall_nearby is None else str(findall_nearby)
-                next_nearby = self._truncate_uia_status_label(raw_nearby.strip())
-                if next_nearby != self._uia_status_findall_nearby:
-                    self._uia_status_findall_nearby = next_nearby
                     status_changed = True
             if pulse is not None:
                 status_changed = True
@@ -2236,10 +2064,7 @@ class RecordingSession:
                 "efp_control_type": self._uia_status_efp_control_type,
                 "efp_scroll": self._uia_status_efp_scroll,
                 "efp_pending": self._uia_status_efp_pending,
-                "findall_label": self._uia_status_findall_label,
-                "findall_parent": self._uia_status_findall_parent,
                 "efp_parent": self._uia_status_efp_parent,
-                "findall_nearby": self._uia_status_findall_nearby,
                 "bg": list(self._uia_bg_active.keys()),
             }
             callback = self._on_uia_status
@@ -2264,7 +2089,7 @@ class RecordingSession:
         """True when ``(x, y)`` is still inside the last usable labeled-leaf EFP bbox.
 
         Caller holds ``_lock``. Used to skip mouse-move re-probes inside an
-        Excel cell or File-tab button; settle/hover force-refresh bypasses this.
+        Excel cell or File-tab button; force-refresh bypasses this.
         """
         from src.recorder.uia_input_boxes import (
             efp_payload_is_usable_labeled_leaf,
@@ -2313,16 +2138,6 @@ class RecordingSession:
         if clear_efp_bg:
             self._emit_uia_status(bg_remove="EFP")
 
-    def _reschedule_idle_efp_from_last_pointer(self) -> None:
-        """Queue a fresh idle EFP at the latest cursor after FindAll finishes."""
-        with self._lock:
-            if not self._accepting_input or self._finalizing:
-                return
-            xy = self._last_move_xy or self._last_pointer_cursor_xy
-        if xy is None:
-            return
-        self._schedule_idle_efp(int(xy[0]), int(xy[1]), force=True)
-
     def _idle_efp_timer_fired(self, generation: int, x: int, y: int) -> None:
         with self._lock:
             if not self._accepting_input or self._finalizing:
@@ -2331,22 +2146,13 @@ class RecordingSession:
                 return
             self._idle_efp_timer = None
         # Clear stale Name/Value while the worker probe is pending (overlay "…").
-        # Keep FindAll cover from the settle/hover cache so FA stays visible.
-        pending_xy = (int(x), int(y))
-        pending_fa = self._findall_cover_label_at_cursor(pending_xy)
-        pending_fa_parent, _pending_efp_parent = self._led_parent_labels(
-            findall_label=pending_fa,
-        )
         self._emit_uia_status(
             efp_name="",
             efp_value="",
             efp_control_type="",
             efp_scroll="",
             efp_pending=True,
-            findall_label=pending_fa,
-            findall_parent=pending_fa_parent,
             efp_parent="",
-            findall_nearby=self._findall_nearby_token_at_cursor(pending_xy),
             bg_add="EFP",
         )
         self._enqueue(
@@ -2382,87 +2188,21 @@ class RecordingSession:
         *,
         efp_payload: dict[str, Any] | None | object = _EFP_UNSET,
     ) -> bool:
-        """True when a walk snapshot or usable labeled EFP leaf would record a UIA path.
+        """True when a usable labeled EFP leaf would record a UIA path.
 
-        Excel ``data_item`` cells are omitted from FindAll; labeled chrome EFP
-        (button/tab/…) can also green the LED without a covering walk.
+        Excel ``data_item`` cells and labeled chrome EFP (button/tab/…) green
+        the LED without a covering FindAll walk.
         """
         if cursor_xy is None:
             return False
-        x, y = int(cursor_xy[0]), int(cursor_xy[1])
         if efp_payload is _EFP_UNSET:
             with self._lock:
                 efp_payload = self._idle_efp_payload
         from src.recorder.uia_input_boxes import efp_payload_is_usable_labeled_leaf
 
-        if efp_payload_is_usable_labeled_leaf(
+        return efp_payload_is_usable_labeled_leaf(
             efp_payload if isinstance(efp_payload, dict) else None
-        ):
-            return True
-        return self._uia_walk_snapshot_ready_at_cursor((x, y))
-
-    def _uia_walk_snapshot_ready_at_cursor(
-        self, cursor_xy: tuple[int, int] | None
-    ) -> bool:
-        """True when an attachable settle/hover walk covers ``cursor_xy``."""
-        if cursor_xy is None:
-            return False
-        x, y = int(cursor_xy[0]), int(cursor_xy[1])
-        click_window = self._click_window_payload_at(x, y)
-        snapshot = self._cached_uia_before(click_window, cursor_xy=(x, y))
-        if not isinstance(snapshot, dict):
-            return False
-        from src.recorder.vision_context import recording_uia_snapshot_ready_at_point
-
-        return recording_uia_snapshot_ready_at_point(
-            snapshot,
-            screen_xy=(x, y),
         )
-
-    def _should_skip_hover_findall_at_cursor(
-        self,
-        cursor_xy: tuple[int, int] | None,
-        *,
-        efp_payload: dict[str, Any] | None | object = _EFP_UNSET,
-    ) -> bool:
-        """Skip idle hover unless EFP names a leaf missing from the settle/hover cache.
-
-        Hover runs only when idle EFP has a usable landmark label that is not
-        already covered by an agreeing FindAll ``texts`` row. Empty / weak EFP
-        skips (no leaf to chase; LED uses walk readiness / empty-synth only).
-        Pane-only caches do not count as cover — WinMaster sparse seeds still
-        warm when EFP names an uncovered tree node. Usable ``data_item`` EFP
-        skips (cells stay FindAll-excluded).
-        """
-        if efp_payload is _EFP_UNSET:
-            with self._lock:
-                efp_payload = self._idle_efp_payload
-        efp_dict = efp_payload if isinstance(efp_payload, dict) else None
-        from src.recorder.uia_input_boxes import (
-            efp_cover_label_from_payload,
-            efp_payload_is_usable_data_item,
-            uia_snapshot_covers_efp_at_point,
-        )
-
-        # No usable EFP identity → nothing for hover enrich to chase.
-        if not efp_cover_label_from_payload(efp_dict):
-            return True
-        if efp_payload_is_usable_data_item(efp_dict):
-            return True
-        if cursor_xy is not None:
-            try:
-                x, y = int(cursor_xy[0]), int(cursor_xy[1])
-            except (TypeError, ValueError, IndexError):
-                return False
-            click_window = self._click_window_payload_at(x, y)
-            cached = self._cached_uia_before(click_window, cursor_xy=(x, y))
-            if isinstance(cached, dict) and uia_snapshot_covers_efp_at_point(
-                cached,
-                (x, y),
-                efp_payload=efp_dict,
-            ):
-                return True
-        return False
 
     def _emit_uia_path_readiness(
         self,
@@ -2472,26 +2212,14 @@ class RecordingSession:
         efp_value: str | None = None,
         efp_control_type: str | None = None,
         after_index: int | None | object = _EFP_UNSET,
-        claim_token: int | None = None,
-        from_settle: bool = False,
         bg_remove: str | None = None,
+        efp_payload: dict[str, Any] | None | object = _EFP_UNSET,
     ) -> None:
-        """Paint green when FindAll or a usable EFP DataItem is UIA-path ready.
+        """Paint green when a usable labeled EFP leaf is UIA-path ready.
 
         EFP Name/Value is a live cursor preview on any LED color. Red updates
-        the LED only and does not clear a just-probed label. A usable
-        ``data_item`` EFP leaf greens without FindAll cell texts.
+        the LED only and does not clear a just-probed label.
         """
-        if claim_token is not None:
-            with self._lock:
-                if (
-                    not self._hover_uia_led_active
-                    or int(claim_token) != int(self._hover_uia_led_token)
-                ):
-                    # Settle stole the hover claim (token bump / hover cleared).
-                    return
-                self._hover_uia_led_active = False
-
         with self._lock:
             if cursor_xy is None:
                 cursor_xy = self._idle_efp_cursor_xy
@@ -2501,29 +2229,16 @@ class RecordingSession:
                 efp_value = self._idle_efp_probed_value
             if efp_control_type is None:
                 efp_control_type = self._idle_efp_probed_control_type
-            # Do not override an in-flight settle yellow (idle finish path).
-            # Settle completion itself passes ``from_settle=True``.
-            if (
-                claim_token is None
-                and not from_settle
-                and str(self._uia_status_state) == "yellow"
-                and not self._hover_uia_led_active
-            ):
-                return
+            if efp_payload is _EFP_UNSET:
+                efp_payload = self._idle_efp_payload
 
-        # Hover / settle completion clears activity on the same paint as green/red.
-        clear_bg = bg_remove
-        if clear_bg is None and claim_token is not None:
-            clear_bg = "FindAll:hover"
-        cursor_for_fa = cursor_xy if isinstance(cursor_xy, tuple) else None
-        findall_label = self._findall_cover_label_at_cursor(cursor_for_fa)
-        findall_nearby = self._findall_nearby_token_at_cursor(cursor_for_fa)
-        findall_parent, efp_parent = self._led_parent_labels(
-            findall_label=findall_label,
-            efp_name=str(efp_name or ""),
-            efp_value=str(efp_value or ""),
+        efp_parent = self._led_efp_parent(
+            efp_payload=efp_payload if isinstance(efp_payload, dict) else None
         )
-        ready = self._uia_path_ready_at_cursor(cursor_xy)
+        ready = self._uia_path_ready_at_cursor(
+            cursor_xy,
+            efp_payload=efp_payload if efp_payload is not _EFP_UNSET else _EFP_UNSET,
+        )
         if ready:
             self._emit_uia_status(
                 state="green",
@@ -2532,23 +2247,16 @@ class RecordingSession:
                 efp_value=efp_value or "",
                 efp_control_type=efp_control_type or "",
                 efp_pending=False,
-                findall_label=findall_label,
-                findall_parent=findall_parent,
                 efp_parent=efp_parent,
-                findall_nearby=findall_nearby,
-                bg_remove=clear_bg,
+                bg_remove=bg_remove,
             )
         else:
-            # Keep existing EFP preview; refresh FindAll cover; LED goes red.
             self._emit_uia_status(
                 state="red",
                 after_index=after_index,
                 efp_pending=False,
-                findall_label=findall_label,
-                findall_parent=findall_parent,
                 efp_parent=efp_parent,
-                findall_nearby=findall_nearby,
-                bg_remove=clear_bg,
+                bg_remove=bg_remove,
             )
 
     def _log_idle_efp_probe(
@@ -2590,7 +2298,7 @@ class RecordingSession:
         )
 
     def _worker_idle_efp(self, job: _DeferredCaptureJob) -> None:
-        """Idle EFP probe (label immediately), optional hover FindAll, then LED."""
+        """Idle EFP probe for the LED label, then green/red from usable leaf."""
         job = self._coalesce_idle_efp_job(job)
         meta = job.meta if isinstance(job.meta, dict) else {}
         try:
@@ -2618,10 +2326,7 @@ class RecordingSession:
                 efp_control_type="",
                 efp_scroll="",
                 efp_pending=False,
-                findall_label="",
-                findall_parent="",
                 efp_parent="",
-                findall_nearby="",
                 bg_remove="EFP",
             )
             return
@@ -2705,340 +2410,26 @@ class RecordingSession:
             payload=payload if isinstance(payload, dict) else None,
         )
         cursor_xy = (int(cursor[0]), int(cursor[1]))
-        # Show Name/Value + FindAll cover + parents as soon as the probe returns.
-        probe_fa = self._findall_cover_label_at_cursor(cursor_xy)
-        probe_fa_parent, probe_efp_parent = self._led_parent_labels(
-            findall_label=probe_fa,
-            efp_name=name,
-            efp_value=value,
-            efp_payload=stored,
-        )
+        efp_parent = self._led_efp_parent(efp_payload=stored)
         self._emit_uia_status(
             efp_name=name,
             efp_value=value,
             efp_control_type=control_type,
             efp_scroll=scroll_label,
             efp_pending=False,
-            findall_label=probe_fa,
-            findall_parent=probe_fa_parent,
-            efp_parent=probe_efp_parent,
-            findall_nearby=self._findall_nearby_token_at_cursor(cursor_xy),
+            efp_parent=efp_parent,
             bg_remove="EFP",
         )
-        leave_settle_yellow = False
         with self._lock:
             if generation != int(self._idle_efp_generation):
                 return
-            if (
-                str(self._uia_status_state) == "yellow"
-                and not self._hover_uia_led_active
-            ):
-                leave_settle_yellow = True
-        if leave_settle_yellow:
-            return
-        # Walk already covers the point, or usable data_item EFP (no FindAll cells).
-        if self._should_skip_hover_findall_at_cursor(
-            cursor_xy, efp_payload=stored
-        ):
-            self._emit_uia_path_readiness(
-                cursor_xy=cursor_xy,
-                efp_name=name,
-                efp_value=value,
-                efp_control_type=control_type,
-            )
-            return
-        # Labeled chrome EFP can green before hover; still warm a ribbon walk.
-        if self._uia_path_ready_at_cursor(cursor_xy, efp_payload=stored):
-            self._emit_uia_path_readiness(
-                cursor_xy=cursor_xy,
-                efp_name=name,
-                efp_value=value,
-                efp_control_type=control_type,
-            )
-        hovered = self._maybe_hover_findall_uia(
-            generation,
-            int(cursor[0]),
-            int(cursor[1]),
-            efp_name=name,
-            efp_value=value,
-            efp_control_type=control_type,
-        )
-        if hovered:
-            return
         self._emit_uia_path_readiness(
             cursor_xy=cursor_xy,
             efp_name=name,
             efp_value=value,
             efp_control_type=control_type,
+            efp_payload=stored,
         )
-
-    def _begin_settle_uia_yellow(
-        self,
-        *,
-        after_index: int,
-        bg: str = "FindAll:settle",
-    ) -> None:
-        """Settle/seed FindAll starting: invalidate hover LED claim, then yellow."""
-        with self._lock:
-            self._hover_uia_led_active = False
-            self._hover_uia_led_token += 1
-        self._emit_uia_status(
-            state="yellow",
-            after_index=int(after_index),
-            efp_name="",
-            efp_value="",
-            efp_control_type="",
-            efp_scroll="",
-            efp_pending=True,
-            findall_label="",
-            findall_parent="",
-            efp_parent="",
-            findall_nearby="",
-            bg_add=str(bg or "FindAll:settle"),
-        )
-
-    def _release_hover_uia_led_to_readiness(
-        self,
-        claim_token: int,
-        *,
-        cursor_xy: tuple[int, int],
-        efp_name: str,
-        efp_value: str,
-        efp_control_type: str = "",
-    ) -> None:
-        """End a hover FindAll claim by re-evaluating UIA-path readiness."""
-        self._emit_uia_path_readiness(
-            cursor_xy=cursor_xy,
-            efp_name=efp_name,
-            efp_value=efp_value,
-            efp_control_type=efp_control_type,
-            claim_token=int(claim_token),
-        )
-
-    def _maybe_hover_findall_uia(
-        self,
-        generation: int,
-        x: int,
-        y: int,
-        *,
-        efp_name: str = "",
-        efp_value: str = "",
-        efp_control_type: str = "",
-    ) -> bool:
-        """Warm a cursor-local FindAll when the settle cache is not ready at point.
-
-        Shows yellow while fetching, then green/red from UIA-path readiness (never
-        unconditional green). Does not change ``_last_settle_uia`` / ``after_index``.
-        Settle yellow bumps the hover LED token so hover cannot paint over an
-        in-flight settle. Returns True when this call claimed the LED path
-        (caller should not emit a second readiness paint).
-        """
-        previous_index = self._previous_event_index_for_settle_cache()
-        with self._lock:
-            if not self._accepting_input or self._finalizing:
-                return False
-            if generation != int(self._idle_efp_generation):
-                return False
-            # Settle (or seed) FindAll in flight — not our hover claim.
-            if (
-                str(self._uia_status_state) == "yellow"
-                and not self._hover_uia_led_active
-            ):
-                return False
-            after_index = self._last_settle_uia_after_index
-        if after_index != previous_index:
-            return False
-        click_window = self._click_window_payload_at(int(x), int(y))
-        if not self._hover_uia_click_window_eligible(click_window):
-            return False
-        assert click_window is not None
-        hwnd = int(click_window.hwnd)
-        cursor_xy = (int(x), int(y))
-        # Prefer explicit probe args (tests / worker) over stale idle payload.
-        # Omit the kwarg when blank so the skip helper reads `_idle_efp_payload`.
-        skip_kwargs: dict[str, Any] = {}
-        if str(efp_name or "").strip() or str(efp_value or "").strip():
-            skip_efp: dict[str, Any] = {
-                "name": str(efp_name or "").strip(),
-                "value": str(efp_value or "").strip(),
-            }
-            if str(efp_control_type or "").strip():
-                skip_efp["control_type"] = str(efp_control_type).strip()
-            skip_kwargs["efp_payload"] = skip_efp
-        # Skip unless EFP names a leaf missing from the settle/hover cache.
-        if self._should_skip_hover_findall_at_cursor(cursor_xy, **skip_kwargs):
-            return False
-
-        from src.recorder.uia_input_boxes import efp_payload_screen_bbox_xywh
-
-        with self._lock:
-            if not self._accepting_input or self._finalizing:
-                return False
-            if generation != int(self._idle_efp_generation):
-                return False
-            if (
-                str(self._uia_status_state) == "yellow"
-                and not self._hover_uia_led_active
-            ):
-                return False
-            # Capture starting leaf bbox so micro-moves that bump generation
-            # do not discard a completed hover while still on the same control.
-            start_leaf_bbox = efp_payload_screen_bbox_xywh(
-                self._idle_efp_payload
-                if isinstance(self._idle_efp_payload, dict)
-                else None
-            )
-            # Readiness was checked outside the lock; do not re-enter
-            # ``_cached_uia_before`` here (same non-reentrant ``_lock``).
-            self._hover_uia_led_token += 1
-            claim_token = int(self._hover_uia_led_token)
-            self._hover_uia_led_active = True
-        # LED yellow only; keep the just-probed EFP Name/Value visible.
-        self._emit_uia_status(
-            state="yellow",
-            efp_pending=False,
-            bg_add="FindAll:hover",
-        )
-
-        from src.recorder.uia_input_boxes import snapshot_uia_hover_subtree
-
-        try:
-            try:
-                value = snapshot_uia_hover_subtree(hwnd, int(x), int(y))
-                if isinstance(value, dict):
-                    self._log_findall_snapshot("hover", hwnd, value)
-            except Exception:
-                with self._lock:
-                    run_dir = self._run_dir
-                if run_dir is not None:
-                    self._log(
-                        run_dir,
-                        f"hover FindAll hwnd={hwnd} failed=1 "
-                        f"xy=({int(x)},{int(y)})",
-                    )
-                self._release_hover_uia_led_to_readiness(
-                    claim_token,
-                    cursor_xy=cursor_xy,
-                    efp_name=efp_name,
-                    efp_value=efp_value,
-                    efp_control_type=efp_control_type,
-                )
-                # Do not reschedule: timeout/exception retries caused ~7s yellow
-                # loops on slow VMs. Wait for mouse move or settle/typing.
-                return True
-            if not isinstance(value, dict):
-                with self._lock:
-                    run_dir = self._run_dir
-                if run_dir is not None:
-                    self._log(
-                        run_dir,
-                        f"hover FindAll hwnd={hwnd} timeout=1 "
-                        f"xy=({int(x)},{int(y)})",
-                    )
-                self._release_hover_uia_led_to_readiness(
-                    claim_token,
-                    cursor_xy=cursor_xy,
-                    efp_name=efp_name,
-                    efp_value=efp_value,
-                    efp_control_type=efp_control_type,
-                )
-                # Same as exception path — no idle→hover re-arm on timeout.
-                return True
-            snapshot = dict(value)
-            snapshot["hwnd"] = hwnd
-            class_name = str(click_window.class_name or "").strip()
-            if not class_name:
-                class_name = str(_window_class_name(hwnd) or "").strip()
-            if class_name:
-                snapshot["class_name"] = class_name
-            stale_generation = False
-            with self._lock:
-                if (
-                    not self._hover_uia_led_active
-                    or int(claim_token) != int(self._hover_uia_led_token)
-                ):
-                    # Settle stole the LED; do not upsert or paint readiness.
-                    return True
-                still_in_start_leaf = False
-                if generation != int(self._idle_efp_generation):
-                    check_xy = (
-                        self._last_move_xy
-                        or self._last_pointer_cursor_xy
-                        or self._idle_efp_cursor_xy
-                        or cursor_xy
-                    )
-                    if (
-                        start_leaf_bbox is not None
-                        and check_xy is not None
-                        and point_in_rect_xywh(
-                            int(check_xy[0]), int(check_xy[1]), start_leaf_bbox
-                        )
-                    ):
-                        still_in_start_leaf = True
-                    else:
-                        # Cursor left the starting leaf; drop without merge/LED paint.
-                        self._hover_uia_led_active = False
-                        stale_generation = True
-                if (
-                    not stale_generation
-                    and self._accepting_input
-                    and not self._finalizing
-                    and self._uia_snapshot_has_leaves(snapshot)
-                ):
-                    try:
-                        current_last = self._last_settle_uia
-                        current_last_hwnd = int(
-                            (current_last or {}).get("hwnd") or 0
-                        ) if isinstance(current_last, dict) else 0
-                    except (TypeError, ValueError):
-                        current_last = None
-                        current_last_hwnd = 0
-                    # Covering leaf under cursor — not empty-synth "ready" alone —
-                    # so a far unique grid cell does not block ribbon hover upsert.
-                    primary_covers_point = (
-                        hwnd == current_last_hwnd
-                        and isinstance(current_last, dict)
-                        and self._uia_snapshot_has_leaves(current_last)
-                        and self._uia_snapshot_covers_screen_point(
-                            current_last, cursor_xy
-                        )
-                    )
-                    # Upsert by_hwnd when hwnd differs, or same-hwnd primary has no
-                    # leaf under the hover point (e.g. grid settle after typing).
-                    if hwnd != current_last_hwnd or not primary_covers_point:
-                        existing = self._last_settle_uia_by_hwnd.get(hwnd)
-                        merged = self._merge_uia_hover_snapshot(
-                            existing if isinstance(existing, dict) else None,
-                            snapshot,
-                        )
-                        self._last_settle_uia_by_hwnd[hwnd] = merged
-                        if hwnd == current_last_hwnd and not primary_covers_point:
-                            # Prefer ribbon hover for the next press without bumping
-                            # after_index (generation gate stays intact).
-                            self._last_settle_uia = merged
-                # Re-check token before painting (settle may have raced).
-                if int(claim_token) != int(self._hover_uia_led_token):
-                    self._hover_uia_led_active = False
-                    return True
-                if still_in_start_leaf:
-                    # Generation bumped from a micro-move; treat as current for LED.
-                    pass
-            if stale_generation:
-                self._reschedule_idle_efp_from_last_pointer()
-                return True
-            self._emit_uia_path_readiness(
-                cursor_xy=cursor_xy,
-                efp_name=efp_name,
-                efp_value=efp_value,
-                efp_control_type=efp_control_type,
-                claim_token=claim_token,
-            )
-            # Do not auto-reschedule idle EFP after a successful hover — that
-            # re-armed a yellow retry storm when empty-synth readiness passed
-            # but cover still missed. Wait for mouse move or settle/typing.
-            return True
-        finally:
-            self._emit_uia_status(bg_remove="FindAll:hover")
 
     def _notify_pending_text_input(self, event_index: int) -> None:
         """Fire deferred vision notify once the window step has patched (or failed)."""
@@ -3361,10 +2752,6 @@ class RecordingSession:
         signals_before = self._cached_signals_before()
         self._seal_open_after_cache(windows_before, signals_before)
         click_window = self._click_window_payload_at(x, y)
-        # Prefer settle-cache on the hook (no live FindAll). Same-hwnd generation
-        # miss stays empty to avoid Excel Backstage races. ComboLBox popup miss
-        # is filled on the worker via click_window FindAll only.
-        uia_snapshot = self._cached_uia_before(click_window, cursor_xy=(x, y))
         with self._lock:
             self._left_press_seq += 1
             seq = self._left_press_seq
@@ -3375,7 +2762,7 @@ class RecordingSession:
             self._left_press_captures[seq] = (None, windows_before or None)
             self._left_press_signals[seq] = signals_before
             self._left_press_click_windows[seq] = click_window
-            self._left_press_uia[seq] = uia_snapshot
+            self._left_press_uia[seq] = None
             # Hook-safe memcpy of already-probed idle EFP (no live UIA here).
             self._left_press_efp_idle[seq] = self._idle_efp_payload_near_press_locked(
                 x, y
@@ -3402,7 +2789,6 @@ class RecordingSession:
         signals_before = self._cached_signals_before()
         self._seal_open_after_cache(windows_before, signals_before)
         click_window = self._click_window_payload_at(x, y)
-        uia_snapshot = self._cached_uia_before(click_window, cursor_xy=(x, y))
         with self._lock:
             self._right_press_seq += 1
             seq = self._right_press_seq
@@ -3413,7 +2799,7 @@ class RecordingSession:
             self._right_press_captures[seq] = (None, windows_before or None)
             self._right_press_signals[seq] = signals_before
             self._right_press_click_windows[seq] = click_window
-            self._right_press_uia[seq] = uia_snapshot
+            self._right_press_uia[seq] = None
             self._right_press_efp_idle[seq] = self._idle_efp_payload_near_press_locked(
                 x, y
             )
@@ -4137,69 +3523,8 @@ class RecordingSession:
             seal_sample_supplied=True,
         )
 
-    def _invalidate_settle_uia_for_typing_host(self) -> int:
-        """Dirty the foreground typing-host settle tree; LED red until debounce FindAll.
-
-        Returns the new ``_typing_uia_generation`` so a late FindAll from an older
-        keystroke cannot republish over a newer one. Keeps taskbar/desktop-shell
-        peers in ``_last_settle_uia_by_hwnd``. Does not change ``after_index`` —
-        a successful typing-pause publish must remain generation-attachable.
-        """
-        hwnd = self._foreground_hwnd()
-        try:
-            host = int(hwnd or 0)
-        except (TypeError, ValueError):
-            host = 0
-        with self._lock:
-            self._typing_uia_generation += 1
-            generation = int(self._typing_uia_generation)
-            self._hover_uia_led_active = False
-            self._hover_uia_led_token += 1
-            cached = self._last_settle_uia
-            try:
-                cached_hwnd = (
-                    int((cached or {}).get("hwnd") or 0)
-                    if isinstance(cached, dict)
-                    else 0
-                )
-            except (TypeError, ValueError):
-                cached_hwnd = 0
-            if host > 0 and cached_hwnd == host:
-                self._last_settle_uia = None
-            elif host <= 0 and isinstance(cached, dict):
-                # Unknown FG — drop primary so a stale Search tree cannot attach.
-                self._last_settle_uia = None
-            if host > 0 and host in self._last_settle_uia_by_hwnd:
-                del self._last_settle_uia_by_hwnd[host]
-            after_index = self._last_settle_uia_after_index
-        self._emit_uia_status(
-            state="red",
-            after_index=after_index,
-            efp_name="",
-            efp_value="",
-            efp_control_type="",
-            efp_scroll="",
-            efp_pending=False,
-        )
-        return generation
-
     def _schedule_pre_key_settle(self) -> None:
-        """After typing pauses, capture a before-shot for the next Tab/Enter/etc.
-
-        Also dirties the typing-host settle UIA and schedules a FindAll refresh so
-        Search/result clicks can attach a post-query tree (LED yellow→green/red).
-        """
-        with self._lock:
-            if (
-                self._run_dir is None
-                or not self._accepting_input
-                or self._finalizing
-                or self._pending_text_meta is None
-            ):
-                return
-            self._cancel_pre_key_settle_timer_locked()
-        # Dirty before arming the timer so the fire reads the new generation.
-        self._invalidate_settle_uia_for_typing_host()
+        """After typing pauses, capture a before-shot for the next Tab/Enter/etc."""
         with self._lock:
             if (
                 self._run_dir is None
@@ -4224,11 +3549,9 @@ class RecordingSession:
                 or self._pending_text_meta is None
             ):
                 return
-            generation = int(self._typing_uia_generation)
         self._enqueue(
             _DeferredCaptureJob(
                 action="settle_pre_key",
-                meta={"typing_uia_generation": generation},
             )
         )
 
@@ -4341,113 +3664,6 @@ class RecordingSession:
                 monitor_offset=mon_offset,
                 focus_xy=(int(focus_xy[0]), int(focus_xy[1])),
             )
-
-    def _prefetch_typing_settle_uia(self, *, typing_uia_generation: int) -> None:
-        """FindAll under the FG typing host after a typing pause; publish for next press.
-
-        Search flyouts are included (unlike idle hover FindAll). Keeps
-        ``after_index`` equal to the previous persisted event so the generation
-        gate still attaches. Late results after a newer keystroke are discarded.
-        """
-        with self._lock:
-            if (
-                self._run_dir is None
-                or not self._accepting_input
-                or self._finalizing
-                or self._pending_text_meta is None
-            ):
-                return
-            if int(typing_uia_generation) != int(self._typing_uia_generation):
-                return
-        hwnd = self._foreground_hwnd()
-        try:
-            host = int(hwnd or 0)
-        except (TypeError, ValueError):
-            host = 0
-        if host <= 0:
-            with self._lock:
-                if int(typing_uia_generation) != int(self._typing_uia_generation):
-                    return
-                after_index = self._previous_event_index_for_settle_cache()
-            self._emit_uia_status(state="red", after_index=after_index)
-            return
-
-        after_event_index = self._previous_event_index_for_settle_cache()
-        self._begin_settle_uia_yellow(
-            after_index=int(after_event_index),
-            bg="FindAll:typing",
-        )
-        from src.recorder.uia_input_boxes import snapshot_uia_screen
-
-        try:
-            with self._lock:
-                cursor_xy = self._last_pointer_cursor_xy or self._last_move_xy
-            try:
-                value = snapshot_uia_screen(host, cursor_xy=cursor_xy)
-            except Exception:
-                value = None
-            if isinstance(value, dict):
-                self._log_findall_snapshot("typing", host, value)
-            paint_red = False
-            with self._lock:
-                if int(typing_uia_generation) != int(self._typing_uia_generation):
-                    return
-                if (
-                    self._run_dir is None
-                    or not self._accepting_input
-                    or self._finalizing
-                    or self._pending_text_meta is None
-                ):
-                    paint_red = True
-                elif not isinstance(value, dict):
-                    # Keep after_index so a later successful prefetch can still attach.
-                    paint_red = True
-                else:
-                    snapshot = dict(value)
-                    snapshot["hwnd"] = host
-                    class_name = str(_window_class_name(host) or "").strip()
-                    if class_name:
-                        snapshot["class_name"] = class_name
-                    snapshot["cache_kind"] = "typing"
-                    retained = self._by_hwnd_retained_across_settle(
-                        self._last_settle_uia_by_hwnd,
-                        settle_hwnd=host,
-                    )
-                    if not self._uia_snapshot_has_leaves(snapshot):
-                        prior = self._last_settle_uia
-                        try:
-                            prior_hwnd = int(
-                                (prior or {}).get("hwnd") or 0
-                            ) if isinstance(prior, dict) else 0
-                        except (TypeError, ValueError):
-                            prior_hwnd = 0
-                        if prior_hwnd == host or not self._uia_snapshot_has_leaves(prior):
-                            self._last_settle_uia = None
-                        self._last_settle_uia_by_hwnd = retained
-                        self._last_settle_uia_after_index = int(after_event_index)
-                        paint_red = True
-                    else:
-                        if self._is_shell_retained_uia_class(class_name):
-                            retained[host] = snapshot
-                        self._last_settle_uia = snapshot
-                        self._last_settle_uia_by_hwnd = retained
-                        self._last_settle_uia_after_index = int(after_event_index)
-            if paint_red:
-                self._emit_uia_status(
-                    state="red",
-                    after_index=int(after_event_index),
-                    bg_remove="FindAll:typing",
-                )
-                self._reschedule_idle_efp_from_last_pointer()
-                return
-            self._emit_uia_path_readiness(
-                after_index=int(after_event_index),
-                from_settle=True,
-                bg_remove="FindAll:typing",
-            )
-            self._reschedule_idle_efp_from_last_pointer()
-        finally:
-            self._emit_uia_status(bg_remove="FindAll:typing")
 
     def _refresh_pending_pre_type(
         self,
@@ -5394,12 +4610,6 @@ class RecordingSession:
             self._worker_keyboard_event(job)
         elif job.action == "settle_pre_key":
             self._refresh_pending_pre_key()
-            meta = job.meta if isinstance(job.meta, dict) else {}
-            try:
-                typing_gen = int(meta.get("typing_uia_generation") or 0)
-            except (TypeError, ValueError):
-                typing_gen = 0
-            self._prefetch_typing_settle_uia(typing_uia_generation=typing_gen)
         elif job.action == "pending_left_press":
             self._worker_pending_left_press(job)
         elif job.action == "pending_right_press":
@@ -5420,11 +4630,6 @@ class RecordingSession:
                     self._start_signals = (
                         dict(self._last_settle_signals) if self._last_settle_signals else None
                     )
-                # Seed naming trees for every shown top-level (incl. taskbar)
-                # so event 1 can attach UIA even when the click is not FG.
-                with self._lock:
-                    seed_windows = self._last_settle_windows
-                self._collect_and_publish_seed_uia_screens(seed_windows)
             finally:
                 self._settle_windows_ready.set()
                 done = (job.meta or {}).get("done")
@@ -5665,867 +4870,8 @@ class RecordingSession:
         if event is not None and event.kind != "text_input":
             self._notify_event(event)
 
-    def _copy_uia_snapshot(
-        self, snapshot: dict[str, Any] | None
-    ) -> dict[str, Any] | None:
-        if not isinstance(snapshot, dict):
-            return None
-        return copy.deepcopy(snapshot)
-
-    @staticmethod
-    def _uia_snapshot_has_leaves(snapshot: dict[str, Any] | None) -> bool:
-        """True when FindAll stored at least one text, input, or scrollbar box."""
-        if not isinstance(snapshot, dict):
-            return False
-        for key in ("texts", "inputs", "scrollbars"):
-            raw = snapshot.get(key)
-            if isinstance(raw, list) and len(raw) > 0:
-                return True
-        return False
-
-    @classmethod
-    def _uia_snapshot_covers_screen_point(
-        cls,
-        snapshot: dict[str, Any] | None,
-        screen_xy: tuple[int, int],
-    ) -> bool:
-        """True when any stored leaf bbox contains ``screen_xy`` (screen xyxy)."""
-        if not isinstance(snapshot, dict):
-            return False
-        try:
-            px, py = int(screen_xy[0]), int(screen_xy[1])
-        except (TypeError, ValueError, IndexError):
-            return False
-        for key in ("texts", "inputs", "scrollbars"):
-            raw = snapshot.get(key)
-            if not isinstance(raw, list):
-                continue
-            for row in raw:
-                box = row.get("bbox") if isinstance(row, dict) else row
-                if not (isinstance(box, (list, tuple)) and len(box) == 4):
-                    continue
-                try:
-                    x1, y1, x2, y2 = (int(v) for v in box[:4])
-                except (TypeError, ValueError):
-                    continue
-                if x1 <= px < x2 and y1 <= py < y2:
-                    return True
-        return False
-
-    @staticmethod
-    def _uia_box_key(box: object) -> tuple[int, int, int, int] | None:
-        if isinstance(box, (list, tuple)) and len(box) == 4:
-            try:
-                return (int(box[0]), int(box[1]), int(box[2]), int(box[3]))
-            except (TypeError, ValueError):
-                return None
-        return None
-
-    @classmethod
-    def _merge_uia_hover_snapshot(
-        cls,
-        existing: dict[str, Any] | None,
-        incoming: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Union hover/settle peer leaves; never drop richer existing rows.
-
-        Keeps ``cache_kind=settle`` (or other non-hover) when the stored entry
-        was not hover-built. New entries default to ``hover``.
-        """
-        if not isinstance(existing, dict) or not cls._uia_snapshot_has_leaves(existing):
-            out = dict(incoming)
-            out.setdefault("cache_kind", "hover")
-            return out
-        merged = dict(existing)
-        for key in ("inputs", "scrollbars"):
-            base_rows = list(merged.get(key) or []) if isinstance(merged.get(key), list) else []
-            seen = {
-                box_key
-                for box_key in (cls._uia_box_key(row) for row in base_rows)
-                if box_key is not None
-            }
-            extra = incoming.get(key) if isinstance(incoming.get(key), list) else []
-            for row in extra or []:
-                box_key = cls._uia_box_key(row)
-                if box_key is None or box_key in seen:
-                    continue
-                seen.add(box_key)
-                base_rows.append(row)
-            merged[key] = base_rows
-        base_texts = (
-            list(merged.get("texts") or [])
-            if isinstance(merged.get("texts"), list)
-            else []
-        )
-        text_seen: set[tuple[tuple[int, int, int, int], str, str]] = set()
-        for row in base_texts:
-            if not isinstance(row, dict):
-                continue
-            box_key = cls._uia_box_key(row.get("bbox"))
-            if box_key is None:
-                continue
-            text_seen.add(
-                (
-                    box_key,
-                    str(row.get("text") or ""),
-                    str(row.get("control_type") or ""),
-                )
-            )
-        extra_texts = (
-            incoming.get("texts") if isinstance(incoming.get("texts"), list) else []
-        )
-        for row in extra_texts or []:
-            if not isinstance(row, dict):
-                continue
-            box_key = cls._uia_box_key(row.get("bbox"))
-            if box_key is None:
-                continue
-            signature = (
-                box_key,
-                str(row.get("text") or ""),
-                str(row.get("control_type") or ""),
-            )
-            if signature in text_seen:
-                continue
-            text_seen.add(signature)
-            base_texts.append(dict(row))
-        merged["texts"] = base_texts
-        if incoming.get("window") is not None and merged.get("window") is None:
-            merged["window"] = incoming.get("window")
-        if incoming.get("hwnd") is not None:
-            merged["hwnd"] = incoming.get("hwnd")
-        if incoming.get("class_name") and not merged.get("class_name"):
-            merged["class_name"] = incoming.get("class_name")
-        # Prefer the newest walk's timing (incoming hover/settle).
-        for key in (
-            "findall_s",
-            "findall_count",
-            "walk_truncated",
-            "walk_stop_reason",
-        ):
-            if key in incoming:
-                merged[key] = incoming.get(key)
-            elif key in ("walk_truncated", "walk_stop_reason"):
-                merged.pop(key, None)
-        existing_kind = str(merged.get("cache_kind") or "").strip()
-        if existing_kind and existing_kind != "hover":
-            merged["cache_kind"] = existing_kind
-        else:
-            merged["cache_kind"] = "hover"
-        return merged
-
-    def _log_findall_snapshot(
-        self,
-        kind: str,
-        hwnd: int,
-        snapshot: dict[str, Any] | None,
-    ) -> None:
-        """Append ``{kind} FindAll … findall_s=…`` to ``record.log`` when stamped."""
-        if not isinstance(snapshot, dict):
-            return
-        raw = snapshot.get("findall_s")
-        if raw is None:
-            return
-        try:
-            findall_s = float(raw)
-        except (TypeError, ValueError):
-            return
-        try:
-            hits = int(snapshot.get("findall_count") or 0)
-        except (TypeError, ValueError):
-            hits = 0
-        extra = ""
-        if snapshot.get("walk_truncated"):
-            reason = str(snapshot.get("walk_stop_reason") or "").strip()
-            extra = (
-                f" truncated=1 stop={reason}" if reason else " truncated=1"
-            )
-        if snapshot.get("findall_refetch"):
-            extra += " refetch=1"
-        with self._lock:
-            run_dir = self._run_dir
-        if run_dir is None:
-            return
-        self._log(
-            run_dir,
-            f"{kind} FindAll hwnd={int(hwnd)} findall_s={findall_s:.3f} "
-            f"hits={hits}{extra}",
-        )
-
-    def _uia_snapshot_matches_click(
-        self,
-        snapshot: dict[str, Any] | None,
-        click_window: ClickWindowInfo | None,
-        *,
-        cursor_xy: tuple[int, int] | None = None,
-    ) -> bool:
-        """True when the settled tree belongs to the window under this click."""
-        if not isinstance(snapshot, dict) or click_window is None:
-            return False
-        click_hwnd = int(click_window.hwnd or 0)
-        try:
-            cached_hwnd = int(snapshot.get("hwnd") or 0)
-        except (TypeError, ValueError):
-            cached_hwnd = 0
-        # Known hwnds that disagree → wrong tree (YOLO). Do not rescue via rect.
-        if click_hwnd > 0 and cached_hwnd > 0:
-            return click_hwnd == cached_hwnd
-        window = snapshot.get("window")
-        if (
-            cursor_xy is not None
-            and isinstance(window, (list, tuple))
-            and len(window) == 4
-        ):
-            return point_in_rect_xywh(
-                int(cursor_xy[0]),
-                int(cursor_xy[1]),
-                (int(window[0]), int(window[1]), int(window[2]), int(window[3])),
-            )
-        return False
-
-    def _previous_event_index_for_settle_cache(self) -> int:
-        """Event index the next press expects settle UIA to have been published after.
-
-        ``0`` means recording seed (no events yet). Otherwise the last persisted
-        event index — settle must be from that event's window-step, not an older
-        one still in flight for a later sibling.
-        """
-        with self._lock:
-            if not self._events:
-                return 0
-            return int(self._events[-1].index)
-
-    def _uia_snapshot_from_previous_scroll(
-        self,
-        click_window: ClickWindowInfo | None,
-        *,
-        cursor_xy: tuple[int, int] | None = None,
-    ) -> dict[str, Any] | None:
-        """Copy FindAll from the prior scroll when settle cache is still in flight.
-
-        Consecutive wheel notches often persist before the previous scroll's
-        window-step republishes ``after_index``, so ``_cached_uia_before`` misses.
-        Reusing that notch's snapshot keeps the burst on the UIA path when the
-        click window (hwnd) still matches.
-        """
-        with self._lock:
-            if not self._events:
-                return None
-            prior = self._events[-1]
-        if prior.kind != "scroll":
-            return None
-        snapshot = prior.uia_snapshot
-        if not isinstance(snapshot, dict) or not self._uia_snapshot_has_leaves(snapshot):
-            return None
-        if not self._uia_snapshot_matches_click(
-            snapshot, click_window, cursor_xy=cursor_xy
-        ):
-            return None
-        return self._copy_uia_snapshot(snapshot)
-
-    @staticmethod
-    def _is_shell_retained_uia_class(class_name: str) -> bool:
-        """True for taskbar or desktop-shell classes kept across settles."""
-        name = str(class_name or "").strip()
-        return name in _TASKBAR_CLASS_NAMES or name in _DESKTOP_SHELL_UIA_CLASS_NAMES
-
-    @staticmethod
-    def _is_desktop_shell_click_window(
-        click_window: ClickWindowInfo | None,
-    ) -> bool:
-        """True for Progman / WorkerW desktop icon hosts."""
-        if click_window is None:
-            return False
-        class_name = str(click_window.class_name or "").strip()
-        return class_name in _DESKTOP_SHELL_UIA_CLASS_NAMES
-
-    @staticmethod
-    def _seed_uia_window_eligible(win: WindowInfo) -> bool:
-        """True when recording seed should FindAll under this top-level hwnd."""
-        class_name = str(win.class_name or "").strip()
-        if class_name in _TASKBAR_CLASS_NAMES:
-            return True
-        if class_name in _SEED_UIA_NOISE_CLASS_NAMES:
-            return False
-        if win.is_minimized:
-            return False
-        if win.left <= _MINIMIZED_COORD_THRESHOLD or win.top <= _MINIMIZED_COORD_THRESHOLD:
-            return False
-        return int(win.width) * int(win.height) > 0
-
-    @staticmethod
-    def _hover_uia_click_window_eligible(
-        click_window: ClickWindowInfo | None,
-    ) -> bool:
-        """True when idle hover may FindAll under this click window."""
-        if click_window is None:
-            return False
-        try:
-            hwnd = int(click_window.hwnd or 0)
-        except (TypeError, ValueError):
-            hwnd = 0
-        if hwnd <= 0:
-            return False
-        class_name = str(click_window.class_name or "").strip()
-        if not class_name:
-            return False
-        if class_name in _TASKBAR_CLASS_NAMES:
-            return True
-        if class_name in _SEED_UIA_NOISE_CLASS_NAMES:
-            return False
-        if bool(click_window.is_flyout):
-            return False
-        if (
-            int(click_window.left) <= _MINIMIZED_COORD_THRESHOLD
-            or int(click_window.top) <= _MINIMIZED_COORD_THRESHOLD
-        ):
-            return False
-        return int(click_window.width) * int(click_window.height) > 0
-
-    @staticmethod
-    def _by_hwnd_retained_across_settle(
-        existing: dict[int, dict[str, Any]] | None,
-        *,
-        settle_hwnd: int = 0,
-    ) -> dict[int, dict[str, Any]]:
-        """Keep taskbar/desktop-shell or hover-warmed peers; drop the settle hwnd."""
-        try:
-            drop_hwnd = int(settle_hwnd or 0)
-        except (TypeError, ValueError):
-            drop_hwnd = 0
-        retained: dict[int, dict[str, Any]] = {}
-        for raw_hwnd, snapshot in (existing or {}).items():
-            if not isinstance(snapshot, dict):
-                continue
-            try:
-                hwnd = int(raw_hwnd)
-            except (TypeError, ValueError):
-                continue
-            if hwnd <= 0 or (drop_hwnd > 0 and hwnd == drop_hwnd):
-                continue
-            class_name = str(snapshot.get("class_name") or "").strip()
-            cache_kind = str(snapshot.get("cache_kind") or "").strip()
-            if (
-                RecordingSession._is_shell_retained_uia_class(class_name)
-                or cache_kind == "hover"
-            ):
-                retained[hwnd] = snapshot
-        return retained
-
-    @staticmethod
-    def _shell_uia_by_hwnd_retained(
-        existing: dict[int, dict[str, Any]] | None,
-    ) -> dict[int, dict[str, Any]]:
-        """Keep taskbar/desktop-shell / hover peers (no settle hwnd to drop)."""
-        return RecordingSession._by_hwnd_retained_across_settle(existing, settle_hwnd=0)
-
-    def _cached_uia_before(
-        self,
-        click_window: ClickWindowInfo | None,
-        *,
-        cursor_xy: tuple[int, int] | None = None,
-    ) -> dict[str, Any] | None:
-        """Copy last settled FindAll when it matches this click; else None.
-
-        A ``None`` result may be filled on the capture worker with FindAll under
-        ``click_window`` only when that window is a ComboLBox popup miss.
-        Same-hwnd generation misses stay empty so Excel Backstage-style races
-        do not run FindAll on the wrong tree timing.
-
-        Reuse also requires the settle to have been published after the previous
-        event (or seed index 0). A same-hwnd cache from an older step is treated
-        as a miss so navigation/scroll between presses does not reuse a stale
-        tree.
-
-        Event-1 seed may publish several hwnd trees; prefer the click hwnd from
-        that map when present. When ``cursor_xy`` is set, prefer a mapped
-        snapshot that is ready at that point and covers the cursor over a
-        same-hwnd primary that does not (e.g. ribbon hover vs stale grid).
-        """
-        previous_index = self._previous_event_index_for_settle_cache()
-        with self._lock:
-            cached = self._last_settle_uia
-            by_hwnd = dict(self._last_settle_uia_by_hwnd)
-            after_index = self._last_settle_uia_after_index
-        if after_index != previous_index:
-            return None
-        point_xy: tuple[int, int] | None = None
-        if cursor_xy is not None:
-            try:
-                point_xy = (int(cursor_xy[0]), int(cursor_xy[1]))
-            except (TypeError, ValueError, IndexError):
-                point_xy = None
-
-        def _ready_at_point(snap: dict[str, Any] | None) -> bool:
-            if not isinstance(snap, dict) or not self._uia_snapshot_has_leaves(snap):
-                return False
-            if point_xy is None:
-                return True
-            from src.recorder.vision_context import (
-                recording_uia_snapshot_ready_at_point,
-            )
-
-            return bool(
-                recording_uia_snapshot_ready_at_point(snap, screen_xy=point_xy)
-            )
-
-        if click_window is not None and by_hwnd:
-            try:
-                click_hwnd = int(click_window.hwnd or 0)
-            except (TypeError, ValueError):
-                click_hwnd = 0
-            if click_hwnd > 0:
-                mapped = by_hwnd.get(click_hwnd)
-                if isinstance(mapped, dict) and self._uia_snapshot_has_leaves(mapped):
-                    if point_xy is None:
-                        return self._copy_uia_snapshot(mapped)
-                    mapped_covers = self._uia_snapshot_covers_screen_point(
-                        mapped, point_xy
-                    )
-                    primary_covers_ready = (
-                        isinstance(cached, dict)
-                        and self._uia_snapshot_matches_click(
-                            cached, click_window, cursor_xy=point_xy
-                        )
-                        and self._uia_snapshot_has_leaves(cached)
-                        and self._uia_snapshot_covers_screen_point(cached, point_xy)
-                        and _ready_at_point(cached)
-                    )
-                    # by_hwnd-first, unless a covering ready primary beats a
-                    # non-covering map (stale grid / empty-synth vs ribbon).
-                    if not (primary_covers_ready and not mapped_covers):
-                        return self._copy_uia_snapshot(mapped)
-        if not self._uia_snapshot_matches_click(
-            cached, click_window, cursor_xy=cursor_xy
-        ):
-            return None
-        if not self._uia_snapshot_has_leaves(cached):
-            return None
-        return self._copy_uia_snapshot(cached)
-
-    def _collect_and_publish_seed_uia_screens(
-        self,
-        windows: tuple[WindowInfo, ...] | None,
-    ) -> dict[str, Any] | None:
-        """FindAll under each shown top-level at recording start (event 1 only).
-
-        Stores a hwnd→snapshot map so the first press can attach UIA for the
-        clicked window (including the taskbar) without a desktop-root walk.
-        """
-        after_event_index = 0
-        eligible: list[WindowInfo] = []
-        seen: set[int] = set()
-        for win in windows or ():
-            hwnd = int(win.hwnd or 0)
-            if hwnd <= 0 or hwnd in seen:
-                continue
-            if not self._seed_uia_window_eligible(win):
-                continue
-            seen.add(hwnd)
-            eligible.append(win)
-        if not eligible:
-            with self._lock:
-                self._last_settle_uia = None
-                self._last_settle_uia_by_hwnd = {}
-                self._last_settle_uia_after_index = after_event_index
-            self._emit_uia_status(state="red", after_index=after_event_index)
-            return None
-
-        self._begin_settle_uia_yellow(
-            after_index=after_event_index,
-            bg="FindAll:seed",
-        )
-        from src.recorder.uia_input_boxes import snapshot_uia_screen
-
-        try:
-            by_hwnd: dict[int, dict[str, Any]] = {}
-            for win in eligible:
-                hwnd = int(win.hwnd)
-                try:
-                    value = snapshot_uia_screen(hwnd)
-                except Exception:
-                    continue
-                if not isinstance(value, dict):
-                    continue
-                self._log_findall_snapshot("seed", hwnd, value)
-                snapshot = dict(value)
-                snapshot["hwnd"] = hwnd
-                class_name = str(win.class_name or "").strip()
-                if class_name:
-                    snapshot["class_name"] = class_name
-                if self._uia_snapshot_has_leaves(snapshot):
-                    by_hwnd[hwnd] = snapshot
-
-            if not by_hwnd:
-                with self._lock:
-                    self._last_settle_uia = None
-                    self._last_settle_uia_by_hwnd = {}
-                    self._last_settle_uia_after_index = after_event_index
-                self._emit_uia_status(
-                    state="red",
-                    after_index=after_event_index,
-                    bg_remove="FindAll:seed",
-                )
-                return None
-
-            fg = self._foreground_hwnd()
-            primary = by_hwnd.get(fg)
-            if primary is None:
-                for win in eligible:
-                    class_name = str(win.class_name or "").strip()
-                    if class_name in _TASKBAR_CLASS_NAMES and int(win.hwnd) in by_hwnd:
-                        primary = by_hwnd[int(win.hwnd)]
-                        break
-            if primary is None:
-                primary = next(iter(by_hwnd.values()))
-
-            with self._lock:
-                self._last_settle_uia = primary
-                self._last_settle_uia_by_hwnd = by_hwnd
-                self._last_settle_uia_after_index = after_event_index
-            self._emit_uia_path_readiness(
-                after_index=after_event_index,
-                from_settle=True,
-                bg_remove="FindAll:seed",
-            )
-            self._reschedule_idle_efp_from_last_pointer()
-            return self._copy_uia_snapshot(primary)
-        finally:
-            self._emit_uia_status(bg_remove="FindAll:seed")
-
-    def _collect_and_publish_settle_uia(
-        self,
-        hwnd: int,
-        *,
-        after_event_index: int,
-    ) -> dict[str, Any] | None:
-        """FindAll under one hwnd after settle; publish as next press before-cache.
-
-        ``after_event_index`` is the event whose window-step produced this tree
-        (``0`` for recording seed). The next press reuses it only when that index
-        is still the previous event. Drops non-shell seed map entries but keeps
-        taskbar-class, desktop-shell (Progman/WorkerW), and hover-warmed
-        (``cache_kind=hover``) snapshots.
-        """
-        hwnd = int(hwnd or 0)
-        if hwnd <= 0:
-            with self._lock:
-                self._last_settle_uia_by_hwnd = self._by_hwnd_retained_across_settle(
-                    self._last_settle_uia_by_hwnd,
-                    settle_hwnd=0,
-                )
-            self._emit_uia_status(state="red", after_index=int(after_event_index))
-            return None
-        self._begin_settle_uia_yellow(
-            after_index=int(after_event_index),
-            bg="FindAll:settle",
-        )
-        from src.recorder.uia_input_boxes import snapshot_uia_screen
-
-        try:
-            with self._lock:
-                cursor_xy = self._last_pointer_cursor_xy or self._last_move_xy
-            try:
-                value = snapshot_uia_screen(hwnd, cursor_xy=cursor_xy)
-            except Exception:
-                with self._lock:
-                    self._last_settle_uia_by_hwnd = self._by_hwnd_retained_across_settle(
-                        self._last_settle_uia_by_hwnd,
-                        settle_hwnd=hwnd,
-                    )
-                self._emit_uia_status(
-                    state="red",
-                    after_index=int(after_event_index),
-                    bg_remove="FindAll:settle",
-                )
-                self._reschedule_idle_efp_from_last_pointer()
-                return None
-            if not isinstance(value, dict):
-                with self._lock:
-                    self._last_settle_uia_by_hwnd = self._by_hwnd_retained_across_settle(
-                        self._last_settle_uia_by_hwnd,
-                        settle_hwnd=hwnd,
-                    )
-                self._emit_uia_status(
-                    state="red",
-                    after_index=int(after_event_index),
-                    bg_remove="FindAll:settle",
-                )
-                self._reschedule_idle_efp_from_last_pointer()
-                return None
-            self._log_findall_snapshot("settle", hwnd, value)
-            snapshot = dict(value)
-            snapshot["hwnd"] = hwnd
-            class_name = str(_window_class_name(hwnd) or "").strip()
-            if class_name:
-                snapshot["class_name"] = class_name
-            if not self._uia_snapshot_has_leaves(snapshot):
-                with self._lock:
-                    retained = self._by_hwnd_retained_across_settle(
-                        self._last_settle_uia_by_hwnd,
-                        settle_hwnd=hwnd,
-                    )
-                    prior = self._last_settle_uia
-                    try:
-                        prior_hwnd = int(
-                            (prior or {}).get("hwnd") or 0
-                        ) if isinstance(prior, dict) else 0
-                    except (TypeError, ValueError):
-                        prior_hwnd = 0
-                    if prior_hwnd == hwnd or not self._uia_snapshot_has_leaves(prior):
-                        self._last_settle_uia = None
-                    self._last_settle_uia_by_hwnd = retained
-                    self._last_settle_uia_after_index = int(after_event_index)
-                self._emit_uia_status(
-                    state="red",
-                    after_index=int(after_event_index),
-                    bg_remove="FindAll:settle",
-                )
-                self._reschedule_idle_efp_from_last_pointer()
-                return None
-            with self._lock:
-                retained = self._by_hwnd_retained_across_settle(
-                    self._last_settle_uia_by_hwnd,
-                    settle_hwnd=hwnd,
-                )
-                if self._is_shell_retained_uia_class(class_name):
-                    retained[hwnd] = snapshot
-                self._last_settle_uia = snapshot
-                self._last_settle_uia_by_hwnd = retained
-                self._last_settle_uia_after_index = int(after_event_index)
-            self._emit_uia_path_readiness(
-                after_index=int(after_event_index),
-                from_settle=True,
-                bg_remove="FindAll:settle",
-            )
-            self._reschedule_idle_efp_from_last_pointer()
-            return self._copy_uia_snapshot(snapshot)
-        finally:
-            self._emit_uia_status(bg_remove="FindAll:settle")
-
-    def _opened_hwnd_from_change(
-        self,
-        change: dict[str, Any] | None,
-        debug: dict[str, Any] | None,
-    ) -> int:
-        if not isinstance(change, dict):
-            return 0
-        if str(change.get("action") or "").strip() != "opened":
-            return 0
-        title = str(change.get("title") or "").strip()
-        # Untitled popups (ComboLBox) are stored as ``hwnd:<n>`` in the change title.
-        if title.lower().startswith("hwnd:"):
-            try:
-                hwnd = int(title.split(":", 1)[1].strip())
-            except (TypeError, ValueError, IndexError):
-                hwnd = 0
-            if hwnd > 0:
-                return hwnd
-        if not title or not isinstance(debug, dict):
-            return 0
-        after_raw = debug.get("windows_after")
-        if not isinstance(after_raw, list):
-            return 0
-        for entry in after_raw:
-            if not isinstance(entry, dict):
-                continue
-            entry_title = str(entry.get("title") or "").strip()
-            if entry_title != title and title not in entry_title and entry_title not in title:
-                continue
-            try:
-                hwnd = int(entry.get("hwnd") or 0)
-            except (TypeError, ValueError):
-                hwnd = 0
-            if hwnd > 0:
-                return hwnd
-        return 0
-
-    @staticmethod
-    def _is_dropdown_popup_click_window(
-        click_window: ClickWindowInfo | None,
-    ) -> bool:
-        """True for Win32 ComboLBox (and similar) dropdown list popups."""
-        if click_window is None:
-            return False
-        class_name = str(click_window.class_name or "").strip()
-        if class_name == "ComboLBox":
-            return True
-        # Untitled flyout with empty title is still not enough; require ComboLBox.
-        return False
-
-    @staticmethod
-    def _opened_change_is_dropdown_popup(
-        change: dict[str, Any] | None,
-        debug: dict[str, Any] | None,
-        opened_hwnd: int,
-    ) -> bool:
-        """True when the opened window looks like a ComboLBox dropdown."""
-        if opened_hwnd <= 0:
-            return False
-        title = str((change or {}).get("title") or "").strip()
-        # Untitled popups are recorded as ``hwnd:<n>``.
-        if title.lower().startswith("hwnd:"):
-            if isinstance(debug, dict):
-                after_raw = debug.get("windows_after")
-                if isinstance(after_raw, list):
-                    for entry in after_raw:
-                        if not isinstance(entry, dict):
-                            continue
-                        try:
-                            hwnd = int(entry.get("hwnd") or 0)
-                        except (TypeError, ValueError):
-                            hwnd = 0
-                        if hwnd != opened_hwnd:
-                            continue
-                        if str(entry.get("class_name") or "").strip() == "ComboLBox":
-                            return True
-            # hwnd: title without class still treated as dropdown candidate.
-            return True
-        if isinstance(debug, dict):
-            after_raw = debug.get("windows_after")
-            if isinstance(after_raw, list):
-                for entry in after_raw:
-                    if not isinstance(entry, dict):
-                        continue
-                    try:
-                        hwnd = int(entry.get("hwnd") or 0)
-                    except (TypeError, ValueError):
-                        hwnd = 0
-                    if hwnd == opened_hwnd and str(
-                        entry.get("class_name") or ""
-                    ).strip() == "ComboLBox":
-                        return True
-        return False
-
-    def _pick_settle_uia_hwnd(
-        self,
-        item: _QueuedEvent,
-        change: dict[str, Any] | None,
-        debug: dict[str, Any] | None,
-    ) -> int:
-        """Prefer ComboLBox popup when opened; else foreground; never desktop root.
-
-        Only dropdown popups beat FG so a normal dialog open (e.g. 編輯電腦資產)
-        does not steal the settle FindAll away from the owner form.
-        """
-        opened = self._opened_hwnd_from_change(change, debug)
-        if opened > 0 and self._opened_change_is_dropdown_popup(
-            change, debug, opened
-        ):
-            return opened
-        fg = self._foreground_hwnd()
-        if fg > 0:
-            return fg
-        if item.kind == "drag" and item.end_click_window is not None:
-            end_hwnd = int(item.end_click_window.hwnd or 0)
-            if end_hwnd > 0:
-                return end_hwnd
-        if item.click_window is not None:
-            return int(item.click_window.hwnd or 0)
-        return 0
-
-    def _should_press_findall_on_click_window(
-        self,
-        click_window: ClickWindowInfo | None,
-    ) -> bool:
-        """True for ComboLBox or desktop-shell settle-cache misses.
-
-        Same-hwnd generation misses stay empty (Excel Backstage race). Ordinary
-        cross-window misses (dialogs, main form) do not FindAll on the worker.
-        Desktop shell (Progman/WorkerW) is treated like ComboLBox so icon clicks
-        can still attach FindAll when the seed/settle map missed.
-        """
-        if not (
-            self._is_dropdown_popup_click_window(click_window)
-            or self._is_desktop_shell_click_window(click_window)
-        ):
-            return False
-        assert click_window is not None
-        click_hwnd = int(click_window.hwnd or 0)
-        if click_hwnd <= 0:
-            return False
-        with self._lock:
-            cached = self._last_settle_uia
-        if not isinstance(cached, dict):
-            return True
-        try:
-            cached_hwnd = int(cached.get("hwnd") or 0)
-        except (TypeError, ValueError):
-            cached_hwnd = 0
-        if cached_hwnd <= 0:
-            return True
-        return click_hwnd != cached_hwnd
-
-    def _findall_uia_for_click_window(
-        self,
-        click_window: ClickWindowInfo | None,
-        *,
-        cursor_xy: tuple[int, int] | None = None,
-    ) -> dict[str, Any] | None:
-        """Worker-side budgeted UIA walk under ``click_window.hwnd`` (never on the hook)."""
-        if click_window is None:
-            return None
-        hwnd = int(click_window.hwnd or 0)
-        if hwnd <= 0:
-            return None
-        from src.recorder.uia_input_boxes import snapshot_uia_screen
-
-        if cursor_xy is None:
-            with self._lock:
-                cursor_xy = self._last_pointer_cursor_xy or self._last_move_xy
-        self._emit_uia_status(bg_add="FindAll:press_miss")
-        try:
-            try:
-                value = snapshot_uia_screen(hwnd, cursor_xy=cursor_xy)
-            except Exception:
-                return None
-            if not isinstance(value, dict):
-                return None
-            self._log_findall_snapshot("press_miss", hwnd, value)
-            snapshot = dict(value)
-            snapshot["hwnd"] = hwnd
-            return snapshot
-        finally:
-            self._emit_uia_status(bg_remove="FindAll:press_miss")
-
-    def _patch_event_uia_field(
-        self,
-        event_index: int,
-        field: str,
-        snapshot: dict[str, Any] | None,
-    ) -> RecordedEvent | None:
-        """Write drag ``end_uia_snapshot`` onto a persisted event after settle.
-
-        Press ``uia_snapshot`` is settle-cache-only at persist time. Late FindAll
-        must never patch it (miss path used to race the click and write here).
-        """
-        if field != "end_uia_snapshot":
-            return None
-        with self._lock:
-            run_dir = self._run_dir
-        if run_dir is None:
-            return None
-        patched: RecordedEvent | None = None
-        with self._event_json_lock():
-            path = event_json_path(run_dir, event_index)
-            raw = read_json(path, None)
-            if isinstance(raw, dict) and isinstance(snapshot, dict):
-                raw[field] = snapshot
-                write_event_json(run_dir, raw)
-            with self._lock:
-                events = self._events
-                for index, event in enumerate(events):
-                    if event.index != event_index:
-                        continue
-                    if isinstance(raw, dict):
-                        event = RecordedEvent.from_dict(raw)
-                        events[index] = event
-                    patched = event
-                    break
-        return patched
-
     def _release_drag_uia_notify(self, item: _QueuedEvent) -> None:
-        """Clear one notify slot after drag window-step finished end_uia (or skipped)."""
+        """Clear one notify slot after drag window-step finished (end_uia unused)."""
         if item.kind != "drag":
             return
         self._release_uia_notify_slot(item.event_index)
@@ -6583,37 +4929,6 @@ class RecordingSession:
                 return dict(payload)
         return None
 
-    @staticmethod
-    def _live_efp_disagrees_with_findall_cover(
-        live: dict[str, Any] | None,
-        uia_snapshot: dict[str, Any] | None,
-        cursor_xy: tuple[int, int] | None,
-    ) -> bool:
-        """True when FindAll already names a different usable leaf on the press."""
-        if not RecordingSession._efp_payload_usable(live):
-            return False
-        if not isinstance(uia_snapshot, dict) or cursor_xy is None:
-            return False
-        from src.recorder.uia_input_boxes import (
-            ocr_uia_labels_soft_agree,
-            resolve_usable_uia_probe_label,
-        )
-        from src.recorder.uia_replay_repair import snapshot_usable_covering_labels
-
-        live_name, live_value = RecordingSession._efp_name_value_pair(live)
-        live_label = resolve_usable_uia_probe_label(name=live_name, value=live_value)
-        if not live_label:
-            return False
-        covering = snapshot_usable_covering_labels(
-            uia_snapshot,
-            (int(cursor_xy[0]), int(cursor_xy[1])),
-        )
-        if not covering:
-            return False
-        return not any(
-            ocr_uia_labels_soft_agree(label, live_label) for label in covering
-        )
-
     def _resolve_press_element_from_point(
         self,
         live: dict[str, Any] | None,
@@ -6626,10 +4941,10 @@ class RecordingSession:
     ) -> dict[str, Any] | None:
         """Prefer near-press idle EFP when live Name/Value diverges.
 
-        Empty FindAll does not block idle. Live wins when names match or idle
-        was not latched near the press. When idle is empty, live that disagrees
-        with a FindAll leaf covering the press is rejected (post-close stale EFP).
+        Live wins when names match or idle was not latched near the press.
+        ``uia_snapshot`` is ignored (recording no longer attaches FindAll).
         """
+        _ = uia_snapshot
         idle_ok = self._efp_payload_usable(idle)
         live_ok = self._efp_payload_usable(live)
         idle_name, idle_value = self._efp_name_value_pair(idle)
@@ -6640,19 +4955,8 @@ class RecordingSession:
             source = "idle_only" if not live_ok else "idle_fallback"
             chosen = dict(idle) if isinstance(idle, dict) else None
         elif live_ok:
-            if (
-                not idle_ok
-                and self._live_efp_disagrees_with_findall_cover(
-                    live,
-                    uia_snapshot,
-                    cursor_xy,
-                )
-            ):
-                source = "live_rejected_findall_disagree"
-                chosen = None
-            else:
-                source = "live"
-                chosen = dict(live) if isinstance(live, dict) else None
+            source = "live"
+            chosen = dict(live) if isinstance(live, dict) else None
         else:
             source = "live"
             chosen = live if isinstance(live, dict) else None
@@ -6726,8 +5030,6 @@ class RecordingSession:
         with self._lock:
             run_dir = self._run_dir
             idle_efp = self._left_press_efp_idle.get(job.press_seq)
-            uia_snapshot = self._left_press_uia.get(job.press_seq)
-            click_window = self._left_press_click_windows.get(job.press_seq)
         if run_dir is None:
             self._unpin_settle_frame(job.settle_frame)
             return
@@ -6736,10 +5038,6 @@ class RecordingSession:
         # Usable idle already names click-time UI — skip the deferred probe.
         live_efp: dict[str, Any] | None = None
         if not self._efp_payload_usable(idle_efp):
-            if uia_snapshot is None and self._should_press_findall_on_click_window(
-                click_window
-            ):
-                uia_snapshot = self._findall_uia_for_click_window(click_window)
             live_efp = self._probe_element_from_point_at(
                 job.cursor_xy,
                 run_dir=run_dir,
@@ -6751,7 +5049,7 @@ class RecordingSession:
             run_dir=run_dir,
             press_seq=job.press_seq,
             cursor_xy=job.cursor_xy,
-            uia_snapshot=uia_snapshot if isinstance(uia_snapshot, dict) else None,
+            uia_snapshot=None,
         )
 
         # Typing OCR/after no longer live-grabs on press; flush adopts the next
@@ -6776,20 +5074,11 @@ class RecordingSession:
             )
             info = None
         with self._lock:
-            if uia_snapshot is None:
-                click_window = self._left_press_click_windows.get(job.press_seq)
-                uia_snapshot = self._left_press_uia.get(job.press_seq)
-        if uia_snapshot is None and self._should_press_findall_on_click_window(
-            click_window
-        ):
-            uia_snapshot = self._findall_uia_for_click_window(click_window)
-        with self._lock:
             prev = self._left_press_captures.get(job.press_seq)
             windows_before = prev[1] if prev is not None else None
             self._left_press_captures[job.press_seq] = (info, windows_before)
             self._left_press_efp[job.press_seq] = efp
-            if uia_snapshot is not None:
-                self._left_press_uia[job.press_seq] = uia_snapshot
+            self._left_press_uia[job.press_seq] = None
             if self._left_press_seq == job.press_seq:
                 self._pending_screenshot = info
                 if windows_before is not None:
@@ -6802,17 +5091,11 @@ class RecordingSession:
         with self._lock:
             run_dir = self._run_dir
             idle_efp = self._right_press_efp_idle.get(job.press_seq)
-            uia_snapshot = self._right_press_uia.get(job.press_seq)
-            click_window = self._right_press_click_windows.get(job.press_seq)
         if run_dir is None:
             self._unpin_settle_frame(job.settle_frame)
             return
         live_efp: dict[str, Any] | None = None
         if not self._efp_payload_usable(idle_efp):
-            if uia_snapshot is None and self._should_press_findall_on_click_window(
-                click_window
-            ):
-                uia_snapshot = self._findall_uia_for_click_window(click_window)
             live_efp = self._probe_element_from_point_at(
                 job.cursor_xy,
                 run_dir=run_dir,
@@ -6824,7 +5107,7 @@ class RecordingSession:
             run_dir=run_dir,
             press_seq=job.press_seq,
             cursor_xy=job.cursor_xy,
-            uia_snapshot=uia_snapshot if isinstance(uia_snapshot, dict) else None,
+            uia_snapshot=None,
         )
         pending_dest = _pending_right_capture_path(run_dir, job.press_seq)
         try:
@@ -6845,20 +5128,11 @@ class RecordingSession:
             )
             info = None
         with self._lock:
-            if uia_snapshot is None:
-                click_window = self._right_press_click_windows.get(job.press_seq)
-                uia_snapshot = self._right_press_uia.get(job.press_seq)
-        if uia_snapshot is None and self._should_press_findall_on_click_window(
-            click_window
-        ):
-            uia_snapshot = self._findall_uia_for_click_window(click_window)
-        with self._lock:
             prev = self._right_press_captures.get(job.press_seq)
             windows_before = prev[1] if prev is not None else None
             self._right_press_captures[job.press_seq] = (info, windows_before)
             self._right_press_efp[job.press_seq] = efp
-            if uia_snapshot is not None:
-                self._right_press_uia[job.press_seq] = uia_snapshot
+            self._right_press_uia[job.press_seq] = None
             if self._right_press_seq == job.press_seq:
                 self._pending_right_screenshot = info
                 if windows_before is not None:
@@ -6914,11 +5188,9 @@ class RecordingSession:
                 if press_seq is not None
                 else None
             )
-            uia_snapshot = (
+            if press_seq is not None:
                 self._left_press_uia.pop(press_seq, None)
-                if press_seq is not None
-                else None
-            )
+            uia_snapshot = None
             element_from_point = (
                 self._left_press_efp.pop(press_seq, None)
                 if press_seq is not None
@@ -7008,7 +5280,7 @@ class RecordingSession:
         else:
             self._discard_drag_end_capture_entry(drag_end)
 
-        # Drag drop naming uses end_uia from this step's settled FindAll.
+        # Drag notify waits for window-step; end_uia stays absent (no FindAll).
         if job.kind == "drag":
             with self._lock:
                 self._uia_notify_wait[int(job.event_index)] = 1
@@ -7061,11 +5333,9 @@ class RecordingSession:
                 if press_seq is not None
                 else None
             )
-            uia_snapshot = (
+            if press_seq is not None:
                 self._right_press_uia.pop(press_seq, None)
-                if press_seq is not None
-                else None
-            )
+            uia_snapshot = None
             element_from_point = (
                 self._right_press_efp.pop(press_seq, None)
                 if press_seq is not None
@@ -7170,22 +5440,7 @@ class RecordingSession:
             run_dir=run_dir,
             event_index=job.event_index,
         )
-        # Scrolls/middle-clicks share this worker: reuse settle/hover FindAll when
-        # the cache still matches this click_window. Rapid scroll bursts often
-        # outrun the prior step's settle republish — fall back to the previous
-        # scroll's snapshot when hwnd still matches (miss stays None → YOLO).
-        uia_snapshot = self._cached_uia_before(
-            job.click_window,
-            cursor_xy=job.cursor_xy,
-        )
-        if (
-            uia_snapshot is None
-            and job.kind == "scroll"
-        ):
-            uia_snapshot = self._uia_snapshot_from_previous_scroll(
-                job.click_window,
-                cursor_xy=job.cursor_xy,
-            )
+        # Recording no longer attaches FindAll snapshots (EFP + YOLO only).
         self._persist_queued_event(
             _QueuedEvent(
                 kind=job.kind,
@@ -7200,7 +5455,7 @@ class RecordingSession:
                 scroll_delta=job.scroll_delta,
                 windows_before=job.windows_before or self._start_windows_before(),
                 click_window=job.click_window,
-                uia_snapshot=uia_snapshot if isinstance(uia_snapshot, dict) else None,
+                uia_snapshot=None,
                 element_from_point=efp if isinstance(efp, dict) else None,
                 signals_before=job.signals_before or self._start_signals_before(),
                 action_monotonic=job.action_monotonic,
@@ -7806,7 +6061,7 @@ class RecordingSession:
                 if isinstance(event.uia_snapshot, dict)
                 else "miss"
             )
-            # Pulse then red: a new settle FindAll cycle starts for this event.
+            # Pulse then red until idle EFP re-greens from a usable labeled leaf.
             self._emit_uia_status(
                 state="red",
                 pulse=pulse,
@@ -7881,24 +6136,7 @@ class RecordingSession:
             focus_rect, focused_element = self._sample_debug_focus_for_item(item)
             # Same outcome as ``_resolve_window_change`` with an empty before-cache.
             debug = _window_resolve_failure_debug("missing_before_cache")
-        if not item.window_after_sealed:
-            # One settled FindAll for the next press (and drag end_uia on this event).
-            settle_hwnd = self._pick_settle_uia_hwnd(item, change, debug)
-            settle_snap = self._collect_and_publish_settle_uia(
-                settle_hwnd,
-                after_event_index=int(item.event_index),
-            )
-            if item.kind == "drag" and settle_snap is not None:
-                self._patch_event_uia_field(
-                    item.event_index, "end_uia_snapshot", settle_snap
-                )
-        else:
-            # Next gesture already sealed after-cache; skip FindAll for this step.
-            # Still advance settle generation so idle hover can warm the next
-            # press (e.g. Excel File after IME-sealed typing cleared the cache).
-            with self._lock:
-                self._last_settle_uia_after_index = int(item.event_index)
-            self._emit_uia_status(state="red", after_index=int(item.event_index))
+        # Phase 2: no settle/seed FindAll; drag end_uia stays absent.
         if (
             change is None
             and title is None

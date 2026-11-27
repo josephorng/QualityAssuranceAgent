@@ -126,15 +126,6 @@ def test_worker_idle_efp_stores_full_payload(tmp_path: Path) -> None:
     session._run_dir = tmp_path
     session._accepting_input = True
     session._idle_efp_generation = 1
-    session._last_settle_uia_after_index = 0
-    session._last_settle_uia = {
-        "hwnd": 7,
-        "class_name": "OpusApp",
-        "window": [0, 0, 100, 100],
-        "inputs": [],
-        "scrollbars": [],
-        "texts": [{"bbox": [0, 0, 80, 80], "text": "[檔案] 索引標籤"}],
-    }
     click_win = ClickWindowInfo(
         hwnd=7,
         title="Word",
@@ -292,7 +283,8 @@ def test_worker_pending_left_press_keeps_live_when_idle_far(tmp_path: Path) -> N
     assert recorded["name"] == "返回"
 
 
-def test_resolve_press_efp_rejects_live_when_findall_covers_disagrees() -> None:
+def test_resolve_press_efp_keeps_live_when_uia_snapshot_ignored() -> None:
+    """Phase 2: FindAll disagree gate removed; live usable EFP is kept."""
     session = RecordingSession(runs_root=None)  # type: ignore[arg-type]
     live = {
         "name": "K15",
@@ -316,35 +308,8 @@ def test_resolve_press_efp_rejects_live_when_findall_covers_disagrees() -> None:
         cursor_xy=(2718, 631),
         uia_snapshot=snapshot,
     )
-    assert chosen is None
-
-
-def test_resolve_press_efp_keeps_live_when_findall_agrees() -> None:
-    session = RecordingSession(runs_root=None)  # type: ignore[arg-type]
-    live = {
-        "name": "儲存(S)",
-        "value": "",
-        "bbox": [2635, 613, 99, 28],
-        "control_type": "button",
-    }
-    snapshot = {
-        "window": [1920, -1, 941, 667],
-        "texts": [
-            {
-                "bbox": [2635, 613, 2734, 641],
-                "text": "儲存(S)",
-                "control_type": "button",
-            }
-        ],
-    }
-    chosen = session._resolve_press_element_from_point(
-        live,
-        None,
-        cursor_xy=(2718, 631),
-        uia_snapshot=snapshot,
-    )
     assert chosen is not None
-    assert chosen["name"] == "儲存(S)"
+    assert chosen["name"] == "K15"
 
 
 def test_worker_pending_right_press_idle_fallback(tmp_path: Path) -> None:

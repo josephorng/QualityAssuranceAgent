@@ -145,7 +145,7 @@ async def test_try_rebuild_vision_from_cache_round_trip_skips_triton(tmp_path: P
     assert rebuilt is not None
     assert rebuilt["used_vision"] is True
     assert rebuilt["vision_path"] == "yolo_ocr"
-    assert rebuilt["vision_path_reason"] == "沒有 UIA 快照"
+    assert rebuilt["vision_path_reason"] == "沒有可用的 EFP"
     assert rebuilt["candidate_text"] == vision["candidate_text"]
     assert len(rebuilt["candidates"]) == len(vision["candidates"])
     assert rebuilt["field_context"] == vision["field_context"]

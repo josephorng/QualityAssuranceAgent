@@ -166,8 +166,8 @@
       <label class="vis-form-label" id="urp-hub-wrap">
         <span>Hub source</span>
         <select id="urp-hub" class="vis-form-select" aria-controls="urp-detail">
-          <option value="findall" selected>findall</option>
-          <option value="uia_efp">uia_efp</option>
+          <option value="uia_efp" selected>uia_efp</option>
+          <option value="omitted">omitted (YOLO)</option>
         </select>
       </label>
     </div>
@@ -341,14 +341,14 @@
         title: "Compile tool call",
         sub: "（UIA） → move_mouse args",
         phase: "compile",
-        reason: "findall | uia_efp",
+        reason: "uia_efp or omitted",
         file: "compile_tool_calls.py / vision_context.py",
         fn: "_move_mouse_call · select_click_primary_candidate",
-        gate: "candidates[0].source\nuia → findall · uia_efp → uia_efp",
+        gate: "usable EFP → hub_source=uia_efp\nelse omit hub_source",
         bullets: [
-          "Both FindAll and EFP stay in the pool; typed precedence picks primary.",
-          "0 concrete FindAll · 1 data_item EFP · 2 other UIA · 3 generic row hubs.",
-          "Packs landmark_geometry, nearby_objects, click_window, optional hub_parent."
+          "Sole UIA hub is press-time EFP (source=uia_efp).",
+          "Nearby / landmark_geometry from YOLO+OCR only.",
+          "Packs name/value/parents, landmark_geometry, nearby_objects, click_window."
         ]
       },
       move: {
@@ -378,15 +378,15 @@
         ]
       },
       findall: {
-        title: "UIA FindAll snapshot",
-        sub: "click_window pool",
-        phase: "選取 · FindAll",
-        reason: "empty → retry once",
+        title: "Constellation YOLO",
+        sub: "landmarks for EFP path",
+        phase: "選取 · YOLO",
+        reason: "no budgeted window FindAll",
         file: "select_mouse_target.py",
-        fn: "_uia_only_detections_for_click_window",
-        gate: "uia_efp may merge YOLO landmarks first",
+        fn: "_try_uia_first_unique_select · find_uia_leaf_by_efp_path",
+        gate: "hub_source=uia_efp → constellation then path lookup",
         bullets: [
-          "Phase badge: 選取 · FindAll (briefly 選取 · YOLO for constellation landmarks)."
+          "YOLO TEXT/ELEMENT for landmark geometry; parents_chains_agree before commit."
         ]
       },
       select: null,
@@ -399,17 +399,17 @@
         fn: "_find_mouse_point_attempt (post UIA-first)",
         gate: "no OCR twin or input/scrollbar/EFP synth → commit",
         bullets: [
-          "Subtarget EFP soft-miss keeps hub when findall or EFP-verified reason."
+          "Subtarget EFP soft-miss keeps hub for EFP-verified reasons only."
         ]
       },
       fallback: {
         title: "Miss fallback",
-        sub: "retry · twin · YOLO",
+        sub: "twin · YOLO",
         phase: "選取 · YOLO / OCR",
-        reason: "soft-miss keep findall",
+        reason: "soft-miss → twin",
         file: "select_mouse_target.py · uia_replay_repair.py",
         fn: "take_yolo_ocr_fallback",
-        gate: "retry FindAll else OCR twin / force yolo_ocr",
+        gate: "OCR twin / force yolo_ocr (no FindAll repair)",
         bullets: [
           "Queued YoloOcrMoveFallback rewrites instruction/nearby/landmarks."
         ]
@@ -525,29 +525,29 @@
       if (hub === "uia_efp") {
         return {
           title: "Constellation-EFP",
-          sub: "then Name shortlist",
-          phase: "選取 · FindAll",
-          reason: "landmark_efp_* / hit",
+          sub: "then efp_path + parents",
+          phase: "選取 · YOLO / EFP",
+          reason: "landmark_efp_* / efp_path_hit",
           file: "select_mouse_target.py",
           fn: "_try_uia_first_unique_select",
           gate: "hub_source=uia_efp → constellation first",
           bullets: [
-            "Reasons: landmark_efp_hit, _synth_hit, _neighbor_hit, uia_data_item_name_hit.",
-            "EFP miss continues Name shortlist on UIA-family only."
+            "Reasons: landmark_efp_hit, _synth_hit, _neighbor_hit, efp_path_hit, uia_data_item_name_hit.",
+            "Commit requires parents_chains_agree with recorded parents[]."
           ]
         };
       }
       return {
-        title: "FindAll Name shortlist",
-        sub: "unique + hub_parent",
-        phase: "選取 · FindAll",
-        reason: "hit / efp_parent_recovery",
+        title: "YOLO+OCR path",
+        sub: "no UIA hub",
+        phase: "選取 · YOLO / OCR",
+        reason: "hub_source omitted",
         file: "select_mouse_target.py",
-        fn: "_try_uia_first_unique_select",
-        gate: "hub_source=findall → skip hard EFP",
+        fn: "_find_mouse_point_attempt",
+        gate: "pure YOLO — no constellation UIA path",
         bullets: [
-          "Exactly one anchor after nearby prefilter.",
-          "hub_parent must agree; else EFP Name+parent recovery."
+          "allow_uia_select is false for vision_mode=yolo_ocr.",
+          "Live FindAll repair promotion is disabled."
         ]
       };
     }
@@ -556,29 +556,29 @@
       if (hub === "uia_efp") {
         return {
           title: "Primary → uia_efp",
-          sub: "data_item / labeled EFP wins",
+          sub: "usable press EFP leaf",
           phase: "primary",
-          reason: "precedence 1 or 2",
+          reason: "EFP hub",
           file: "vision_context.py",
-          fn: "_uia_click_primary_precedence · select_click_primary_candidate",
-          gate: "data_item EFP beats generic row FindAll\n→ candidates[0].source=uia_efp",
+          fn: "_detect_recording_mouse_targets · select_click_primary_candidate",
+          gate: "usable EFP → candidates[0].source=uia_efp",
           bullets: [
-            "Compile maps uia_efp → hub_source=uia_efp.",
-            "Disagreeing FindAll still injected; debug efp_findall_label_disagree."
+            "Compile maps uia_efp → hub_source=uia_efp + parents.",
+            "Nearby landmarks from YOLO+OCR only."
           ]
         };
       }
       return {
-        title: "Primary → findall",
-        sub: "concrete FindAll wins",
+        title: "Primary → YOLO",
+        sub: "no usable EFP",
         phase: "primary",
-        reason: "precedence 0",
+        reason: "vision_path=yolo_ocr",
         file: "vision_context.py",
-        fn: "_uia_click_primary_precedence · select_click_primary_candidate",
-        gate: "button/tab/menu/list_item FindAll\nbeats disagreeing cell EFP",
+        fn: "_detect_recording_mouse_targets",
+        gate: "omit hub_source (never findall)",
         bullets: [
-          "Containing-click hits ranked by precedence → content → area.",
-          "Compile maps uia → hub_source=findall (+ hub_parent)."
+          "Pure YOLO/OCR primary; no FindAll hub.",
+          "Compile omits hub_source."
         ]
       };
     }
@@ -592,13 +592,13 @@
 
     function renderReplayOverview() {
       var hub = hubSel.value;
-      var selectSub = hub === "uia_efp" ? "Constellation-EFP" : "Name shortlist";
-      var branch = hub === "uia_efp" ? "uia_efp · EFP first" : "findall · Name path";
+      var selectSub = hub === "uia_efp" ? "Constellation-EFP" : "YOLO only";
+      var branch = hub === "uia_efp" ? "uia_efp · EFP path" : "omitted · YOLO";
       var html =
         node("compile", 28, 24, 150, 56, "1 Compile", "vision_mode=uia") +
         node("move", 218, 24, 150, 56, "2 move_mouse", "resolve_mouse_point") +
         node("attempt", 408, 24, 150, 56, "3 Attempt", "_find_mouse_point") +
-        node("findall", 293, 120, 150, 56, "4 FindAll", "click_window UIA", "blue") +
+        node("findall", 293, 120, 150, 56, "4 Constellation", "YOLO landmarks", "blue") +
         node("select", 293, 216, 150, 56, "5 UIA select", selectSub, "blue") +
         node("commit", 118, 320, 150, 56, "6a Commit", "hub center ± offset", "success") +
         node("fallback", 468, 320, 150, 56, "6b Fallback", "OCR twin / YOLO", "orange") +
@@ -651,9 +651,9 @@
             box(40, 28, 200, 56, "analysis event", "candidates[0]") +
             box(320, 28, 200, 56, "precedence", "typed FindAll/EFP", "blue") +
             box(600, 28, 200, 56, "primary source", "uia | uia_efp") +
-            box(40, 160, 200, 56, "hub_source", "findall | uia_efp", "blue") +
-            box(320, 160, 200, 56, "hub fields", "anchor · type · parent") +
-            box(600, 160, 200, 56, "EFP sidecar", "name · value · parent") +
+            box(40, 160, 200, 56, "hub_source", "uia_efp | omitted", "blue") +
+            box(320, 160, 200, 56, "hub fields", "anchor · type") +
+            box(600, 160, 200, 56, "EFP sidecar", "name · value · parents") +
             box(320, 300, 220, 56, "move_mouse args", "vision_mode=uia", "success") +
             dArrow("M240 56 H320") + dArrow("M520 56 H600") +
             dArrow("M700 84 V130 H140 V160") + dArrow("M420 84 V160") + dArrow("M700 84 V130 H700 V160") +
@@ -726,16 +726,16 @@
           } else {
             h = 520;
             body =
-              box(40, 24, 220, 56, "skip constellation", "hub_source=findall", "blue") +
-              box(320, 24, 220, 56, "Name shortlist", "Name then Value") +
-              box(600, 24, 200, 56, "control_type filter", "vision_mode=uia") +
-              diamond(430, 160, "empty?") +
-              box(40, 260, 220, 56, "Name FindAll recover", "bring_into_view") +
-              box(320, 260, 220, 56, "nearby prefilter", "_prefilter_anchors") +
-              diamond(430, 380, "unique 1?") +
-              box(40, 460, 200, 48, "hub_parent check", "findall only", "blue") +
-              box(280, 460, 200, 48, "hit / recovery", "efp_parent_*", "success") +
-              box(600, 360, 200, 48, "not_unique", "", "orange") +
+              box(40, 24, 220, 56, "hub_source omitted", "pure YOLO path", "orange") +
+              box(320, 24, 220, 56, "no constellation", "allow_uia_select=false") +
+              box(600, 24, 200, 56, "YOLO+OCR select", "", "orange") +
+              diamond(430, 160, "twin?") +
+              box(40, 260, 220, 56, "adopt twin fields", "if queued") +
+              box(320, 260, 220, 56, "full YOLO+OCR", "defer_ocr=False", "orange") +
+              diamond(430, 380, "unique?") +
+              box(40, 460, 200, 48, "no FindAll repair", "Phase 5", "blue") +
+              box(280, 460, 200, 48, "commit YOLO box", "", "success") +
+              box(600, 360, 200, 48, "soft miss", "", "orange") +
               dArrow("M260 52 H320") + dArrow("M540 52 H600") +
               dArrow("M430 80 V120") +
               dArrow("M390 160 H150 V260") + label(170, 148, "yes", true) +
@@ -892,7 +892,7 @@
             box(640, 140, 160, 56, "3 row hubs", "清單 row") +
             box(40, 260, 260, 56, "content → area ties", "") +
             box(380, 260, 260, 56, "candidates[0]", "primary", "success") +
-            box(40, 390, 260, 56, "source=uia", "→ hub_source findall", "blue") +
+            box(40, 390, 260, 56, "no usable EFP", "→ omit hub_source", "orange") +
             box(380, 390, 260, 56, "source=uia_efp", "→ hub_source uia_efp", "purple") +
             dArrow("M300 52 H380") + dArrow("M510 80 V140") +
             dArrow("M510 196 V260") + dArrow("M170 316 V390") + dArrow("M510 316 V390");

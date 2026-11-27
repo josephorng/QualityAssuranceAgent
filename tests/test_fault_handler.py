@@ -32,3 +32,8 @@ def test_nonfatal_com_exception_codes_cover_cantcallout() -> None:
     assert 0x8001010D in main_mod._NONFATAL_COM_EXCEPTION_CODES
     assert 0x8001010A in main_mod._NONFATAL_COM_EXCEPTION_CODES
     assert 0x80010001 in main_mod._NONFATAL_COM_EXCEPTION_CODES
+    # NTSTATUS RPC forms seen as SEH during cross-process UIA (e.g. Excel).
+    assert 0xC0020043 in main_mod._NONFATAL_COM_EXCEPTION_CODES
+    assert 0xC0020017 in main_mod._NONFATAL_COM_EXCEPTION_CODES
+    assert 0xC0020018 in main_mod._NONFATAL_COM_EXCEPTION_CODES
+    assert 0xC0020015 in main_mod._NONFATAL_COM_EXCEPTION_CODES

@@ -49,15 +49,26 @@ _fault_log_path_active: Path | None = None
 _fault_heartbeat_stop = threading.Event()
 
 # faulthandler dumps every Windows SEH with the error bit set, including
-# transient COM HRESULTs raised as first-chance exceptions during UIA.
+# transient COM/RPC failures raised as first-chance exceptions during UIA.
+# HRESULT forms (0x8001xxxx) and NTSTATUS RPC_NT_* forms (0xC002xxxx) both
+# appear; continuing execution lets the COM call return failure instead of
+# killing the process.
 _RPC_E_CALL_REJECTED = 0x80010001
 _RPC_E_SERVERCALL_RETRYLATER = 0x8001010A
 _RPC_E_CANTCALLOUT_ININPUTSYNCCALL = 0x8001010D
+_RPC_NT_SERVER_UNAVAILABLE = 0xC0020015
+_RPC_NT_CALL_FAILED = 0xC0020017
+_RPC_NT_CALL_FAILED_DNE = 0xC0020018
+_RPC_NT_INTERNAL_ERROR = 0xC0020043
 _NONFATAL_COM_EXCEPTION_CODES = frozenset(
     {
         _RPC_E_CALL_REJECTED,
         _RPC_E_SERVERCALL_RETRYLATER,
         _RPC_E_CANTCALLOUT_ININPUTSYNCCALL,
+        _RPC_NT_SERVER_UNAVAILABLE,
+        _RPC_NT_CALL_FAILED,
+        _RPC_NT_CALL_FAILED_DNE,
+        _RPC_NT_INTERNAL_ERROR,
     }
 )
 _EXCEPTION_CONTINUE_EXECUTION = -1

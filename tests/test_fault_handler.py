@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ctypes
 import faulthandler
+import os
 from pathlib import Path
 
 import main as main_mod
@@ -37,3 +39,28 @@ def test_nonfatal_com_exception_codes_cover_cantcallout() -> None:
     assert 0xC0020017 in main_mod._NONFATAL_COM_EXCEPTION_CODES
     assert 0xC0020018 in main_mod._NONFATAL_COM_EXCEPTION_CODES
     assert 0xC0020015 in main_mod._NONFATAL_COM_EXCEPTION_CODES
+    # Breakpoint SEH while UIA hits an app that is still launching.
+    assert 0x80000003 in main_mod._NONFATAL_COM_EXCEPTION_CODES
+
+
+def test_advance_past_breakpoint_bumps_instruction_pointer() -> None:
+    if os.name != "nt":
+        return
+    ptr_size = ctypes.sizeof(ctypes.c_void_p)
+    ctx_size = (
+        main_mod._CONTEXT_RIP_OFFSET + 8
+        if ptr_size == 8
+        else main_mod._CONTEXT_EIP_OFFSET + 4
+    )
+    buf = (ctypes.c_ubyte * ctx_size)()
+    addr = ctypes.addressof(buf)
+    if ptr_size == 8:
+        rip = ctypes.c_uint64.from_address(addr + main_mod._CONTEXT_RIP_OFFSET)
+        rip.value = 0x1000
+        main_mod._advance_past_breakpoint(addr)
+        assert rip.value == 0x1001
+    else:
+        eip = ctypes.c_uint32.from_address(addr + main_mod._CONTEXT_EIP_OFFSET)
+        eip.value = 0x1000
+        main_mod._advance_past_breakpoint(addr)
+        assert eip.value == 0x1001

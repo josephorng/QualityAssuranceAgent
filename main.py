@@ -53,6 +53,10 @@ _fault_heartbeat_stop = threading.Event()
 # HRESULT forms (0x8001xxxx) and NTSTATUS RPC_NT_* forms (0xC002xxxx) both
 # appear; continuing execution lets the COM call return failure instead of
 # killing the process.
+#
+# EXCEPTION_BREAKPOINT (0x80000003) also shows up when UIA talks to an app
+# that is still launching (DebugBreak / provider assert). Without a debugger
+# attached that becomes a fatal dump; skip the int3 and keep recording.
 _RPC_E_CALL_REJECTED = 0x80010001
 _RPC_E_SERVERCALL_RETRYLATER = 0x8001010A
 _RPC_E_CANTCALLOUT_ININPUTSYNCCALL = 0x8001010D
@@ -60,6 +64,11 @@ _RPC_NT_SERVER_UNAVAILABLE = 0xC0020015
 _RPC_NT_CALL_FAILED = 0xC0020017
 _RPC_NT_CALL_FAILED_DNE = 0xC0020018
 _RPC_NT_INTERNAL_ERROR = 0xC0020043
+_EXCEPTION_BREAKPOINT = 0x80000003
+_EXCEPTION_NONCONTINUABLE = 0x1
+# AMD64 CONTEXT.Rip / x86 CONTEXT.Eip offsets (winnt.h).
+_CONTEXT_RIP_OFFSET = 0xF8
+_CONTEXT_EIP_OFFSET = 0xB8
 _NONFATAL_COM_EXCEPTION_CODES = frozenset(
     {
         _RPC_E_CALL_REJECTED,
@@ -69,6 +78,7 @@ _NONFATAL_COM_EXCEPTION_CODES = frozenset(
         _RPC_NT_CALL_FAILED,
         _RPC_NT_CALL_FAILED_DNE,
         _RPC_NT_INTERNAL_ERROR,
+        _EXCEPTION_BREAKPOINT,
     }
 )
 _EXCEPTION_CONTINUE_EXECUTION = -1
@@ -76,6 +86,18 @@ _EXCEPTION_CONTINUE_SEARCH = 0
 # Keep the WINFUNCTYPE callback alive for the process lifetime.
 _nonfatal_com_veh_handler: Any = None
 _nonfatal_com_veh_handle: Any = None
+
+
+def _advance_past_breakpoint(context_addr: int) -> None:
+    """Skip the 1-byte int3 (0xCC) so CONTINUE_EXECUTION does not re-hit it."""
+    if not context_addr:
+        return
+    if ctypes.sizeof(ctypes.c_void_p) == 8:
+        rip = ctypes.c_uint64.from_address(context_addr + _CONTEXT_RIP_OFFSET)
+        rip.value += 1
+    else:
+        eip = ctypes.c_uint32.from_address(context_addr + _CONTEXT_EIP_OFFSET)
+        eip.value += 1
 
 
 def _install_nonfatal_com_veh() -> None:
@@ -119,9 +141,16 @@ def _install_nonfatal_com_veh() -> None:
             record = exc_info.contents.ExceptionRecord
             if not record:
                 return _EXCEPTION_CONTINUE_SEARCH
+            flags = int(record.contents.ExceptionFlags) & 0xFFFFFFFF
+            if flags & _EXCEPTION_NONCONTINUABLE:
+                return _EXCEPTION_CONTINUE_SEARCH
             code = int(record.contents.ExceptionCode) & 0xFFFFFFFF
-            if code in _NONFATAL_COM_EXCEPTION_CODES:
-                return _EXCEPTION_CONTINUE_EXECUTION
+            if code not in _NONFATAL_COM_EXCEPTION_CODES:
+                return _EXCEPTION_CONTINUE_SEARCH
+            if code == _EXCEPTION_BREAKPOINT:
+                ctx = exc_info.contents.ContextRecord
+                _advance_past_breakpoint(int(ctx) if ctx else 0)
+            return _EXCEPTION_CONTINUE_EXECUTION
         except Exception:
             pass
         return _EXCEPTION_CONTINUE_SEARCH

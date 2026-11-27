@@ -3672,23 +3672,12 @@ _VISION_PATHS = frozenset({"uia", "yolo_ocr"})
 def _press_efp_opens_uia_hub(element_from_point: dict[str, Any] | None) -> bool:
     """True when press EFP alone opens the UIA analysis hub (no FindAll).
 
-    Usable labeled leaf / ``data_item`` (``efp_payload_is_usable_labeled_leaf``)
-    or a WinForms scrollbar thumb (``Position``) with a screen bbox.
+    Delegates to :func:`efp_payload_opens_uia_hub` so the recording LED green
+    gate and analysis stay aligned (labeled leaf or ``Position`` thumb + bbox).
     """
-    from src.recorder.uia_input_boxes import (
-        efp_payload_is_usable_labeled_leaf,
-        efp_payload_screen_bbox_xywh,
-        is_winforms_scrollbar_thumb_efp_name,
-    )
+    from src.recorder.uia_input_boxes import efp_payload_opens_uia_hub
 
-    if efp_payload_is_usable_labeled_leaf(element_from_point):
-        return True
-    if not isinstance(element_from_point, dict):
-        return False
-    name = str(element_from_point.get("name") or "").strip()
-    if not is_winforms_scrollbar_thumb_efp_name(name):
-        return False
-    return efp_payload_screen_bbox_xywh(element_from_point) is not None
+    return efp_payload_opens_uia_hub(element_from_point)
 
 
 def _press_efp_is_weak_hub(element_from_point: dict[str, Any] | None) -> bool:

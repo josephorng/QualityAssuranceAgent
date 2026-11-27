@@ -37,7 +37,8 @@ def test_uia_path_ready_from_usable_efp_button() -> None:
     assert session._uia_path_ready_at_cursor((50, 20)) is True
 
 
-def test_uia_path_not_ready_from_position_thumb_efp_alone() -> None:
+def test_uia_path_ready_from_position_thumb_efp_alone() -> None:
+    """WinForms Position thumb + bbox opens the UIA hub (LED green)."""
     session = RecordingSession(runs_root=None)  # type: ignore[arg-type]
     session._idle_efp_payload = {
         "name": "Position",
@@ -45,7 +46,7 @@ def test_uia_path_not_ready_from_position_thumb_efp_alone() -> None:
         "control_type": "data_item",
         "bbox": [1900, 400, 17, 200],
     }
-    assert session._uia_path_ready_at_cursor((1908, 500)) is False
+    assert session._uia_path_ready_at_cursor((1908, 500)) is True
     session._idle_efp_payload = {
         "name": "",
         "value": "",
@@ -53,6 +54,46 @@ def test_uia_path_not_ready_from_position_thumb_efp_alone() -> None:
         "bbox": [40, 10, 60, 24],
     }
     assert session._uia_path_ready_at_cursor((50, 20)) is False
+
+
+def test_led_and_press_efp_hub_gate_agree() -> None:
+    """LED readiness matches analysis _press_efp_opens_uia_hub."""
+    from src.recorder.vision_context import _press_efp_opens_uia_hub
+
+    cases: list[tuple[dict[str, object] | None, bool]] = [
+        (
+            {
+                "name": "G8",
+                "value": "",
+                "control_type": "data_item",
+                "bbox": [466, 477, 72, 22],
+            },
+            True,
+        ),
+        (
+            {
+                "name": "Position",
+                "value": "",
+                "bbox": [1900, 400, 17, 200],
+            },
+            True,
+        ),
+        (
+            {
+                "name": "",
+                "value": "",
+                "control_type": "button",
+                "bbox": [40, 10, 60, 24],
+            },
+            False,
+        ),
+        (None, False),
+    ]
+    session = RecordingSession(runs_root=None)  # type: ignore[arg-type]
+    for payload, expected in cases:
+        session._idle_efp_payload = payload
+        assert _press_efp_opens_uia_hub(payload) is expected
+        assert session._uia_path_ready_at_cursor((1, 1), efp_payload=payload) is expected
 
 
 def test_emit_uia_path_readiness_greens_usable_efp() -> None:
@@ -261,6 +302,21 @@ def test_schedule_idle_efp_skips_inside_same_leaf_bbox() -> None:
     session._schedule_idle_efp(110, 110)
     assert session._idle_efp_timer is None
     session._schedule_idle_efp(200, 200)
+    assert session._idle_efp_timer is not None
+    session._idle_efp_timer.cancel()
+
+
+def test_schedule_idle_efp_skips_inside_position_thumb_bbox() -> None:
+    session = RecordingSession(runs_root=None)  # type: ignore[arg-type]
+    session._accepting_input = True
+    session._idle_efp_payload = {
+        "name": "Position",
+        "value": "",
+        "bbox": [1900, 400, 17, 200],
+    }
+    session._schedule_idle_efp(1908, 500)
+    assert session._idle_efp_timer is None
+    session._schedule_idle_efp(10, 10)
     assert session._idle_efp_timer is not None
     session._idle_efp_timer.cancel()
 

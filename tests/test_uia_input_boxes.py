@@ -31,6 +31,7 @@ from src.recorder.uia_input_boxes import (
     control_type_token_from_id,
     element_from_point_name_value,
     efp_payload_is_usable_labeled_leaf,
+    efp_payload_opens_uia_hub,
     filter_uia_input_rects,
     filter_uia_scrollbar_rects,
     control_type_id_from_token,
@@ -1330,6 +1331,30 @@ def test_efp_payload_is_usable_labeled_leaf() -> None:
     assert not efp_payload_is_usable_labeled_leaf(
         {"name": "Position", "value": "50", "bbox": [1, 1, 10, 10]}
     )
+
+
+def test_efp_payload_opens_uia_hub() -> None:
+    assert efp_payload_opens_uia_hub(
+        {
+            "name": "G8",
+            "value": "",
+            "control_type": "data_item",
+            "bbox": [466, 477, 72, 22],
+        }
+    )
+    assert efp_payload_opens_uia_hub(
+        {"name": "Position", "value": "", "bbox": [1900, 400, 17, 200]}
+    )
+    assert efp_payload_opens_uia_hub(
+        {"name": "Position", "value": "50", "bbox": [1, 1, 10, 10]}
+    )
+    assert not efp_payload_opens_uia_hub(
+        {"name": "CoreInput", "control_type": "button", "bbox": [1, 1, 10, 10]}
+    )
+    assert not efp_payload_opens_uia_hub(
+        {"name": "Position", "value": "", "bbox": [1, 1, 0, 10]}
+    )
+    assert not efp_payload_opens_uia_hub(None)
 
 
 def test_select_uia_field_clip_picks_smallest_containing_caret() -> None:

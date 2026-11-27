@@ -2086,18 +2086,19 @@ class RecordingSession:
         return int(self._idle_efp_generation)
 
     def _idle_efp_same_leaf_bbox_locked(self, x: int, y: int) -> bool:
-        """True when ``(x, y)`` is still inside the last usable labeled-leaf EFP bbox.
+        """True when ``(x, y)`` is still inside the last UIA-hub-openable EFP bbox.
 
         Caller holds ``_lock``. Used to skip mouse-move re-probes inside an
-        Excel cell or File-tab button; force-refresh bypasses this.
+        Excel cell, File-tab button, or ``Position`` thumb; force-refresh
+        bypasses this.
         """
         from src.recorder.uia_input_boxes import (
-            efp_payload_is_usable_labeled_leaf,
+            efp_payload_opens_uia_hub,
             efp_payload_screen_bbox_xywh,
         )
 
         payload = self._idle_efp_payload
-        if not efp_payload_is_usable_labeled_leaf(payload):
+        if not efp_payload_opens_uia_hub(payload):
             return False
         assert isinstance(payload, dict)
         bbox = efp_payload_screen_bbox_xywh(payload)
@@ -2108,9 +2109,9 @@ class RecordingSession:
     def _schedule_idle_efp(self, x: int, y: int, *, force: bool = False) -> None:
         """Debounce ElementFromPoint for the LED label. Hook-safe (timer only).
 
-        When ``force`` is False and the cursor remains inside a usable idle
-        labeled-leaf bbox, skip cancel/bump/timer so the LED label does not
-        clear to pending and COM is not re-probed.
+        When ``force`` is False and the cursor remains inside a UIA-hub-openable
+        idle EFP bbox, skip cancel/bump/timer so the LED label does not clear
+        to pending and COM is not re-probed.
         """
         with self._lock:
             if not self._accepting_input or self._finalizing:
@@ -2188,19 +2189,19 @@ class RecordingSession:
         *,
         efp_payload: dict[str, Any] | None | object = _EFP_UNSET,
     ) -> bool:
-        """True when a usable labeled EFP leaf would record a UIA path.
+        """True when idle/press EFP alone can open a UIA hub (LED green).
 
-        Excel ``data_item`` cells and labeled chrome EFP (button/tab/…) green
-        the LED without a covering FindAll walk.
+        Matches analysis ``_press_efp_opens_uia_hub``: labeled leaf / cell, or
+        WinForms ``Position`` thumb with bbox — no covering FindAll walk.
         """
         if cursor_xy is None:
             return False
         if efp_payload is _EFP_UNSET:
             with self._lock:
                 efp_payload = self._idle_efp_payload
-        from src.recorder.uia_input_boxes import efp_payload_is_usable_labeled_leaf
+        from src.recorder.uia_input_boxes import efp_payload_opens_uia_hub
 
-        return efp_payload_is_usable_labeled_leaf(
+        return efp_payload_opens_uia_hub(
             efp_payload if isinstance(efp_payload, dict) else None
         )
 
@@ -2215,7 +2216,7 @@ class RecordingSession:
         bg_remove: str | None = None,
         efp_payload: dict[str, Any] | None | object = _EFP_UNSET,
     ) -> None:
-        """Paint green when a usable labeled EFP leaf is UIA-path ready.
+        """Paint green when EFP alone can open a UIA hub (hub-openable leaf).
 
         EFP Name/Value is a live cursor preview on any LED color. Red updates
         the LED only and does not clear a just-probed label.
@@ -6061,7 +6062,7 @@ class RecordingSession:
                 if isinstance(event.uia_snapshot, dict)
                 else "miss"
             )
-            # Pulse then red until idle EFP re-greens from a usable labeled leaf.
+            # Pulse then red until idle EFP re-greens from a UIA-hub-openable leaf.
             self._emit_uia_status(
                 state="red",
                 pulse=pulse,

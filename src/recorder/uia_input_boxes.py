@@ -689,8 +689,9 @@ def resolve_usable_uia_probe_label(
     return str(canonicalize_uia_shell_status_label(preferred) or "").strip()
 
 
-# EFP leaves that can green the recording LED / open the UIA analysis path
-# without a covering FindAll walk (cells + concrete labeled chrome / tree).
+# EFP leaves that open a labeled UIA hub without a covering FindAll walk
+# (cells + concrete labeled chrome / tree). Scrollbar thumbs use
+# efp_payload_opens_uia_hub separately.
 _EFP_USABLE_LABELED_LEAF_CONTROL_TYPES = frozenset(
     {
         "data_item",
@@ -730,12 +731,13 @@ def efp_payload_screen_bbox_xywh(
 
 
 def efp_payload_is_usable_labeled_leaf(payload: dict[str, Any] | None) -> bool:
-    """True when idle/press EFP alone can green the UIA LED for a labeled leaf.
+    """True when idle/press EFP alone is a usable labeled UIA leaf.
 
     Covers Excel ``data_item`` cells, concrete chrome (button/tab/tree/…), and
     untyped Name|Value leaves (some UltraTree peers omit ControlType) that
     analysis injects as ``uia_efp`` peers. Rejects weak hubs and WinForms
-    ``Position`` thumbs.
+    ``Position`` thumbs (those open the UIA hub as scrollbars via
+    :func:`efp_payload_opens_uia_hub`).
     """
     if not isinstance(payload, dict):
         return False
@@ -760,8 +762,25 @@ def efp_payload_is_usable_labeled_leaf(payload: dict[str, Any] | None) -> bool:
     return efp_payload_screen_bbox_xywh(payload) is not None
 
 
+def efp_payload_opens_uia_hub(payload: dict[str, Any] | None) -> bool:
+    """True when idle/press EFP alone can open a UIA analysis hub (no FindAll).
+
+    Shared by the recording LED green gate and analysis
+    ``_press_efp_opens_uia_hub``: usable labeled leaf / ``data_item``, or a
+    WinForms scrollbar thumb (``Position``) with a screen bbox.
+    """
+    if efp_payload_is_usable_labeled_leaf(payload):
+        return True
+    if not isinstance(payload, dict):
+        return False
+    name = str(payload.get("name") or "").strip()
+    if not is_winforms_scrollbar_thumb_efp_name(name):
+        return False
+    return efp_payload_screen_bbox_xywh(payload) is not None
+
+
 def efp_payload_is_usable_data_item(payload: dict[str, Any] | None) -> bool:
-    """True when idle/press EFP alone can green the UIA LED for a grid cell.
+    """True when idle/press EFP alone is a usable grid-cell labeled leaf.
 
     DataItem is excluded from FindAll (Excel cell blow-up); a usable
     ``control_type=data_item`` leaf with bbox is enough for readiness / path.

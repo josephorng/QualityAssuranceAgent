@@ -4947,6 +4947,62 @@ def _leaf_bbox_contains_point(
     return lx <= int(x) <= lx + lw and ly <= int(y) <= ly + lh
 
 
+def _clamp_point_into_bbox_xywh(
+    x: int,
+    y: int,
+    bbox: tuple[int, int, int, int],
+) -> tuple[int, int]:
+    """Clamp ``(x, y)`` into ``bbox`` using inclusive edges (same as contains)."""
+    bx, by, bw, bh = (int(v) for v in bbox)
+    if bw <= 0 or bh <= 0:
+        return int(x), int(y)
+    return (
+        max(bx, min(int(x), bx + bw)),
+        max(by, min(int(y), by + bh)),
+    )
+
+
+# Twin methods where the click origin is the in-hub YOLO/OCR glyph (not synth).
+_TWIN_GLYPH_SUBTARGET_METHODS = frozenset(
+    {
+        "uia_yolo_subtarget",
+        "uia_yolo_subtarget_efp_ocr",
+    }
+)
+
+
+def _twin_offsets_from_ocr_fallback(
+    ocr_fallback: Any | None,
+) -> tuple[int, int]:
+    """Parse twin-relative ``offset_dx/dy`` from ``yolo_ocr_fallback.instruction``."""
+    if ocr_fallback is None:
+        return 0, 0
+    instruction = str(getattr(ocr_fallback, "instruction", "") or "").strip()
+    if not instruction:
+        return 0, 0
+    nearby = getattr(ocr_fallback, "nearby_objects", None)
+    fields = _mouse_select_fields_from_ocr_fallback_instruction(
+        instruction,
+        list(nearby) if nearby else None,
+    )
+    return int(fields["offset_dx"]), int(fields["offset_dy"])
+
+
+def _adopt_twin_glyph_offsets(
+    *,
+    method: str,
+    ocr_fallback: Any | None,
+) -> tuple[int, int, bool] | None:
+    """Return ``(dx, dy, from_twin)`` when ``method`` is a glyph twin commit.
+
+    Synth / EFP-pool commits are left unchanged by the caller.
+    """
+    if str(method or "") not in _TWIN_GLYPH_SUBTARGET_METHODS:
+        return None
+    dx, dy = _twin_offsets_from_ocr_fallback(ocr_fallback)
+    return int(dx), int(dy), True
+
+
 _EFP_SUBTARGET_GATE_PAD_PX = 12
 
 
@@ -7353,6 +7409,10 @@ async def _find_mouse_point_attempt(
     uia_first_reason = ""
     uia_yolo_subtarget_chosen: UiDetection | None = None
     uia_yolo_subtarget_method = "uia_yolo_subtarget"
+    # True when offset_dx/dy came from yolo_ocr_fallback (twin-relative), not UIA.
+    offset_from_twin_fallback = False
+    # EFP hub used for twin containment clamp (set when a twin glyph is committed).
+    twin_containment_hub: UiDetection | None = None
     uia_first_s = 0.0
     uia_first_measured = False
     uia_snapshot_was_empty = False
@@ -7574,6 +7634,7 @@ async def _find_mouse_point_attempt(
                 anchor = str(fb_fields["anchor"] or "")
                 offset_dx = int(fb_fields["offset_dx"])
                 offset_dy = int(fb_fields["offset_dy"])
+                offset_from_twin_fallback = True
                 char_target = fb_fields["char_target"]
                 char_occurrence = int(fb_fields["char_occurrence"] or 0)
                 track_percent = fb_fields["track_percent"]
@@ -7632,11 +7693,9 @@ async def _find_mouse_point_attempt(
         is_offset_click = bool(offset_dx or offset_dy) or _is_relative_offset_position(
             instruction_text
         )
-        skip_yolo_subtarget = _hub_is_input_or_scrollbar(
-            instruction=instruction_text,
-            anchor=anchor,
-            control_type_token=control_type_token,
-        )
+        # Leaf/input/scrollbar may still have an in-hub twin; only empty-EFP
+        # relative-offset space clicks skip subtarget.
+        skip_yolo_subtarget = False
         # Empty recorded EFP + relative-offset → empty-space click; commit
         # anchor+(dx,dy) without in-hub YOLO subtarget / OCR twin fallthrough.
         skip_yolo_subtarget_empty_offset = bool(
@@ -7645,13 +7704,12 @@ async def _find_mouse_point_attempt(
         )
         if skip_yolo_subtarget_empty_offset:
             skip_yolo_subtarget = True
-        # EFP-verified constellation synth / neighbor is the click target
-        # (e.g. Excel DataItem with no FindAll leaf). Do not rewrite to OCR twin.
+        # EFP-verified constellation synth / neighbor / data_item is the click
+        # target. efp_path_hit may still refine via uia_yolo_subtarget.
         commit_efp_synth = uia_first_reason in (
             "landmark_efp_synth_hit",
             "landmark_efp_neighbor_hit",
             "uia_data_item_name_hit",
-            "efp_path_hit",
         )
         if uia_first_chosen is not None and (
             ocr_fallback is None
@@ -7703,8 +7761,7 @@ async def _find_mouse_point_attempt(
                     )
                 else:
                     _log_info(
-                        "move_mouse uia_first=hit; skip uia_yolo_subtarget "
-                        "for input/scrollbar hub"
+                        "move_mouse uia_first=hit; skip uia_yolo_subtarget"
                     )
             else:
                 _log_info(
@@ -8005,6 +8062,7 @@ async def _find_mouse_point_attempt(
                     anchor = str(fb_fields["anchor"] or "")
                     offset_dx = int(fb_fields["offset_dx"])
                     offset_dy = int(fb_fields["offset_dy"])
+                    offset_from_twin_fallback = True
                     char_target = fb_fields["char_target"]
                     char_occurrence = int(fb_fields["char_occurrence"] or 0)
                     track_percent = fb_fields["track_percent"]
@@ -8039,6 +8097,16 @@ async def _find_mouse_point_attempt(
                     )
                     uia_yolo_subtarget_chosen = chosen
                     uia_yolo_subtarget_method = method
+                    if chosen is not None:
+                        twin_containment_hub = uia_first_chosen
+                        adopted = _adopt_twin_glyph_offsets(
+                            method=method,
+                            ocr_fallback=ocr_fallback,
+                        )
+                        if adopted is not None:
+                            offset_dx, offset_dy, offset_from_twin_fallback = (
+                                adopted
+                            )
                     detections = _sort_detections_reading_order(
                         [*uia_dets, *yolo_detections, unique_box]
                     )
@@ -8178,6 +8246,16 @@ async def _find_mouse_point_attempt(
                     )
                     uia_yolo_subtarget_chosen = chosen
                     uia_yolo_subtarget_method = method
+                    if chosen is not None:
+                        twin_containment_hub = uia_first_chosen
+                        adopted = _adopt_twin_glyph_offsets(
+                            method=method,
+                            ocr_fallback=ocr_fallback,
+                        )
+                        if adopted is not None:
+                            offset_dx, offset_dy, offset_from_twin_fallback = (
+                                adopted
+                            )
                     detections = _sort_detections_reading_order(
                         [
                             *uia_dets,
@@ -8473,6 +8551,39 @@ async def _find_mouse_point_attempt(
             chosen = uia_yolo_subtarget_chosen
             selection_method = uia_yolo_subtarget_method
             select_phase = uia_yolo_subtarget_method
+            hub_for_twin = twin_containment_hub or uia_first_chosen
+            # Twin center must stay inside the EFP hub; else discard twin.
+            if (
+                str(selection_method or "") != "uia_yolo_subtarget_efp_synth"
+                and not _leaf_bbox_contains_point(
+                    hub_for_twin.bbox, int(chosen.cx), int(chosen.cy)
+                )
+            ):
+                _log_info(
+                    "move_mouse twin center outside EFP hub; keeping hub "
+                    f"twin=[{chosen.cx},{chosen.cy}] "
+                    f"hub={list(hub_for_twin.bbox)!r}"
+                )
+                chosen = uia_first_chosen
+                if uia_first_reason in (
+                    "landmark_efp_hit",
+                    "landmark_efp_synth_hit",
+                    "landmark_efp_neighbor_hit",
+                    "uia_data_item_name_hit",
+                    "efp_path_hit",
+                ):
+                    selection_method = uia_first_reason
+                    select_phase = uia_first_reason
+                else:
+                    selection_method = "uia_first_unique"
+                    select_phase = "select_unique"
+                if offset_from_twin_fallback:
+                    offset_dx = 0
+                    offset_dy = 0
+                    offset_from_twin_fallback = False
+                twin_containment_hub = None
+            elif str(selection_method or "") in _TWIN_GLYPH_SUBTARGET_METHODS:
+                twin_containment_hub = hub_for_twin
         else:
             chosen = uia_first_chosen
             if uia_first_reason in (
@@ -8487,6 +8598,15 @@ async def _find_mouse_point_attempt(
             else:
                 selection_method = "uia_first_unique"
                 select_phase = "select_unique"
+            # Twin-relative offset must not apply to a bare hub.
+            if offset_from_twin_fallback:
+                _log_info(
+                    "move_mouse clear twin-relative offset on hub keep "
+                    f"dx={offset_dx} dy={offset_dy}"
+                )
+                offset_dx = 0
+                offset_dy = 0
+                offset_from_twin_fallback = False
         idx = 0
         selected_text = chosen.text
         select_s = time.perf_counter() - select_started
@@ -8515,6 +8635,21 @@ async def _find_mouse_point_attempt(
             resolved_x, resolved_y = point_from_scrollbar_percent(
                 chosen.bbox, track_percent
             )
+        elif twin_containment_hub is not None and not _leaf_bbox_contains_point(
+            twin_containment_hub.bbox, int(resolved_x), int(resolved_y)
+        ):
+            clamped_x, clamped_y = _clamp_point_into_bbox_xywh(
+                resolved_x, resolved_y, twin_containment_hub.bbox
+            )
+            _log_info(
+                "move_mouse clamp twin+offset into EFP hub "
+                f"from=[{resolved_x},{resolved_y}] "
+                f"to=[{clamped_x},{clamped_y}] "
+                f"hub={list(twin_containment_hub.bbox)!r}"
+            )
+            resolved_x, resolved_y = clamped_x, clamped_y
+            offset_dx = int(resolved_x) - int(chosen.cx)
+            offset_dy = int(resolved_y) - int(chosen.cy)
         image_path = image_paths[0] if image_paths else ""
         overlay = _live_html_overlay_fields(
             chosen,
@@ -8994,6 +9129,70 @@ async def _find_mouse_point_attempt(
                     "move_mouse: anchor_efp_pick "
                     f"center=[{chosen.cx},{chosen.cy}] pool={len(anchor_matches)}"
                 )
+                # Refine to in-hub YOLO/OCR twin when available; apply twin offset.
+                empty_efp_space = bool(
+                    (
+                        bool(offset_dx or offset_dy)
+                        or _is_relative_offset_position(instruction_text)
+                    )
+                    and not _recorded_efp_present(
+                        recorded_efp_name, recorded_efp_value
+                    )
+                )
+                if ocr_fallback is not None and not empty_efp_space:
+                    fb_anchor_ref = str(
+                        parse_mouse_target_instruction(
+                            str(ocr_fallback.instruction or "")
+                        )[0]
+                        or ""
+                    )
+                    preferred_cls = _uia_yolo_subtarget_preferred_class(
+                        fb_anchor_ref
+                    )
+                    twin, twin_method = _choose_uia_yolo_subtarget_in_hub(
+                        hub=chosen,
+                        labeled_detections=list(detections),
+                        anchor=fb_anchor_ref,
+                        preferred_cls=preferred_cls,
+                        efp_fallback=None,
+                        ocr_class_ids=(
+                            frozenset({int(preferred_cls)})
+                            if preferred_cls is not None
+                            else None
+                        ),
+                    )
+                    if twin is not None and _leaf_bbox_contains_point(
+                        chosen.bbox, int(twin.cx), int(twin.cy)
+                    ):
+                        hub_before_twin = chosen
+                        chosen = twin
+                        idx = _index_or_append_detection(detections, twin)
+                        selection_method = twin_method
+                        select_phase = twin_method
+                        twin_containment_hub = hub_before_twin
+                        adopted = _adopt_twin_glyph_offsets(
+                            method=twin_method,
+                            ocr_fallback=ocr_fallback,
+                        )
+                        if adopted is not None:
+                            offset_dx, offset_dy, offset_from_twin_fallback = (
+                                adopted
+                            )
+                        _log_info(
+                            "move_mouse: anchor_efp_pick twin refine "
+                            f"method={twin_method} "
+                            f"center=[{chosen.cx},{chosen.cy}] "
+                            f"offset=[{offset_dx},{offset_dy}]"
+                        )
+                    elif offset_from_twin_fallback:
+                        _log_info(
+                            "move_mouse: anchor_efp_pick no unique twin; "
+                            "clear twin-relative offset on hub "
+                            f"dx={offset_dx} dy={offset_dy}"
+                        )
+                        offset_dx = 0
+                        offset_dy = 0
+                        offset_from_twin_fallback = False
             elif hard_efp:
                 _log_info(
                     "move_mouse: anchor_efp_miss "
@@ -9036,6 +9235,19 @@ async def _find_mouse_point_attempt(
     select_s = time.perf_counter() - select_started
 
     # similar_function_describe runs on move_mouse_visual only (see visual_mouse.py).
+
+    if (
+        offset_from_twin_fallback
+        and str(selection_method or "") not in _TWIN_GLYPH_SUBTARGET_METHODS
+        and twin_containment_hub is None
+    ):
+        _log_info(
+            "move_mouse clear twin-relative offset without twin commit "
+            f"dx={offset_dx} dy={offset_dy} method={selection_method!r}"
+        )
+        offset_dx = 0
+        offset_dy = 0
+        offset_from_twin_fallback = False
 
     resolved_x = chosen.cx + offset_dx
     resolved_y = chosen.cy + offset_dy
@@ -9091,6 +9303,22 @@ async def _find_mouse_point_attempt(
             f"dx={offset_dx} dy={offset_dy} "
             f"anchor=[{chosen.cx},{chosen.cy}] resolved=[{resolved_x},{resolved_y}]"
         )
+
+    if twin_containment_hub is not None and not _leaf_bbox_contains_point(
+        twin_containment_hub.bbox, int(resolved_x), int(resolved_y)
+    ):
+        clamped_x, clamped_y = _clamp_point_into_bbox_xywh(
+            resolved_x, resolved_y, twin_containment_hub.bbox
+        )
+        _log_info(
+            "move_mouse clamp twin+offset into EFP hub "
+            f"from=[{resolved_x},{resolved_y}] "
+            f"to=[{clamped_x},{clamped_y}] "
+            f"hub={list(twin_containment_hub.bbox)!r}"
+        )
+        resolved_x, resolved_y = clamped_x, clamped_y
+        offset_dx = int(resolved_x) - int(chosen.cx)
+        offset_dy = int(resolved_y) - int(chosen.cy)
 
     image_path = image_paths[0] if image_paths else ""
     overlay = _live_html_overlay_fields(

@@ -7589,6 +7589,14 @@ def _ocr_pending_for_boxes(
     )
 
 
+def test_clamp_point_into_bbox_xywh_inclusive_edges() -> None:
+    from cua_mcp.select_mouse_target import _clamp_point_into_bbox_xywh
+
+    assert _clamp_point_into_bbox_xywh(50, 50, (100, 100, 50, 50)) == (100, 100)
+    assert _clamp_point_into_bbox_xywh(200, 200, (100, 100, 50, 50)) == (150, 150)
+    assert _clamp_point_into_bbox_xywh(120, 130, (100, 100, 50, 50)) == (120, 130)
+
+
 def test_hub_is_input_or_scrollbar_named_input_and_scrollbar() -> None:
     from cua_mcp.select_mouse_target import _hub_is_input_or_scrollbar
 
@@ -7615,10 +7623,10 @@ def test_hub_is_input_or_scrollbar_named_input_and_scrollbar() -> None:
 
 
 @pytest.mark.asyncio
-async def test_uia_hit_input_hub_skips_yolo_subtarget(
+async def test_uia_hit_input_hub_no_unique_twin_keeps_hub(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Input hubs commit UIA-first even when a YOLO twin is bound."""
+    """Input hubs may enter subtarget; no unique twin keeps the UIA hub center."""
     import numpy as np
 
     from cua_mcp import select_mouse_target as smt
@@ -7638,9 +7646,25 @@ async def test_uia_hit_input_hub_skips_yolo_subtarget(
         frame = np.zeros((600, 800, 3), dtype=np.uint8)
         return [1], ["shot.png"], [(1, frame)], 0.01
 
-    def boom_finish(*_a, **_k):
-        raise AssertionError("input hub must not enter uia_yolo_subtarget YOLO")
+    def fake_finish(*_a, **_k):
+        # Empty in-hub YOLO pool → no unique twin.
+        frame = np.zeros((600, 800, 3), dtype=np.uint8)
+        timing = {
+            "capture_s": 0.01,
+            "yolo_s": 0.05,
+            "line_s": 0.0,
+            "uia_input_s": 0.0,
+            "uia_scrollbar_s": 0.0,
+            "uia_text_s": 0.0,
+            "ocr_s": 0.0,
+            "icon_ocr_retry_s": 0.0,
+            "total_s": 0.05,
+            "_ocr_pending": [],
+            "debug_layers": {"yolo": []},
+        }
+        return [1], ["shot.png"], [(1, frame)], [], timing
 
+    monkeypatch.setattr(smt, "EMPTY_IN_HUB_YOLO_SLEEP_S", 0)
     monkeypatch.setattr(smt, "_grab_selected_monitors", fake_grab)
     monkeypatch.setattr(
         smt,
@@ -7650,13 +7674,18 @@ async def test_uia_hit_input_hub_skips_yolo_subtarget(
     monkeypatch.setattr(
         smt,
         "_try_uia_first_unique_select",
-        lambda *_a, **_k: (uia_input, "hit"),
+        lambda *_a, **_k: (uia_input, "efp_path_hit"),
     )
-    monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", boom_finish)
+    monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", fake_finish)
+    monkeypatch.setattr(
+        smt,
+        "_verify_geometry_candidates_with_efp",
+        lambda *_a, **_k: (None, None, "miss"),
+    )
     monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
 
     fallback = YoloOcrMoveFallback(
-        instruction="（YOLO+OCR）將滑鼠移到「Intel」文字所在的輸入欄，並點擊滑鼠一下。",
+        instruction="（YOLO+OCR）將滑鼠移到「Intel」文字，並點擊滑鼠一下。",
     )
     with bind_yolo_ocr_fallbacks([fallback]):
         found = await smt.find_mouse_point(
@@ -7672,11 +7701,12 @@ async def test_uia_hit_input_hub_skips_yolo_subtarget(
             control_type="input",
             recorded_efp_name="文件1",
             recorded_efp_value="",
+            hub_source="uia_efp",
         )
     assert found is not None
     assert found[0:2] == (uia_input.cx, uia_input.cy)
-    assert found[2]["selection_method"] in ("hit", "uia_first_unique")
-    assert found[2]["selection_method"] != "uia_yolo_subtarget"
+    assert found[2]["selection_method"] == "efp_path_hit"
+    assert found[2]["relative_offset"] == {"dx": 0, "dy": 0}
 
 
 @pytest.mark.asyncio
@@ -8467,6 +8497,458 @@ async def test_uia_efp_hit_coreinput_soft_miss_keeps_uia_center(
     assert found[0:2] == (uia_leaf.cx, uia_leaf.cy)
     assert found[2]["selection_method"] == "efp_path_hit"
     assert found[1] != 454
+
+
+@pytest.mark.asyncio
+async def test_efp_path_hit_unique_twin_applies_twin_relative_offset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """event_002 shape: list_item hub + unique text twin + 右方79個像素."""
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+    from src.recorder.uia_replay_repair import (
+        YoloOcrMoveFallback,
+        bind_yolo_ocr_fallbacks,
+    )
+
+    # Hub list item; twin text centered 40px left of hub center so +79 stays inside.
+    hub = _detection_from_bbox(
+        (2050, 171, 225, 179),
+        YOLO_CLASS_TEXT,
+        text="空白活頁簿",
+        source="uia",
+    )
+    twin_bbox = (2160, 240, 40, 20)  # center (2180, 250); hub center (2162, 260)
+    twin = _detection_from_bbox(
+        twin_bbox, YOLO_CLASS_TEXT, text="空自活頁簿", source="ocr"
+    )
+
+    def fake_grab(*_a, **_k):
+        frame = np.zeros((1080, 3840, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], 0.01
+
+    def fake_finish(*_a, **_k):
+        pending = _ocr_pending_for_boxes([(twin_bbox, YOLO_CLASS_TEXT)])
+        timing = {
+            "capture_s": 0.01,
+            "yolo_s": 0.05,
+            "line_s": 0.0,
+            "uia_input_s": 0.0,
+            "uia_scrollbar_s": 0.0,
+            "uia_text_s": 0.0,
+            "ocr_s": 0.0,
+            "icon_ocr_retry_s": 0.0,
+            "total_s": 0.05,
+            "_ocr_pending": [pending],
+            "debug_layers": {
+                "yolo": [{"bbox": list(twin_bbox), "class_name": "text"}]
+            },
+        }
+        frame = np.zeros((1080, 3840, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], [], timing
+
+    monkeypatch.setattr(smt, "EMPTY_IN_HUB_YOLO_SLEEP_S", 0)
+    monkeypatch.setattr(smt, "_grab_selected_monitors", fake_grab)
+    monkeypatch.setattr(
+        smt,
+        "_uia_only_detections_for_click_window",
+        lambda *_a, **_k: [hub],
+    )
+    monkeypatch.setattr(
+        smt,
+        "_try_uia_first_unique_select",
+        lambda *_a, **_k: (hub, "efp_path_hit"),
+    )
+    monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", fake_finish)
+    monkeypatch.setattr(
+        smt,
+        "_finish_deferred_ocr_pendings",
+        lambda pendings, *, timing_base: ([twin], {**timing_base, "ocr_s": 0.02}),
+    )
+    monkeypatch.setattr(
+        smt,
+        "_verify_geometry_candidates_with_efp",
+        lambda pool, *, synth, geom_det, recorded_name, recorded_value: (
+            (pool[0], (pool[0].cx, pool[0].cy), "hit") if pool else (None, None, "miss")
+        ),
+    )
+    monkeypatch.setattr(
+        smt,
+        "_probe_efp_leaf_at",
+        lambda x, y: ("空白活頁簿", "", tuple(hub.bbox)),
+    )
+    monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
+
+    fallback = YoloOcrMoveFallback(
+        instruction=(
+            "（YOLO+OCR）將滑鼠移到「空自活頁簿」文字右方79個像素的位置，"
+            "並點擊滑鼠一下。"
+        ),
+        hub_source="uia_efp",
+    )
+    with bind_yolo_ocr_fallbacks([fallback]):
+        found = await smt.find_mouse_point(
+            "（UIA）將滑鼠移到「空白活頁簿」清單項目",
+            click_window={
+                "hwnd": 5,
+                "title": "Excel",
+                "process_name": "EXCEL.EXE",
+                "rect": [0, 0, 3840, 1080],
+            },
+            vision_mode="uia",
+            anchor_text="空白活頁簿",
+            control_type="list_item",
+            hub_source="uia_efp",
+            recorded_efp_name="空白活頁簿",
+            recorded_efp_value="",
+        )
+    assert found is not None
+    gx, gy, meta = found
+    assert meta["selection_method"] in (
+        "uia_yolo_subtarget",
+        "uia_yolo_subtarget_efp_ocr",
+    )
+    assert meta["image_center"] == {"x": twin.cx, "y": twin.cy}
+    assert meta["relative_offset"] == {"dx": 79, "dy": 0}
+    assert (gx, gy) == (twin.cx + 79, twin.cy)
+    assert smt._leaf_bbox_contains_point(hub.bbox, gx, gy)
+
+
+@pytest.mark.asyncio
+async def test_efp_path_hit_twin_offset_clamped_into_hub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Twin + large offset that would leave hub is clamped to hub edge."""
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+    from src.recorder.uia_replay_repair import (
+        YoloOcrMoveFallback,
+        bind_yolo_ocr_fallbacks,
+    )
+
+    hub = _detection_from_bbox(
+        (100, 100, 100, 100),
+        YOLO_CLASS_TEXT,
+        text="空白活頁簿",
+        source="uia",
+    )
+    twin_bbox = (120, 140, 20, 20)  # center (130, 150)
+    twin = _detection_from_bbox(
+        twin_bbox, YOLO_CLASS_TEXT, text="空自活頁簿", source="ocr"
+    )
+
+    def fake_grab(*_a, **_k):
+        frame = np.zeros((400, 400, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], 0.01
+
+    def fake_finish(*_a, **_k):
+        pending = _ocr_pending_for_boxes([(twin_bbox, YOLO_CLASS_TEXT)])
+        timing = {
+            "capture_s": 0.01,
+            "yolo_s": 0.05,
+            "line_s": 0.0,
+            "uia_input_s": 0.0,
+            "uia_scrollbar_s": 0.0,
+            "uia_text_s": 0.0,
+            "ocr_s": 0.0,
+            "icon_ocr_retry_s": 0.0,
+            "total_s": 0.05,
+            "_ocr_pending": [pending],
+            "debug_layers": {
+                "yolo": [{"bbox": list(twin_bbox), "class_name": "text"}]
+            },
+        }
+        frame = np.zeros((400, 400, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], [], timing
+
+    monkeypatch.setattr(smt, "EMPTY_IN_HUB_YOLO_SLEEP_S", 0)
+    monkeypatch.setattr(smt, "_grab_selected_monitors", fake_grab)
+    monkeypatch.setattr(
+        smt,
+        "_uia_only_detections_for_click_window",
+        lambda *_a, **_k: [hub],
+    )
+    monkeypatch.setattr(
+        smt,
+        "_try_uia_first_unique_select",
+        lambda *_a, **_k: (hub, "efp_path_hit"),
+    )
+    monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", fake_finish)
+    monkeypatch.setattr(
+        smt,
+        "_finish_deferred_ocr_pendings",
+        lambda pendings, *, timing_base: ([twin], {**timing_base, "ocr_s": 0.02}),
+    )
+    monkeypatch.setattr(
+        smt,
+        "_verify_geometry_candidates_with_efp",
+        lambda pool, *, synth, geom_det, recorded_name, recorded_value: (
+            (pool[0], (pool[0].cx, pool[0].cy), "hit") if pool else (None, None, "miss")
+        ),
+    )
+    monkeypatch.setattr(
+        smt,
+        "_probe_efp_leaf_at",
+        lambda x, y: ("空白活頁簿", "", tuple(hub.bbox)),
+    )
+    monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
+
+    fallback = YoloOcrMoveFallback(
+        instruction=(
+            "（YOLO+OCR）將滑鼠移到「空自活頁簿」文字右方500個像素的位置，"
+            "並點擊滑鼠一下。"
+        ),
+    )
+    with bind_yolo_ocr_fallbacks([fallback]):
+        found = await smt.find_mouse_point(
+            "（UIA）將滑鼠移到「空白活頁簿」清單項目",
+            click_window={
+                "hwnd": 5,
+                "title": "Excel",
+                "process_name": "EXCEL.EXE",
+                "rect": [0, 0, 400, 400],
+            },
+            vision_mode="uia",
+            anchor_text="空白活頁簿",
+            control_type="list_item",
+            hub_source="uia_efp",
+            recorded_efp_name="空白活頁簿",
+            recorded_efp_value="",
+        )
+    assert found is not None
+    gx, gy, meta = found
+    assert meta["selection_method"] in (
+        "uia_yolo_subtarget",
+        "uia_yolo_subtarget_efp_ocr",
+    )
+    assert smt._leaf_bbox_contains_point(hub.bbox, gx, gy)
+    # Clamped to right edge of hub (x + w = 200).
+    assert gx == 200
+    assert gy == twin.cy
+
+
+@pytest.mark.asyncio
+async def test_efp_path_hit_no_unique_twin_clears_twin_offset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ambiguous in-hub texts + twin fallback offset → hub center, not hub+79."""
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+    from src.recorder.uia_replay_repair import (
+        YoloOcrMoveFallback,
+        bind_yolo_ocr_fallbacks,
+    )
+
+    hub = _detection_from_bbox(
+        (100, 100, 200, 80),
+        YOLO_CLASS_TEXT,
+        text="空白活頁簿",
+        source="uia",
+    )
+    text_a = (110, 110, 40, 20)
+    text_b = (160, 110, 40, 20)
+
+    def fake_grab(*_a, **_k):
+        frame = np.zeros((400, 400, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], 0.01
+
+    def fake_finish(*_a, **_k):
+        pending = _ocr_pending_for_boxes(
+            [(text_a, YOLO_CLASS_TEXT), (text_b, YOLO_CLASS_TEXT)]
+        )
+        timing = {
+            "capture_s": 0.01,
+            "yolo_s": 0.05,
+            "line_s": 0.0,
+            "uia_input_s": 0.0,
+            "uia_scrollbar_s": 0.0,
+            "uia_text_s": 0.0,
+            "ocr_s": 0.0,
+            "icon_ocr_retry_s": 0.0,
+            "total_s": 0.05,
+            "_ocr_pending": [pending],
+            "debug_layers": {
+                "yolo": [
+                    {"bbox": list(text_a), "class_name": "text"},
+                    {"bbox": list(text_b), "class_name": "text"},
+                ]
+            },
+        }
+        frame = np.zeros((400, 400, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], [], timing
+
+    monkeypatch.setattr(smt, "EMPTY_IN_HUB_YOLO_SLEEP_S", 0)
+    monkeypatch.setattr(smt, "_grab_selected_monitors", fake_grab)
+    monkeypatch.setattr(
+        smt,
+        "_uia_only_detections_for_click_window",
+        lambda *_a, **_k: [hub],
+    )
+    monkeypatch.setattr(
+        smt,
+        "_try_uia_first_unique_select",
+        lambda *_a, **_k: (hub, "efp_path_hit"),
+    )
+    monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", fake_finish)
+    monkeypatch.setattr(
+        smt,
+        "_finish_deferred_ocr_pendings",
+        lambda pendings, *, timing_base: (
+            [
+                _detection_from_bbox(
+                    text_a, YOLO_CLASS_TEXT, text="系統", source="ocr"
+                ),
+                _detection_from_bbox(
+                    text_b, YOLO_CLASS_TEXT, text="天前", source="ocr"
+                ),
+            ],
+            {**timing_base, "ocr_s": 0.02},
+        ),
+    )
+    monkeypatch.setattr(
+        smt,
+        "_verify_geometry_candidates_with_efp",
+        lambda *_a, **_k: (None, None, "miss"),
+    )
+    monkeypatch.setattr(
+        smt,
+        "_probe_efp_leaf_at",
+        lambda x, y: ("空白活頁簿", "", tuple(hub.bbox)),
+    )
+    monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
+
+    fallback = YoloOcrMoveFallback(
+        instruction=(
+            "（YOLO+OCR）將滑鼠移到「空自活頁簿」文字右方79個像素的位置，"
+            "並點擊滑鼠一下。"
+        ),
+    )
+    with bind_yolo_ocr_fallbacks([fallback]):
+        found = await smt.find_mouse_point(
+            "（UIA）將滑鼠移到「空白活頁簿」清單項目",
+            click_window={
+                "hwnd": 5,
+                "title": "Excel",
+                "process_name": "EXCEL.EXE",
+                "rect": [0, 0, 400, 400],
+            },
+            vision_mode="uia",
+            anchor_text="空白活頁簿",
+            control_type="list_item",
+            hub_source="uia_efp",
+            recorded_efp_name="空白活頁簿",
+            recorded_efp_value="",
+        )
+    assert found is not None
+    assert found[0:2] == (hub.cx, hub.cy)
+    assert found[2]["selection_method"] == "efp_path_hit"
+    assert found[2]["relative_offset"] == {"dx": 0, "dy": 0}
+
+
+@pytest.mark.asyncio
+async def test_anchor_efp_pick_unique_twin_applies_twin_offset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """anchor_efp_pick hub + unique in-hub twin → twin center + twin offset."""
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+    from src.recorder.uia_replay_repair import (
+        YoloOcrMoveFallback,
+        bind_yolo_ocr_fallbacks,
+    )
+
+    hub = _detection_from_bbox(
+        (100, 100, 200, 100),
+        YOLO_CLASS_TEXT,
+        text="空白活頁簿",
+        source="uia",
+    )
+    twin = _detection_from_bbox(
+        (140, 130, 40, 20),
+        YOLO_CLASS_TEXT,
+        text="空自活頁簿",
+        source="ocr",
+    )
+
+    def fake_grab(*_a, **_k):
+        frame = np.zeros((400, 400, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], 0.01
+
+    def fake_finish(*_a, **_k):
+        timing = {
+            "capture_s": 0.01,
+            "yolo_s": 0.05,
+            "line_s": 0.0,
+            "uia_input_s": 0.0,
+            "uia_scrollbar_s": 0.0,
+            "uia_text_s": 0.0,
+            "ocr_s": 0.02,
+            "icon_ocr_retry_s": 0.0,
+            "total_s": 0.08,
+        }
+        frame = np.zeros((400, 400, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], [hub, twin], timing
+
+    monkeypatch.setattr(smt, "_grab_selected_monitors", fake_grab)
+    monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", fake_finish)
+    monkeypatch.setattr(smt, "_capture_and_detect_mouse_candidates", fake_finish)
+    monkeypatch.setattr(
+        smt,
+        "_try_uia_first_unique_select",
+        lambda *_a, **_k: (None, "miss"),
+    )
+    monkeypatch.setattr(
+        smt,
+        "_uia_only_detections_for_click_window",
+        lambda *_a, **_k: [],
+    )
+    monkeypatch.setattr(
+        smt,
+        "_verify_geometry_candidates_with_efp",
+        lambda pool, *, synth, geom_det, recorded_name, recorded_value: (
+            hub,
+            (hub.cx, hub.cy),
+            "hit",
+        ),
+    )
+    monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
+
+    fallback = YoloOcrMoveFallback(
+        instruction=(
+            "（YOLO+OCR）將滑鼠移到「空自活頁簿」文字右方20個像素的位置，"
+            "並點擊滑鼠一下。"
+        ),
+    )
+    with bind_yolo_ocr_fallbacks([fallback]):
+        found = await smt.find_mouse_point(
+            "（UIA）將滑鼠移到「空白活頁簿」清單項目",
+            click_window={
+                "hwnd": 5,
+                "title": "Excel",
+                "process_name": "EXCEL.EXE",
+                "rect": [0, 0, 400, 400],
+            },
+            vision_mode="uia",
+            anchor_text="空白活頁簿",
+            control_type="list_item",
+            hub_source="uia_efp",
+            recorded_efp_name="空白活頁簿",
+            recorded_efp_value="",
+        )
+    assert found is not None
+    gx, gy, meta = found
+    assert meta["selection_method"] in (
+        "uia_yolo_subtarget",
+        "uia_yolo_subtarget_efp_ocr",
+    )
+    assert meta["image_center"] == {"x": twin.cx, "y": twin.cy}
+    assert meta["relative_offset"] == {"dx": 20, "dy": 0}
+    assert (gx, gy) == (twin.cx + 20, twin.cy)
+    assert smt._leaf_bbox_contains_point(hub.bbox, gx, gy)
 
 
 @pytest.mark.asyncio

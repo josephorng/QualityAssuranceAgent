@@ -7364,10 +7364,10 @@ def _quiet_run_manager() -> object:
 
 
 @pytest.mark.asyncio
-async def test_yolo_ocr_replay_skips_findall_repair(
+async def test_yolo_ocr_replay_uses_efp_repair_without_findall_walk(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Phase 5: （YOLO+OCR）never arms budgeted FindAll YOLO→UIA repair."""
+    """（YOLO+OCR）arms EFP repair and never starts a budgeted FindAll walk."""
     import numpy as np
 
     from cua_mcp import select_mouse_target as smt
@@ -7403,7 +7403,10 @@ async def test_yolo_ocr_replay_skips_findall_repair(
 
     def fake_attempt(*_a, **_k):
         repair_calls.append("repair")
-        return 11, 22, {"target_text": "文件"}
+        return 11, 22, {
+            "target_text": "文件",
+            "selection_method": "uia_replay_repair",
+        }
 
     monkeypatch.setattr(smt, "_live_uia_snapshot_for_click_window", fake_snapshot)
     monkeypatch.setattr(smt, "_capture_and_detect_mouse_candidates", fake_capture)
@@ -7432,11 +7435,11 @@ async def test_yolo_ocr_replay_skips_findall_repair(
                 },
             )
     assert found is not None
-    assert found[0:2] == (ocr.cx, ocr.cy)
-    assert repair_calls == []
+    assert found[0:2] == (11, 22)
+    assert repair_calls == ["repair"]
     assert snapshot_calls == []
     phases = found[2]["timing"]["phases"]
-    assert not any(phase.get("name") == "uia_replay_repair" for phase in phases)
+    assert any(phase.get("name") == "uia_replay_repair" for phase in phases)
 
 
 @pytest.mark.asyncio

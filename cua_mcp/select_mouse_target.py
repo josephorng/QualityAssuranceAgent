@@ -7391,39 +7391,28 @@ async def _find_mouse_point_attempt(
                 f"recorded={repair_request.recorded_text!r} "
                 f"bbox={repair_request.recorded_bbox}"
             )
-    # Phase 5: live budgeted FindAll YOLO→UIA repair is disabled for new format
-    # (hubs already stamp ``uia_efp`` + ``parents``; pure YOLO stays on twin path).
-    if (
-        repair_request is not None
-        and vision_mode == "yolo_ocr"
-        and (hub_source == "uia_efp" or recorded_efp_parents)
-    ):
+    # Skip repair only when analysis already stamped a UIA hub. A YOLO step may
+    # still carry press-time EFP name/value/parents as a sidecar without
+    # hub_source=uia_efp — those must remain repairable.
+    if repair_request is not None and hub_source == "uia_efp":
         _log_info(
-            "uia replay repair skipped: new_format_efp_hub "
+            "uia replay repair skipped: already_efp_hub "
             f"event={repair_request.event_index} "
             f"side={repair_request.side} "
-            f"hub_source={hub_source!r} "
-            f"parents={len(recorded_efp_parents or [])}"
+            f"hub_source={hub_source!r}"
         )
-    repair_yolo = False
+        repair_request = None
+    # YOLO→UIA repair via live EFP (no budgeted FindAll walk).
+    repair_yolo = repair_request is not None and vision_mode == "yolo_ocr"
     uia_repair_task: asyncio.Task[Any] | None = None
-    if repair_yolo and isinstance(click_window, dict):
-        uia_repair_task = asyncio.create_task(
-            asyncio.to_thread(_live_uia_snapshot_for_click_window, click_window)
-        )
-
-        def _retrieve_repair_task_error(task: asyncio.Task[Any]) -> None:
-            if not task.cancelled():
-                task.exception()
-
-        uia_repair_task.add_done_callback(_retrieve_repair_task_error)
-    elif repair_yolo:
+    if repair_yolo and not isinstance(click_window, dict):
         _log_info(
             "uia replay repair miss "
             f"event={repair_request.event_index} side={repair_request.side} "
             f"recorded={repair_request.recorded_text!r} "
-            "reason=no_click_window_for_walk"
+            "reason=no_click_window_for_efp"
         )
+        repair_yolo = False
     allow_uia_select = vision_mode != "yolo_ocr"
     filter_by_control_type = vision_mode == "uia"
     constellation_yolo_dets: list[UiDetection] = []
@@ -8386,39 +8375,16 @@ async def _find_mouse_point_attempt(
             )
             capture_s = float(vision_timing.get("capture_s", 0.0))
             ocr_pendings = []
-        repair_live_snapshot: dict[str, Any] | None = None
-        if uia_repair_task is not None:
-            walked: tuple[Any, dict[str, Any]] | None = None
-            try:
-                walked = await uia_repair_task
-            except Exception as exc:
-                _log_info(
-                    "uia replay repair walk failed "
-                    f"{type(exc).__name__}: {exc}"
-                )
-            if walked is not None:
-                live, snapshot = walked
-                if isinstance(snapshot, dict):
-                    repair_live_snapshot = snapshot
-                uia_dets = _detections_from_live_uia_snapshot(
-                    captured, live, snapshot
-                )
-            else:
-                _log_info(
-                    "uia replay repair walk empty "
-                    f"event={repair_request.event_index} "
-                    f"side={repair_request.side} "
-                    f"recorded={repair_request.recorded_text!r}"
-                )
         assert repair_request is not None
+        # Empty labeled pools: repair chooses via ElementFromPoint + OCR confirm.
         repaired = attempt_uia_replay_repair(
             repair_request,
             click_window,
-            _labeled_text_boxes(uia_dets, source="uia"),
+            [],
             _labeled_ocr_confirm_boxes(detections),
-            uia_scrollbar_boxes=_uia_scrollbar_boxes(uia_dets),
-            uia_input_boxes=_uia_input_boxes(uia_dets),
-            live_uia_snapshot=repair_live_snapshot,
+            uia_scrollbar_boxes=[],
+            uia_input_boxes=[],
+            live_uia_snapshot=None,
         )
         if repaired is not None:
             gx, gy, repair_meta = repaired

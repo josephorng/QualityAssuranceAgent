@@ -1,12 +1,10 @@
-"""YOLO+OCR twin helpers and (disabled) live UIA replay repair.
+"""YOLO+OCR twin helpers and live EFP UIA replay repair.
 
-New-format recordings stamp usable UIA hubs as ``hub_source=uia_efp`` with an
-EFP ``parents`` chain at analysis time. Live budgeted FindAll that promoted
-``（YOLO+OCR）`` → UIA during cache replay is **disabled** (Phase 5): repair
-slots always skip, and ``hub_source`` only accepts ``uia_efp``.
-
-``choose_uia_replay_repair*`` / ``write_uia_replay_repair`` remain for tests and
-legacy call sites; ``replay_repair_slots`` no longer arms them for new runs.
+``（YOLO+OCR）`` pointer steps can promote to UIA during cache replay when live
+OCR still confirms the recorded target and ElementFromPoint at the mapped
+point yields a usable leaf (soft-agree with the OCR hub). Repair stamps
+``hub_source=uia_efp`` plus ``name`` / ``value`` / ``parents`` — no budgeted
+FindAll walk.
 
 YOLO twin fallbacks (``yolo_ocr_fallback`` / ``YoloOcrMoveFallback``) stay
 active so soft-miss select can adopt the recorded OCR sentence.
@@ -64,6 +62,8 @@ class UiaReplayRepairHit:
     cx: int
     cy: int
     control_type: str = ""
+    # Live EFP sidecar for compile (name/value/parents → hub_source=uia_efp).
+    element_from_point: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -651,13 +651,14 @@ def choose_uia_replay_repair_with_reason(
             is_weak_efp_hub_label,
         )
 
-        efp_hit, efp_reason = _choose_icon_leaf_probe_with_reason(
+        efp_hit, efp_reason = _choose_efp_leaf_probe_with_reason(
             center,
             point_probe_fn=point_probe_fn,
             uia_n=len(uia_boxes),
+            recorded_text=None,
         )
         # Promote EFP leaf to hub only when it is a usable landmark name — not
-        # a weak host generic (e.g. CoreInput) that would overwrite FindAll.
+        # a weak host generic (e.g. CoreInput).
         if (
             efp_hit is not None
             and is_usable_uia_landmark_label(efp_hit.label)
@@ -673,11 +674,22 @@ def choose_uia_replay_repair_with_reason(
         return hit, reason
 
     if recorded_is_icon:
-        return _choose_icon_leaf_probe_with_reason(
+        return _choose_efp_leaf_probe_with_reason(
             center,
             point_probe_fn=point_probe_fn,
             uia_n=len(uia_boxes),
+            recorded_text=None,
         )
+
+    # Prefer live EFP that soft-agrees with the OCR hub (avoids chrome theft).
+    efp_hit, efp_reason = _choose_efp_leaf_probe_with_reason(
+        center,
+        point_probe_fn=point_probe_fn,
+        uia_n=len(uia_boxes),
+        recorded_text=text,
+    )
+    if efp_hit is not None:
+        return efp_hit, efp_reason
 
     containing: list[tuple[RectXywh, str, str]] = []
     for item in uia_boxes:
@@ -694,15 +706,15 @@ def choose_uia_replay_repair_with_reason(
                 containing, key=lambda item: int(item[0][2]) * int(item[0][3])
             )
             return (
-                _hit(label, box, "findall", control_type=control_type),
-                f"findall label={label!r}",
+                _hit(label, box, "uia_labeled", control_type=control_type),
+                f"uia_labeled label={label!r}",
             )
         chosen, score = _pick_most_ocr_similar_containing(containing, text)
         if chosen is not None:
             box, label, control_type = chosen
             return (
-                _hit(label, box, "findall", control_type=control_type),
-                f"findall_ocr_similar label={label!r} score={score:.3f}",
+                _hit(label, box, "uia_labeled", control_type=control_type),
+                f"uia_labeled_ocr_similar label={label!r} score={score:.3f}",
             )
         preview = ",".join(names[:5])
         more = "" if len(names) <= 5 else f"+{len(names) - 5}"
@@ -710,13 +722,16 @@ def choose_uia_replay_repair_with_reason(
             "ambiguous_uia_names "
             f"names=[{preview}{more}] n={len(names)} "
             f"best_score={score:.3f} center={center} "
-            f"uia_n={len(uia_boxes)}"
+            f"uia_n={len(uia_boxes)} efp_reason={efp_reason}"
         )
 
-    return _choose_icon_leaf_probe_with_reason(
+    # No labeled pool: accept EFP even when OCR soft-agree fails (Excel cells /
+    # short Accessibility Names that OCR garbled).
+    return _choose_efp_leaf_probe_with_reason(
         center,
         point_probe_fn=point_probe_fn,
         uia_n=len(uia_boxes),
+        recorded_text=None,
     )
 
 
@@ -755,8 +770,31 @@ def _choose_icon_leaf_probe_with_reason(
     point_probe_fn: Any,
     uia_n: int,
 ) -> tuple[UiaReplayRepairHit | None, str]:
-    """ElementFromPoint leaf using Name/Value preference (no usability gate)."""
-    from src.recorder.uia_input_boxes import resolve_usable_uia_probe_label
+    """Backward-compatible alias for :func:`_choose_efp_leaf_probe_with_reason`."""
+    return _choose_efp_leaf_probe_with_reason(
+        center,
+        point_probe_fn=point_probe_fn,
+        uia_n=uia_n,
+        recorded_text=None,
+    )
+
+
+def _choose_efp_leaf_probe_with_reason(
+    center: tuple[int, int],
+    *,
+    point_probe_fn: Any,
+    uia_n: int,
+    recorded_text: str | None,
+) -> tuple[UiaReplayRepairHit | None, str]:
+    """ElementFromPoint leaf; optional soft-agree with ``recorded_text``.
+
+    Builds the EFP sidecar from the probe tuple only. ``attempt_uia_replay_repair``
+    enriches ``parents`` via ``parents_chain_at_point`` after a hit.
+    """
+    from src.recorder.uia_input_boxes import (
+        ocr_uia_labels_soft_agree,
+        resolve_usable_uia_probe_label,
+    )
 
     if point_probe_fn is None:
         return None, (
@@ -785,6 +823,12 @@ def _choose_icon_leaf_probe_with_reason(
             "point_probe_empty_label "
             f"label={preferred!r}{name_value} center={center}"
         )
+    recorded = str(recorded_text or "").strip()
+    if recorded and not ocr_uia_labels_soft_agree(recorded, label):
+        return None, (
+            "efp_label_disagree "
+            f"recorded={recorded!r} label={label!r}{name_value} center={center}"
+        )
     if not isinstance(raw_box, (list, tuple)) or len(raw_box) != 4:
         return None, (
             f"point_probe_bad_box label={label!r}{name_value} center={center}"
@@ -800,8 +844,26 @@ def _choose_icon_leaf_probe_with_reason(
             "point_probe_box_misses_point "
             f"label={label!r}{name_value} box={box} center={center}"
         )
+    efp_payload: dict[str, Any] = {
+        "bbox": [int(box[0]), int(box[1]), int(box[2]), int(box[3])],
+    }
+    if probe_name or probe_value:
+        efp_payload["name"] = probe_name
+        efp_payload["value"] = probe_value
+    elif preferred:
+        # Short probe form without raw Name/Value — keep preferred as name.
+        efp_payload["name"] = preferred
+        efp_payload["value"] = ""
+    if control_type:
+        efp_payload["control_type"] = control_type
     return (
-        _hit(label, box, "element_from_point", control_type=control_type),
+        _hit(
+            label,
+            box,
+            "element_from_point",
+            control_type=control_type,
+            element_from_point=efp_payload,
+        ),
         f"element_from_point label={label!r}{name_value}",
     )
 
@@ -964,6 +1026,25 @@ def attempt_uia_replay_repair(
                     )
     efp_s, efp_n = summarize_element_from_point_timing(efp_samples)
     efp_timing_note = f" element_from_point_s={efp_s:.3f} n={efp_n}"
+    if hit is not None and hit.source == "element_from_point":
+        from src.recorder.uia_input_boxes import parents_chain_at_point
+
+        try:
+            parents = parents_chain_at_point(int(hit.cx), int(hit.cy))
+        except Exception:
+            parents = []
+        if parents:
+            efp_sidecar = dict(hit.element_from_point or {})
+            efp_sidecar["parents"] = parents
+            hit = UiaReplayRepairHit(
+                label=hit.label,
+                bbox=hit.bbox,
+                source=hit.source,
+                cx=hit.cx,
+                cy=hit.cy,
+                control_type=hit.control_type,
+                element_from_point=efp_sidecar,
+            )
     if hit is None:
         _log(
             f"{prefix} reason={reason} "
@@ -1010,6 +1091,7 @@ def attempt_uia_replay_repair(
             control_type=hit.control_type,
             track_percent=track_percent,
             uia_snapshot=repair_snapshot,
+            element_from_point=hit.element_from_point,
         )
     except Exception as exc:
         _log(
@@ -1073,6 +1155,7 @@ def write_uia_replay_repair(
     control_type: str = "",
     track_percent: int | None = None,
     uia_snapshot: dict[str, Any] | None = None,
+    element_from_point: dict[str, Any] | None = None,
 ) -> str | None:
     """Rewrite the analysis instruction from UIA labels and refresh the tool cache."""
     run_dir = Path(request.recording_dir)
@@ -1080,6 +1163,30 @@ def write_uia_replay_repair(
     raw_event = read_json(event_path, None)
     if not isinstance(raw_event, dict):
         return None
+    # Stamp live EFP onto the event so compile emits hub_source=uia_efp + parents.
+    if isinstance(element_from_point, dict) and element_from_point:
+        from src.recorder.uia_input_boxes import _normalize_parents_chain
+
+        efp_out: dict[str, Any] = {}
+        if "name" in element_from_point:
+            efp_out["name"] = str(element_from_point.get("name") or "")
+        if "value" in element_from_point:
+            efp_out["value"] = str(element_from_point.get("value") or "")
+        parents = _normalize_parents_chain(element_from_point.get("parents"))
+        if parents:
+            efp_out["parents"] = parents
+        ct = str(element_from_point.get("control_type") or control_type or "").strip()
+        if ct:
+            efp_out["control_type"] = ct
+        bbox_efp = element_from_point.get("bbox")
+        if isinstance(bbox_efp, (list, tuple)) and len(bbox_efp) == 4:
+            try:
+                efp_out["bbox"] = [int(v) for v in bbox_efp]
+            except (TypeError, ValueError):
+                pass
+        if efp_out:
+            raw_event["element_from_point"] = efp_out
+            write_json(event_path, raw_event)
     event = RecordedEvent.from_dict(raw_event)
     analysis_path = run_dir / "analysis" / f"event_{int(request.event_index):03d}.json"
     analysis = read_json(analysis_path, None)
@@ -1112,6 +1219,8 @@ def write_uia_replay_repair(
         side_block["track_percent"] = int(track_percent)
     if isinstance(uia_snapshot, dict):
         side_block["uia_snapshot"] = uia_snapshot
+    if isinstance(element_from_point, dict) and element_from_point:
+        side_block["element_from_point"] = element_from_point
     block[request.side] = side_block
     # Scrollbar drag: the other side is the same bar at another percent — mark it
     # too so pin-skipped end loads do not leave a stranded yolo_ocr repair slot.
@@ -1156,6 +1265,7 @@ def write_uia_replay_repair(
             others,
             control_type=control_type,
             track_percent=track_percent,
+            hub_source="uia_efp" if source == "element_from_point" else None,
         ),
     )
     write_json(analysis_path, analysis)
@@ -1238,8 +1348,11 @@ def _vision_for_side(
     *,
     control_type: str = "",
     track_percent: int | None = None,
+    hub_source: str | None = None,
 ) -> dict[str, Any]:
-    primary = _candidate(label, bbox, control_type=control_type)
+    primary = _candidate(
+        label, bbox, control_type=control_type, hub_source=hub_source
+    )
     extra = [
         _candidate(text, box, control_type=other_type)
         for box, text, other_type in (_labeled_parts(item) for item in others)
@@ -1253,7 +1366,11 @@ def _vision_for_side(
         _attach_scrollbar_track(vision, bbox, track_percent)
     if side == "end":
         end_vision: dict[str, Any] = {
-            "candidates": [_candidate(label, bbox, control_type=control_type)],
+            "candidates": [
+                _candidate(
+                    label, bbox, control_type=control_type, hub_source=hub_source
+                )
+            ],
             "used_vision": True,
         }
         if label == "滾動條" and track_percent is not None:
@@ -1281,14 +1398,89 @@ def _load_request_with_reason(
     event_index: int,
     side: str,
 ) -> tuple[UiaReplayRepairRequest | None, str]:
-    """Build a repair request, or ``(None, reason)`` when this side is not repairable.
+    """Build a repair request, or ``(None, reason)`` when this side is not repairable."""
+    run_dir = Path(recording_dir)
+    raw_event = read_json(event_json_path(run_dir, event_index), None)
+    if not isinstance(raw_event, dict):
+        return None, "no_event_json"
+    try:
+        event = RecordedEvent.from_dict(raw_event)
+    except (KeyError, TypeError, ValueError) as exc:
+        return None, f"bad_event_json:{type(exc).__name__}"
+    analysis = read_json(run_dir / "analysis" / f"event_{int(event_index):03d}.json", None)
+    instruction = ""
+    if isinstance(analysis, dict):
+        instruction = str(analysis.get("instruction") or "")
+    from cua_mcp.caption_buttons import caption_role_from_instruction
 
-    New format: live FindAll YOLO→UIA promotion is disabled. Usable UIA hubs
-    already carry ``hub_source=uia_efp`` + ``parents`` from analysis; pure
-    YOLO+OCR steps stay on the twin path without a budgeted FindAll walk.
-    """
-    _ = (recording_dir, event_index, side)
-    return None, "findall_repair_disabled"
+    if instruction and caption_role_from_instruction(instruction):
+        return None, "caption_button_instruction"
+    window = event.end_click_window if side == "end" else event.click_window
+    recorded_window = _window_xywh(window if isinstance(window, dict) else None)
+    if recorded_window is None:
+        return None, "no_recorded_click_window"
+    from src.recorder.vision_context import load_yolo_ocr_payload
+
+    suffix = "_end" if side == "end" else ""
+    payload = load_yolo_ocr_payload(run_dir, event_index, suffix=suffix)
+    if not isinstance(payload, dict):
+        return None, "no_yolo_ocr_payload"
+    vision_path = str(payload.get("vision_path") or "").strip()
+    if vision_path != "yolo_ocr":
+        return None, f"vision_path_not_yolo_ocr:{vision_path or 'missing'}"
+    scrollbar_primary = _recorded_scrollbar_primary(
+        payload, allow_off_track=(side == "end")
+    )
+    icon_primary = (
+        None if scrollbar_primary is not None else _recorded_icon_primary(payload)
+    )
+    input_primary = (
+        None
+        if scrollbar_primary is not None or icon_primary is not None
+        else _recorded_input_primary(payload)
+    )
+    recorded_is_icon = False
+    if scrollbar_primary is not None:
+        bbox, text = scrollbar_primary
+    elif icon_primary is not None:
+        bbox, text, recorded_is_icon = icon_primary
+    elif input_primary is not None:
+        bbox, text = input_primary
+    else:
+        snapshot = event.end_uia_snapshot if side == "end" else event.uia_snapshot
+        primary = _recorded_primary(payload)
+        if primary is None:
+            return None, "no_recorded_primary_candidate"
+        bbox, text, recorded_is_icon = primary
+        # Legacy FindAll snapshot cover veto (new recordings leave snapshot empty).
+        probe = _repair_probe_screen_xy(
+            event,
+            side,
+            recorded_window,
+            bbox,
+            snapshot if isinstance(snapshot, dict) else None,
+        )
+        covering = snapshot_usable_covering_labels(
+            snapshot if isinstance(snapshot, dict) else None,
+            probe,
+        )
+        if covering:
+            from src.recorder.uia_input_boxes import ocr_uia_labels_soft_agree
+
+            if not any(ocr_uia_labels_soft_agree(text, label) for label in covering):
+                return None, "recorded_uia_snapshot_already_usable"
+    return (
+        UiaReplayRepairRequest(
+            recording_dir=run_dir,
+            event_index=int(event_index),
+            side=side,
+            recorded_bbox=bbox,
+            recorded_text=text,
+            recorded_window_xywh=recorded_window,
+            recorded_is_icon=recorded_is_icon,
+        ),
+        "",
+    )
 
 
 def _first_icon_chinese_id(cand: dict[str, Any]) -> str:
@@ -1715,39 +1907,49 @@ def _candidate(
     bbox: RectXywh,
     *,
     control_type: str = "",
+    hub_source: str | None = None,
 ) -> dict[str, Any]:
     x, y, w, h = (int(v) for v in bbox)
     label = str(text or "").strip()
     token = str(control_type or "").strip()
+    source = str(hub_source or "").strip().lower()
     if label == "滾動條" or token == "scrollbar":
         from cua_mcp.yolo_onnx import YOLO_CLASS_SCROLLBAR
 
-        return {
+        out = {
             "bbox": [x, y, w, h],
             "center": [x + w // 2, y + h // 2],
             "class_id": YOLO_CLASS_SCROLLBAR,
             "class_name": "scrollbar",
             "text": None,
         }
+        if source == "uia_efp":
+            out["source"] = "uia_efp"
+        return out
     if label == "輸入欄" or token == "input":
         from cua_mcp.yolo_onnx import YOLO_CLASS_INPUT
 
         # Named field hosts (EFP Edit Name) keep text for 「…」文字所在的輸入欄.
         # Bare class-only 輸入欄 stays unlabeled geometry.
         named = None if label == "輸入欄" else (label or None)
-        return {
+        out = {
             "bbox": [x, y, w, h],
             "center": [x + w // 2, y + h // 2],
             "class_id": YOLO_CLASS_INPUT,
             "class_name": "input",
             "text": named,
         }
+        if source == "uia_efp":
+            out["source"] = "uia_efp"
+        return out
     payload: dict[str, Any] = {
         "bbox": [x, y, w, h],
         "center": [x + w // 2, y + h // 2],
         "class_name": "text",
         "text": text,
     }
+    if source == "uia_efp":
+        payload["source"] = "uia_efp"
     if token:
         from src.recorder.uia_input_boxes import UIA_CONTROL_TYPE_SUFFIX
 
@@ -1788,14 +1990,15 @@ def _hit(
     source: str,
     *,
     control_type: str = "",
+    element_from_point: dict[str, Any] | None = None,
 ) -> UiaReplayRepairHit:
     x, y, w, h = (int(v) for v in box)
     token = str(control_type or "").strip()
     if token:
         from src.recorder.uia_input_boxes import UIA_CONTROL_TYPE_SUFFIX
 
-        # FindAll field hosts are outside the labeled-suffix map but must stay
-        # typed so repair rebuilds 「…」文字所在的輸入欄 / 滾動條 hubs.
+        # Field hosts are outside the labeled-suffix map but must stay typed so
+        # repair rebuilds 「…」文字所在的輸入欄 / 滾動條 hubs.
         if token not in UIA_CONTROL_TYPE_SUFFIX and token not in (
             "input",
             "scrollbar",
@@ -1808,6 +2011,7 @@ def _hit(
         cx=x + w // 2,
         cy=y + h // 2,
         control_type=token,
+        element_from_point=element_from_point,
     )
 
 

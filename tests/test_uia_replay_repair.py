@@ -80,7 +80,7 @@ def test_unique_uia_rect_uses_uia_name_and_rect_center() -> None:
     hit = _choose()
     assert hit is not None
     assert hit.label == "空白文件"
-    assert hit.source == "findall"
+    assert hit.source == "uia_labeled"
     assert (hit.cx, hit.cy) == (1040, 520)
     assert hit.bbox == _UIA_BOX
 
@@ -100,8 +100,8 @@ def test_two_uia_names_picks_most_ocr_similar() -> None:
     )
     assert hit is not None
     assert hit.label == "空白文件"
-    assert hit.source == "findall"
-    assert reason.startswith("findall_ocr_similar")
+    assert hit.source == "uia_labeled"
+    assert reason.startswith("uia_labeled_ocr_similar")
 
 
 def test_choose_with_reason_reports_ambiguous_uia_names_when_similarity_low() -> None:
@@ -140,7 +140,7 @@ def test_tied_ocr_similar_names_pick_smallest_box() -> None:
     assert hit is not None
     assert hit.bbox == small
     assert hit.label == "AC"
-    assert reason.startswith("findall_ocr_similar")
+    assert reason.startswith("uia_labeled_ocr_similar")
 
 
 def test_choose_with_reason_reports_ocr_miss() -> None:
@@ -170,8 +170,8 @@ def test_choose_repairs_when_ocr_has_single_char_garble() -> None:
     )
     assert hit is not None
     assert hit.label == "空白文件"
-    assert hit.source == "findall"
-    assert reason.startswith("findall")
+    assert hit.source == "uia_labeled"
+    assert reason.startswith("uia_labeled")
 
 
 def test_choose_with_reason_reports_missing_input_at_point() -> None:
@@ -214,8 +214,8 @@ def test_split_caption_ocr_confirms_via_token_coverage() -> None:
     )
     assert hit is not None
     assert hit.label == "WinMaster7 Console"
-    assert hit.source == "findall"
-    assert reason.startswith("findall")
+    assert hit.source == "uia_labeled"
+    assert reason.startswith("uia_labeled")
 
 
 def test_split_caption_partial_ocr_does_not_confirm() -> None:
@@ -262,7 +262,7 @@ def test_choose_repairs_when_ocr_confirms_icon_chinese_id() -> None:
     )
     assert hit is not None
     assert hit.label == "顯示桌面"
-    assert hit.source == "findall"
+    assert hit.source == "uia_labeled"
 
 
 def test_choose_misses_when_icon_ocr_does_not_match() -> None:
@@ -796,8 +796,8 @@ def test_uia_walk_uses_live_hwnd_when_recorded_hwnd_is_stale(monkeypatch) -> Non
     assert found == []
 
 
-def test_replay_repair_slots_disabled_for_new_format(tmp_path: Path) -> None:
-    """Phase 5: live FindAll YOLO→UIA repair slots never arm."""
+def test_replay_repair_slots_arm_yolo_ocr_for_efp_repair(tmp_path: Path) -> None:
+    """YOLO+OCR steps arm EFP-based UIA repair slots (no FindAll walk)."""
     from src.recorder.uia_replay_repair import (
         _load_request_with_reason,
         replay_repair_slots,
@@ -850,10 +850,14 @@ def test_replay_repair_slots_disabled_for_new_format(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     calls = [{"name": "move_mouse", "arguments": {}}]
-    assert replay_repair_slots(run, 2, calls) == []
+    slots = replay_repair_slots(run, 2, calls)
+    assert len(slots) == 1
+    assert slots[0] is not None
+    assert slots[0].recorded_text == "文件"
     req, reason = _load_request_with_reason(run, 2, "click")
-    assert req is None
-    assert reason == "findall_repair_disabled"
+    assert reason == ""
+    assert req is not None
+    assert req.recorded_bbox == (10, 20, 30, 14)
 
 
 def test_move_fallback_rejects_findall_hub_source() -> None:

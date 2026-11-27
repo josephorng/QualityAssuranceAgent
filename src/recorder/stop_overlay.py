@@ -1095,6 +1095,7 @@ class ReplayMonitorFrameOverlay:
         self._windows: list[Any] = []
         self._badges: list[dict[str, Any]] = []
         self._step_text = _REPLAY_FRAME_BADGE_TEXT
+        self._path_text = ""
         self._phase_text = ""
         self._elapsed_text = ""
         mons = resolve_replay_frame_monitors(monitor_indices)
@@ -1174,11 +1175,12 @@ class ReplayMonitorFrameOverlay:
     def _spawn_badge(self, master: Any, mon: dict[str, int]) -> None:
         ox, oy = replay_frame_badge_origin(mon)
         title_label: ctk.CTkLabel | None = None
+        path_label: ctk.CTkLabel | None = None
         phase_label: ctk.CTkLabel | None = None
         elapsed_label: ctk.CTkLabel | None = None
 
         def _content(win: Any) -> None:
-            nonlocal title_label, phase_label, elapsed_label
+            nonlocal title_label, path_label, phase_label, elapsed_label
             frame = ctk.CTkFrame(
                 win,
                 corner_radius=6,
@@ -1195,6 +1197,14 @@ class ReplayMonitorFrameOverlay:
                 justify="left",
             )
             title_label.pack(anchor="w", padx=10, pady=(4, 0))
+            path_label = ctk.CTkLabel(
+                frame,
+                text="",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                text_color=(_REPLAY_FRAME_BADGE_FG, _REPLAY_FRAME_BADGE_FG),
+                anchor="w",
+                justify="left",
+            )
             phase_label = ctk.CTkLabel(
                 frame,
                 text="",
@@ -1228,6 +1238,7 @@ class ReplayMonitorFrameOverlay:
                 "win": win,
                 "mon": dict(mon),
                 "title": title_label,
+                "path": path_label,
                 "phase": phase_label,
                 "elapsed": elapsed_label,
             }
@@ -1281,21 +1292,25 @@ class ReplayMonitorFrameOverlay:
         self,
         *,
         step_text: str | None = None,
+        path_text: str | None = None,
         phase: str | None = None,
         elapsed_text: str | None = None,
     ) -> None:
-        """Update every monitor badge with step title, coarse phase, and elapsed."""
+        """Update every monitor badge with step title, path, coarse phase, and elapsed."""
         if self._destroyed:
             return
         if step_text is not None:
             cleaned = str(step_text).strip() or _REPLAY_FRAME_BADGE_TEXT
             self._step_text = cleaned
+        if path_text is not None:
+            self._path_text = str(path_text).strip()
         if phase is not None:
             self._phase_text = str(phase).strip()
         if elapsed_text is not None:
             self._elapsed_text = str(elapsed_text).strip()
         for badge in list(self._badges):
             title = badge.get("title")
+            path_label = badge.get("path")
             phase_label = badge.get("phase")
             elapsed_label = badge.get("elapsed")
             try:
@@ -1303,21 +1318,31 @@ class ReplayMonitorFrameOverlay:
                     title.configure(text=self._step_text)
             except Exception:
                 pass
-            self._pack_optional_label(phase_label, text=self._phase_text, after=title)
-            after_for_elapsed = phase_label if self._phase_text else title
+            self._pack_optional_label(path_label, text=self._path_text, after=title)
+            after_for_phase = path_label if self._path_text else title
+            self._pack_optional_label(
+                phase_label, text=self._phase_text, after=after_for_phase
+            )
+            if self._phase_text:
+                after_for_elapsed = phase_label
+            elif self._path_text:
+                after_for_elapsed = path_label
+            else:
+                after_for_elapsed = title
             self._pack_optional_label(
                 elapsed_label,
                 text=self._elapsed_text,
                 after=after_for_elapsed,
             )
             self._resize_badge(badge)
-        if self._phase_text or self._elapsed_text:
+        if self._path_text or self._phase_text or self._elapsed_text:
             self._harden_all()
 
     def clear_progress(self) -> None:
         """Reset badges to the plain「重播中」title."""
         self.set_progress(
             step_text=_REPLAY_FRAME_BADGE_TEXT,
+            path_text="",
             phase="",
             elapsed_text="",
         )

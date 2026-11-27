@@ -205,6 +205,33 @@ def test_run_control_step_progress_callback() -> None:
     assert run_control.step_progress_phase() == ""
 
 
+def test_run_control_step_vision_path_callback() -> None:
+    run_control.reset_run_control()
+    paths: list[str] = []
+    run_control.notify_step_vision_path("UIA")
+    assert run_control.step_vision_path() == "UIA"
+    assert paths == []
+    run_control.set_step_vision_path_callback(paths.append)
+    run_control.notify_step_vision_path("YOLO+OCR")
+    assert run_control.step_vision_path() == "YOLO+OCR"
+    assert paths == ["YOLO+OCR"]
+    run_control.notify_step_vision_path("  ")
+    assert run_control.step_vision_path() == ""
+    assert paths == ["YOLO+OCR", ""]
+    run_control.notify_step_vision_path("UIA")
+    run_control.notify_active_step(0)
+    assert run_control.step_vision_path() == ""
+    run_control.notify_step_vision_path("YOLO+OCR")
+    run_control.notify_active_step(None)
+    assert run_control.step_vision_path() == ""
+    run_control.reset_run_control()
+    run_control.notify_step_vision_path("UIA")
+    assert paths == ["YOLO+OCR", "", "UIA", "YOLO+OCR"]
+    assert run_control.step_vision_path() == "UIA"
+    run_control.reset_run_control()
+    assert run_control.step_vision_path() == ""
+
+
 def test_run_control_active_step_reset() -> None:
     run_control.reset_run_control()
     seen: list[int | None] = []

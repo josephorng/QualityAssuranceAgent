@@ -75,7 +75,7 @@ from cua_mcp.select_ui_element import (
     _sort_detections_reading_order,
 )
 from src.common.io_utils import imread_bgr, imwrite_bgr, write_json
-from src.common.run_control import notify_step_progress
+from src.common.run_control import notify_step_progress, notify_step_vision_path
 from src.common.nearby_side import (
     NearbyHint,
     anchor_satisfies_side,
@@ -737,6 +737,27 @@ def _notify_replay_phase(phase: str) -> None:
     """Publish a coarse live phase for the replay「重播中」badge (best-effort)."""
     try:
         notify_step_progress(phase)
+    except Exception:
+        pass
+
+
+def _replay_vision_path_label(vision_path: str | None) -> str:
+    """Map ``timing.vision_path`` to the amber-badge label (UIA / YOLO+OCR)."""
+    key = str(vision_path or "").strip().lower()
+    if key == "yolo_ocr":
+        return "YOLO+OCR"
+    if key == "uia" or key.startswith("uia_"):
+        return "UIA"
+    return ""
+
+
+def _notify_replay_vision_path(vision_path: str | None) -> None:
+    """Publish the live resolve path for the replay「重播中」badge (best-effort)."""
+    label = _replay_vision_path_label(vision_path)
+    if not label:
+        return
+    try:
+        notify_step_vision_path(label)
     except Exception:
         pass
 
@@ -6395,6 +6416,7 @@ async def _recapture_deferred_subtarget_yolo(
     if callable(note_capture):
         note_capture(captured)
     vision_timing["vision_path"] = "uia_yolo_subtarget"
+    _notify_replay_vision_path("uia_yolo_subtarget")
     vision_timing["uia_first_hit"] = True
     deferred_pendings = _extract_deferred_ocr_pendings(vision_timing)
     return (
@@ -7747,6 +7769,7 @@ async def _find_mouse_point_attempt(
                 ),
                 "uia_first_hit": True,
             }
+            _notify_replay_vision_path(vision_timing.get("vision_path"))
             ocr_pendings = []
             if commit_efp_synth and ocr_fallback is not None:
                 _log_info(
@@ -7813,6 +7836,7 @@ async def _find_mouse_point_attempt(
             ) = vision
             _note_capture(captured)
             vision_timing["vision_path"] = "uia_yolo_subtarget"
+            _notify_replay_vision_path("uia_yolo_subtarget")
             vision_timing["uia_first_hit"] = True
             deferred_pendings = _extract_deferred_ocr_pendings(vision_timing)
             if vision_timing.get("uia_first_pending") and not deferred_pendings:
@@ -8150,6 +8174,7 @@ async def _find_mouse_point_attempt(
                         )
                         capture_s = float(vision_timing.get("capture_s", 0.0))
                         vision_timing["vision_path"] = "uia_yolo_subtarget"
+                        _notify_replay_vision_path("uia_yolo_subtarget")
                         vision_timing["uia_first_hit"] = True
                         ocr_finished_for_subtarget = True
                     elif (
@@ -8221,6 +8246,7 @@ async def _find_mouse_point_attempt(
                             if key in force_timing:
                                 vision_timing[key] = force_timing[key]
                         vision_timing["vision_path"] = "uia_yolo_subtarget"
+                        _notify_replay_vision_path("uia_yolo_subtarget")
                         vision_timing["uia_first_hit"] = True
                         vision_timing["uia_yolo_subtarget_force_ocr"] = True
                         ocr_finished_for_subtarget = True
@@ -8340,8 +8366,11 @@ async def _find_mouse_point_attempt(
         capture_s = float(vision_timing.get("capture_s", 0.0))
         if grabbed_frames:
             vision_timing["vision_path"] = "yolo_ocr"
+            _notify_replay_vision_path("yolo_ocr")
             ocr_pendings = []
         else:
+            vision_timing["vision_path"] = "yolo_ocr"
+            _notify_replay_vision_path("yolo_ocr")
             ocr_pending_raw = vision_timing.pop("_ocr_pending", None)
             ocr_pendings = (
                 list(ocr_pending_raw)
@@ -8527,6 +8556,7 @@ async def _find_mouse_point_attempt(
                             "h": chosen.bbox[3],
                         }
                         vision_timing["vision_path"] = "uia_yolo_subtarget"
+                        _notify_replay_vision_path("uia_yolo_subtarget")
                         _log_info(
                             "move_mouse uia_replay_repair yolo_subtarget hit "
                             f"anchor={match_anchor!r} "

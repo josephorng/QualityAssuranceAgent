@@ -39,6 +39,10 @@ _script_steps_callback: _ScriptStepsCallback | None = None
 _StepProgressCallback = Callable[[str], None]
 _step_progress_phase: str = ""
 _step_progress_callback: _StepProgressCallback | None = None
+# Live resolve path for the amber badge (UIA / YOLO+OCR).
+_StepVisionPathCallback = Callable[[str], None]
+_step_vision_path: str = ""
+_step_vision_path_callback: _StepVisionPathCallback | None = None
 _active_step_lock = threading.Lock()
 
 # Recording replay script on disk may have changed (hub edits). Cleared when brain reloads.
@@ -140,6 +144,7 @@ def clear_active_step() -> None:
     global _script_step_lines, _script_step_event_indices
     global _pause_at_step, _pause_at_step_callback
     global _step_progress_phase, _step_progress_callback
+    global _step_vision_path, _step_vision_path_callback
     with _active_step_lock:
         _active_step_index = None
         _active_step_instruction = None
@@ -153,6 +158,8 @@ def clear_active_step() -> None:
         _script_step_event_indices = []
         _step_progress_phase = ""
         _step_progress_callback = None
+        _step_vision_path = ""
+        _step_vision_path_callback = None
 
 
 def set_step_progress_callback(callback: _StepProgressCallback | None) -> None:
@@ -183,6 +190,34 @@ def step_progress_phase() -> str:
         return _step_progress_phase
 
 
+def set_step_vision_path_callback(callback: _StepVisionPathCallback | None) -> None:
+    """Register or clear the live vision-path callback for the replay badge."""
+    global _step_vision_path_callback
+    with _active_step_lock:
+        _step_vision_path_callback = callback
+
+
+def notify_step_vision_path(path: str) -> None:
+    """Publish the live resolve path (``UIA`` / ``YOLO+OCR``) for the amber badge.
+
+    Empty ``path`` clears the stored label. Late UI attach can read the last
+    value via :func:`step_vision_path`.
+    """
+    global _step_vision_path
+    cleaned = str(path or "").strip()
+    with _active_step_lock:
+        _step_vision_path = cleaned
+        callback = _step_vision_path_callback
+    if callback is not None:
+        callback(cleaned)
+
+
+def step_vision_path() -> str:
+    """Return the latest live resolve path label, or ``\"\"`` when none is set."""
+    with _active_step_lock:
+        return _step_vision_path
+
+
 def notify_active_step(
     step_index: int | None,
     *,
@@ -191,11 +226,13 @@ def notify_active_step(
 ) -> None:
     """Publish the script step the agent is currently running."""
     global _active_step_index, _active_step_instruction, _active_step_event_index
-    global _step_progress_phase
+    global _step_progress_phase, _step_vision_path
     with _active_step_lock:
         _active_step_index = step_index
         _active_step_instruction = instruction
         _active_step_event_index = event_index if isinstance(event_index, int) else None
+        # New / cleared step: drop previous path so the badge does not linger.
+        _step_vision_path = ""
         if step_index is None:
             _step_progress_phase = ""
         callback = _active_step_callback

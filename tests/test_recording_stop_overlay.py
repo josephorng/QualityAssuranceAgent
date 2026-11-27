@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from cua_mcp.select_mouse_target import _replay_vision_path_label
 from src.recorder.stop_overlay import (
     RecordingStopOverlay,
     ReplayControlOverlay,
@@ -12,6 +13,16 @@ from src.recorder.stop_overlay import (
     replay_frame_strip_geometries,
     resolve_replay_frame_monitors,
 )
+
+
+def test_replay_vision_path_label_maps_uia_and_yolo() -> None:
+    assert _replay_vision_path_label("uia") == "UIA"
+    assert _replay_vision_path_label("uia_yolo_subtarget") == "UIA"
+    assert _replay_vision_path_label("uia_yolo_constellation_efp") == "UIA"
+    assert _replay_vision_path_label("yolo_ocr") == "YOLO+OCR"
+    assert _replay_vision_path_label("") == ""
+    assert _replay_vision_path_label(None) == ""
+    assert _replay_vision_path_label("unknown") == ""
 
 
 
@@ -291,6 +302,7 @@ def test_replay_monitor_frame_overlay_set_progress_updates_labels() -> None:
     overlay._destroyed = False
     win = _FakeWin()
     title = _Label()
+    path = _Label()
     phase = _Label()
     elapsed = _Label()
     overlay._windows = [win]
@@ -299,30 +311,44 @@ def test_replay_monitor_frame_overlay_set_progress_updates_labels() -> None:
             "win": win,
             "mon": {"left": 100, "top": 50, "width": 200, "height": 100},
             "title": title,
+            "path": path,
             "phase": phase,
             "elapsed": elapsed,
         }
     ]
     overlay._step_text = "重播中"
+    overlay._path_text = ""
     overlay._phase_text = ""
     overlay._elapsed_text = ""
     overlay._harden_all = lambda: None  # type: ignore[method-assign]
 
     overlay.set_progress(
         step_text="重播中 · 步驟 4/12",
+        path_text="UIA",
         phase="選取 · FindAll",
         elapsed_text="00:07",
     )
     assert title.text == "重播中 · 步驟 4/12"
+    assert path.text == "UIA"
+    assert path.mapped is True
+    assert path.after_widget is title
     assert phase.text == "選取 · FindAll"
     assert phase.mapped is True
+    assert phase.after_widget is path
     assert elapsed.text == "00:07"
     assert elapsed.mapped is True
+    assert elapsed.after_widget is phase
     assert win.geometry_calls
     assert win.geometry_calls[-1].endswith("+112+62")
 
+    overlay.set_progress(path_text="YOLO+OCR")
+    assert path.text == "YOLO+OCR"
+    assert path.mapped is True
+
     overlay.clear_progress()
     assert title.text == "重播中"
+    assert path.text == ""
+    assert path.mapped is False
     assert phase.text == ""
     assert phase.mapped is False
     assert elapsed.text == ""

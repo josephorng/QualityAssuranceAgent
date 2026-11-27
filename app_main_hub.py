@@ -42,8 +42,10 @@ from src.common.run_control import (
     set_pause_at_step,
     set_pause_at_step_callback,
     set_step_progress_callback,
+    set_step_vision_path_callback,
     step_is_busy,
     step_progress_phase,
+    step_vision_path,
     take_pending_step_jump,
     reset_run_control,
     resume_run,
@@ -337,6 +339,7 @@ class MainHub(ctk.CTk):
         self._active_replay_event_index: int | None = None
         self._replay_progress_phase = ""
         self._replay_progress_phase_before_pause = ""
+        self._replay_progress_path = ""
         self._replay_elapsed_base_s = 0.0
         self._replay_elapsed_segment_started_at: float | None = None
         self._replay_elapsed_after_id: str | None = None
@@ -3049,11 +3052,13 @@ class MainHub(ctk.CTk):
         if frames is None:
             return
         phase = self._replay_progress_phase
+        path = self._replay_progress_path
         elapsed_text = ""
-        if self._replay_progress_step_index is not None or phase or self._replay_elapsed_segment_started_at is not None or self._replay_elapsed_base_s > 0:
+        if self._replay_progress_step_index is not None or phase or path or self._replay_elapsed_segment_started_at is not None or self._replay_elapsed_base_s > 0:
             elapsed_text = self._format_replay_elapsed(self._replay_elapsed_seconds())
         frames.set_progress(
             step_text=self._replay_badge_step_text(),
+            path_text=path,
             phase=phase,
             elapsed_text=elapsed_text,
         )
@@ -3070,6 +3075,7 @@ class MainHub(ctk.CTk):
         self._replay_elapsed_base_s = 0.0
         self._replay_progress_phase = ""
         self._replay_progress_phase_before_pause = ""
+        self._replay_progress_path = ""
         self._replay_progress_step_index = None
         if clear_badge:
             frames = self._replay_monitor_frames
@@ -3096,6 +3102,7 @@ class MainHub(ctk.CTk):
         self._replay_progress_step_index = step_index
         self._replay_elapsed_base_s = 0.0
         self._replay_elapsed_segment_started_at = None if is_paused() else time.monotonic()
+        self._replay_progress_path = ""
         cleaned = str(phase or "").strip()
         if is_paused():
             self._replay_progress_phase_before_pause = cleaned or "執行中"
@@ -3142,6 +3149,22 @@ class MainHub(ctk.CTk):
 
         def apply() -> None:
             self._set_replay_progress_phase(phase)
+
+        try:
+            self.after(0, apply)
+        except Exception:
+            return
+
+    def _set_replay_progress_path(self, path: str) -> None:
+        self._replay_progress_path = str(path or "").strip()
+        self._refresh_replay_monitor_progress()
+        self._schedule_replay_elapsed_tick()
+
+    def _on_step_vision_path_from_worker(self, path: str) -> None:
+        """Update the「重播中」badge resolve path from a worker/tool thread."""
+
+        def apply() -> None:
+            self._set_replay_progress_path(path)
 
         try:
             self.after(0, apply)
@@ -3214,10 +3237,16 @@ class MainHub(ctk.CTk):
             monitor_indices=self._selected_monitor_indices(),
         )
         set_step_progress_callback(self._on_step_progress_from_worker)
+        set_step_vision_path_callback(self._on_step_vision_path_from_worker)
         existing_phase = step_progress_phase()
+        existing_path = step_vision_path()
+        if existing_path:
+            self._replay_progress_path = existing_path
         active = active_step_index()
         if active is not None:
             self._on_replay_active_step_progress(active, phase=existing_phase)
+            if existing_path:
+                self._set_replay_progress_path(existing_path)
 
     def _destroy_replay_monitor_frames(self) -> None:
         self._stop_replay_elapsed_timer(clear_badge=False)
@@ -3228,6 +3257,7 @@ class MainHub(ctk.CTk):
 
     def _destroy_replay_overlay(self) -> None:
         set_step_progress_callback(None)
+        set_step_vision_path_callback(None)
         self._destroy_replay_monitor_frames()
         self._cancel_retry_countdown()
         self._cancel_replay_rerecord()
@@ -4606,6 +4636,7 @@ class MainHub(ctk.CTk):
         set_script_steps_callback(self._on_script_steps_from_worker)
         set_pause_at_step_callback(self._on_paused_at_step_from_worker)
         set_step_progress_callback(self._on_step_progress_from_worker)
+        set_step_vision_path_callback(self._on_step_vision_path_from_worker)
         self._track_script_step_status = args.run_mode in ("script", "runtime")
         set_step_status_callback(self._on_step_status_from_worker)
         self._set_run_button_running()

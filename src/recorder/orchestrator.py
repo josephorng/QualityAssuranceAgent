@@ -86,6 +86,25 @@ _ANALYSIS_PHASE_LABELS: dict[str, str] = {
     "html_write": "Recording HTML write",
 }
 
+# Short Chinese labels for the hub status line during analysis.
+_ANALYSIS_PHASE_UI_LABELS: dict[str, str] = {
+    "coalesce": "整理事件",
+    "vision": "視覺辨識",
+    "text_choice": "文字判斷",
+    "instruction": "產生指令",
+    "assemble": "整理結果",
+    "yolo_ocr_retry": "重試辨識",
+    "tool_cache_rebuild": "重建快取",
+    "html_write": "產生報告",
+}
+
+
+def _analysis_phase_detail(phase: str, event_index: int | None = None) -> str:
+    label = _ANALYSIS_PHASE_UI_LABELS.get(phase, phase)
+    if event_index is None:
+        return label
+    return f"{label} · 事件 {event_index}"
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -169,11 +188,14 @@ class _AnalysisProgress:
     def __init__(
         self,
         event_count: int,
-        on_progress: Callable[[int, int], None] | None,
+        on_progress: Callable[[int, int, str], None] | None,
+        *,
+        detail: str = "",
     ) -> None:
         self._lock = threading.Lock()
         self._done = 0
         self._total = max(1, event_count * _PROGRESS_UNITS_PER_EVENT)
+        self._detail = detail
         self._on_progress = on_progress
         self._emit_unlocked()
 
@@ -188,7 +210,13 @@ class _AnalysisProgress:
 
     def _emit_unlocked(self) -> None:
         if self._on_progress is not None:
-            self._on_progress(self._done, self._total)
+            self._on_progress(self._done, self._total, self._detail)
+
+    def set_detail(self, detail: str) -> None:
+        """Update status detail without changing progress counts."""
+        with self._lock:
+            self._detail = detail
+            self._emit_unlocked()
 
     def bump(self, units: int = 1) -> None:
         if units <= 0:
@@ -655,6 +683,7 @@ async def _prepare_all_event_visions(
     log_info: Callable[[str], None],
     should_cancel: Callable[[], bool] | None,
     max_workers: int,
+    on_vision_start: Callable[[int], None] | None = None,
     on_vision_done: Callable[[], None] | None = None,
 ) -> tuple[list[_PreparedEvent | None], bool]:
     """Run vision for events in parallel (bounded). Returns (results, cancelled)."""
@@ -671,6 +700,8 @@ async def _prepare_all_event_visions(
             if should_cancel is not None and should_cancel():
                 cancelled = True
                 return
+            if on_vision_start is not None:
+                on_vision_start(event.index)
             log_info(f"vision event {event.index} kind={event.kind}")
             results[pos] = await _prepare_event_vision(
                 event,
@@ -726,6 +757,7 @@ async def _refine_all_text_resolutions(
     log_info: Callable[[str], None],
     should_cancel: Callable[[], bool] | None,
     max_workers: int,
+    on_text_choice_start: Callable[[int], None] | None = None,
 ) -> bool:
     """Batch text-only LLM choice for typing events where recorded ≠ OCR.
 
@@ -777,6 +809,8 @@ async def _refine_all_text_resolutions(
             if should_cancel is not None and should_cancel():
                 cancelled = True
                 return
+            if on_text_choice_start is not None:
+                on_text_choice_start(event.index)
             log_info(
                 f"text choice LLM event={event.index} "
                 f"recorded={text_resolution.get('recorded_text')!r} "
@@ -816,6 +850,7 @@ async def _analyze_all_event_instructions(
     log_info: Callable[[str], None],
     should_cancel: Callable[[], bool] | None,
     max_workers: int,
+    on_instruction_start: Callable[[int], None] | None = None,
     on_instruction_done: Callable[[], None] | None = None,
 ) -> tuple[list[Any], bool]:
     """Run instruction LLM for prepared events in parallel (bounded).
@@ -837,6 +872,8 @@ async def _analyze_all_event_instructions(
                 cancelled = True
                 return
             event = prepared.event
+            if on_instruction_start is not None:
+                on_instruction_start(event.index)
             log_info(f"processing event {event.index} kind={event.kind}")
             started = time.perf_counter()
             try:
@@ -1210,6 +1247,7 @@ async def _retry_failed_pointer_yolo_ocr(
     log_info: Callable[[str], None],
     should_cancel: Callable[[], bool] | None,
     on_reserve: Callable[[int], None] | None = None,
+    on_retry_start: Callable[[int], None] | None = None,
     on_done: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Re-run YOLO/OCR once for pointer steps whose persisted detection failed.
@@ -1245,6 +1283,8 @@ async def _retry_failed_pointer_yolo_ocr(
                 log_info("retry yolo/ocr cancelled by user")
                 break
             stats["retried"] += 1
+            if on_retry_start is not None:
+                on_retry_start(event.index)
             log_info(f"retry yolo/ocr event {event.index} kind={event.kind}")
             try:
                 vision = await asyncio.to_thread(
@@ -1280,7 +1320,7 @@ async def _retry_failed_pointer_yolo_ocr(
 async def analyze_recording_session(
     run_dir: Path,
     *,
-    on_progress: Callable[[int, int], None] | None = None,
+    on_progress: Callable[[int, int, str], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Analyze all events in a recording session and write hub-script instructions."""
@@ -1311,6 +1351,8 @@ async def analyze_recording_session(
             f"analyze_recording_session vision_workers={vision_workers} "
             f"llm_workers={llm_workers}"
         )
+        if on_progress is not None:
+            on_progress(0, 1, _analysis_phase_detail("coalesce"))
         with phase_timer.phase("coalesce"):
             events = coalesce_consecutive_scrolls(
                 coalesce_consecutive_same_location_clicks(
@@ -1347,7 +1389,11 @@ async def analyze_recording_session(
         errors: list[dict[str, Any]] = []
         instructions: list[str] = []
         expected_outcomes: list[str | None] = []
-        progress = _AnalysisProgress(len(events), on_progress)
+        progress = _AnalysisProgress(
+            len(events),
+            on_progress,
+            detail=_analysis_phase_detail("vision"),
+        )
 
         with phase_timer.phase("vision") as vision_phase:
             prepared_list, vision_cancelled = await _prepare_all_event_visions(
@@ -1356,6 +1402,9 @@ async def analyze_recording_session(
                 log_info=log_info,
                 should_cancel=should_cancel,
                 max_workers=vision_workers,
+                on_vision_start=lambda idx: progress.set_detail(
+                    _analysis_phase_detail("vision", idx)
+                ),
                 on_vision_done=progress.bump,
             )
             vision_cpu = sum(
@@ -1372,6 +1421,7 @@ async def analyze_recording_session(
         if vision_cancelled:
             cancelled = True
 
+        progress.set_detail(_analysis_phase_detail("text_choice"))
         with phase_timer.phase("text_choice") as text_phase:
             text_choice_cancelled = await _refine_all_text_resolutions(
                 prepared_list,
@@ -1379,6 +1429,9 @@ async def analyze_recording_session(
                 log_info=log_info,
                 should_cancel=should_cancel,
                 max_workers=llm_workers,
+                on_text_choice_start=lambda idx: progress.set_detail(
+                    _analysis_phase_detail("text_choice", idx)
+                ),
             )
             text_cpu = sum(
                 float(prepared.text_choice_seconds)
@@ -1396,6 +1449,7 @@ async def analyze_recording_session(
         )
         _persist_coalesced_events(run_dir, events, log_info=log_info)
 
+        progress.set_detail(_analysis_phase_detail("instruction"))
         with phase_timer.phase("instruction") as instruction_phase:
             instruction_results, llm_cancelled = await _analyze_all_event_instructions(
                 prepared_list,
@@ -1403,6 +1457,9 @@ async def analyze_recording_session(
                 log_info=log_info,
                 should_cancel=should_cancel,
                 max_workers=llm_workers,
+                on_instruction_start=lambda idx: progress.set_detail(
+                    _analysis_phase_detail("instruction", idx)
+                ),
                 on_instruction_done=progress.bump,
             )
             instruction_cpu = sum(
@@ -1416,6 +1473,7 @@ async def analyze_recording_session(
 
         # Ordered assemble: report lists, per-event analysis JSON.
         previous_instruction_event: RecordedEvent | None = None
+        progress.set_detail(_analysis_phase_detail("assemble"))
         with phase_timer.phase("assemble"):
             for event_pos, event in enumerate(events):
                 if should_cancel is not None and should_cancel():
@@ -1423,6 +1481,7 @@ async def analyze_recording_session(
                     log_info("analyze_recording_session cancelled by user")
                     break
 
+                progress.set_detail(_analysis_phase_detail("assemble", event.index))
                 prepared = prepared_list[event_pos]
                 if prepared is None:
                     cancelled = True
@@ -1509,6 +1568,7 @@ async def analyze_recording_session(
 
         yolo_stats: dict[str, Any] | None = None
         if not cancelled:
+            progress.set_detail(_analysis_phase_detail("yolo_ocr_retry"))
             with phase_timer.phase("yolo_ocr_retry"):
                 yolo_stats = await _retry_failed_pointer_yolo_ocr(
                     events,
@@ -1516,6 +1576,9 @@ async def analyze_recording_session(
                     log_info=log_info,
                     should_cancel=should_cancel,
                     on_reserve=progress.reserve,
+                    on_retry_start=lambda idx: progress.set_detail(
+                        _analysis_phase_detail("yolo_ocr_retry", idx)
+                    ),
                     on_done=progress.bump,
                 )
             if yolo_stats["cancelled"]:
@@ -1546,6 +1609,7 @@ async def analyze_recording_session(
         try:
             from src.recorder.compile_tool_calls import ensure_recording_tool_cache
 
+            progress.set_detail(_analysis_phase_detail("tool_cache_rebuild"))
             with phase_timer.phase("tool_cache_rebuild"):
                 # Recompile so UIA steps pick up landmark_geometry from
                 # yolo_ocr/ sidecars (copy-only rebuild would keep thin args).
@@ -1561,6 +1625,7 @@ async def analyze_recording_session(
         try:
             from src.common.session_html import write_recording_html_from_run
 
+            progress.set_detail(_analysis_phase_detail("html_write"))
             write_recording_html_from_run(run_dir)
         except Exception as exc:
             log_info(f"analyze_recording_session html write failed: {exc}")

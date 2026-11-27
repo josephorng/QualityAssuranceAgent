@@ -505,7 +505,7 @@ def dismiss_nuitka_onefile_splash() -> None:
 def analyze_screen_recording(
     run_dir: Path,
     *,
-    on_progress: Callable[[int, int], None] | None = None,
+    on_progress: Callable[[int, int, str], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Analyze a finished screen recording session and write hub-script instructions."""

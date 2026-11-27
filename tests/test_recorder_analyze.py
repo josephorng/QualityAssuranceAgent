@@ -2206,7 +2206,7 @@ async def test_analyze_recording_session_runs_llm_in_parallel(tmp_path: Path) ->
 
 @pytest.mark.asyncio
 async def test_analyze_recording_session_reports_multi_phase_progress(tmp_path: Path) -> None:
-    """Progress advances through vision, instruction, and outcome units (3 per event)."""
+    """Progress advances through vision + instruction units and reports UI detail."""
     from src.common.run_state import reset_run_state_manager
     from src.recorder.orchestrator import _PROGRESS_UNITS_PER_EVENT
 
@@ -2244,7 +2244,7 @@ async def test_analyze_recording_session_reports_multi_phase_progress(tmp_path: 
         encoding="utf-8",
     )
 
-    ticks: list[tuple[int, int]] = []
+    ticks: list[tuple[int, int, str]] = []
     no_vision = {"used_vision": False, "candidate_text": "", "local_cursor": None}
 
     with patch(
@@ -2253,19 +2253,27 @@ async def test_analyze_recording_session_reports_multi_phase_progress(tmp_path: 
     ):
         report = await analyze_recording_session(
             run_dir,
-            on_progress=lambda cur, tot: ticks.append((cur, tot)),
+            on_progress=lambda cur, tot, detail="": ticks.append((cur, tot, detail)),
         )
 
     assert report["cached"] == 2
-    assert ticks[0] == (0, 2 * _PROGRESS_UNITS_PER_EVENT)
-    assert ticks[-1] == (2 * _PROGRESS_UNITS_PER_EVENT, 2 * _PROGRESS_UNITS_PER_EVENT)
+    expected_total = 2 * _PROGRESS_UNITS_PER_EVENT
+    unit_ticks = [(cur, tot, detail) for cur, tot, detail in ticks if tot == expected_total]
+    assert unit_ticks, "expected progress ticks with vision+instruction total"
+    assert unit_ticks[0][0] == 0
+    assert unit_ticks[-1][0] == expected_total
     # Must advance during vision (before all instruction units would finish alone).
-    assert any(cur > 0 for cur, _tot in ticks[:-1])
-    assert any(cur >= 2 for cur, _tot in ticks)  # both vision units
-    # Monotonic non-decreasing
-    for prev, nxt in zip(ticks, ticks[1:]):
+    assert any(cur > 0 for cur, _tot, _detail in unit_ticks[:-1])
+    assert any(cur >= 2 for cur, _tot, _detail in unit_ticks)  # both vision units
+    # Monotonic non-decreasing among stable-total ticks
+    for prev, nxt in zip(unit_ticks, unit_ticks[1:]):
         assert nxt[0] >= prev[0]
         assert nxt[1] == prev[1]
+    details = [detail for _cur, _tot, detail in ticks]
+    assert any(detail == "整理事件" for detail in details)
+    assert any("視覺辨識" in detail for detail in details)
+    assert any("產生指令" in detail for detail in details)
+    assert any("事件 1" in detail or "事件 2" in detail for detail in details)
 
 
 @pytest.mark.asyncio

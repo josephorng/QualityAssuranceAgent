@@ -2508,7 +2508,9 @@ class MainHub(ctk.CTk):
             self._record_btn.configure(text="停止分析", state="normal", command=self._on_record_button)
         self._show_analysis_progress()
 
-    def _update_analysis_progress(self, current: int, total: int) -> None:
+    def _update_analysis_progress(
+        self, current: int, total: int, detail: str = ""
+    ) -> None:
         if self._analysis_progress is not None and total > 0:
             self._analysis_progress.set(current / total)
         if total > 0:
@@ -2516,6 +2518,9 @@ class MainHub(ctk.CTk):
             status = f"分析錄製中 ({pct}%)…"
         else:
             status = "分析錄製中…"
+        detail_text = (detail or "").strip()
+        if detail_text:
+            status = f"{status} {detail_text}"
         self._status.configure(
             text=status,
             text_color=("gray20", "gray65"),
@@ -4232,8 +4237,13 @@ class MainHub(ctk.CTk):
         self._recording_analysis_thread.start()
 
     def _analyze_recording_worker(self, run_dir: Path) -> None:
-        def on_progress(current: int, total: int) -> None:
-            self.after(0, lambda c=current, t=total: self._update_analysis_progress(c, t))
+        def on_progress(current: int, total: int, detail: str = "") -> None:
+            self.after(
+                0,
+                lambda c=current, t=total, d=detail: self._update_analysis_progress(
+                    c, t, d
+                ),
+            )
 
         def should_cancel() -> bool:
             return self._analysis_cancel_event.is_set()

@@ -14,6 +14,8 @@ from src.recorder.uia_probe import (
     _UIA_DATAITEM_CONTROL_TYPE_ID,
     _UIA_DOCUMENT_CONTROL_TYPE_ID,
     _UIA_EDIT_CONTROL_TYPE_ID,
+    _UIA_LIST_CONTROL_TYPE_ID,
+    _UIA_LISTITEM_CONTROL_TYPE_ID,
     _UIA_SCROLLBAR_CONTROL_TYPE_ID,
     _UIA_THUMB_CONTROL_TYPE_ID,
     _UIA_FIND_ALL_BUILD_CACHE,
@@ -91,6 +93,14 @@ def test_control_type_token_from_id_maps_scrollbar_and_datagrid_official_ids() -
     assert control_type_token_from_id(50014) == "scrollbar"
     assert control_type_id_from_token("scrollbar") == 50014
     assert control_type_id_from_token("data_grid") == 50028
+
+
+def test_control_type_token_from_id_maps_list_host() -> None:
+    """Explorer Items View is UIA List; mapped so EFP can refuse it as a hub."""
+    assert control_type_token_from_id(_UIA_LIST_CONTROL_TYPE_ID) == "list"
+    assert control_type_token_from_id(50008) == "list"
+    assert control_type_id_from_token("list") == _UIA_LIST_CONTROL_TYPE_ID
+    assert control_type_token_from_id(_UIA_LISTITEM_CONTROL_TYPE_ID) == "list_item"
 
 
 def test_control_type_token_from_id_maps_expanded_labeled_types() -> None:
@@ -1490,6 +1500,23 @@ def test_efp_payload_opens_uia_hub() -> None:
     assert not efp_payload_opens_uia_hub(
         {"name": "CoreInput", "control_type": "button", "bbox": [1, 1, 10, 10]}
     )
+    # Explorer Items View List host must not open hub (forces child drill).
+    assert not efp_payload_opens_uia_hub(
+        {
+            "name": "項目檢視",
+            "value": "",
+            "control_type": "list",
+            "bbox": [339, 128, 1101, 876],
+        }
+    )
+    assert not efp_payload_is_usable_labeled_leaf(
+        {
+            "name": "項目檢視",
+            "value": "",
+            "control_type": "list",
+            "bbox": [339, 128, 1101, 876],
+        }
+    )
     assert not efp_payload_opens_uia_hub(
         {"name": "Position", "value": "", "bbox": [1, 1, 0, 10]}
     )
@@ -1541,6 +1568,28 @@ def test_select_efp_point_child_promotee_picks_smallest_usable() -> None:
     assert select_efp_point_child_promotee([weak]) is None
     assert select_efp_point_child_promotee([]) is None
     assert select_efp_point_child_promotee(None) is None
+
+
+def test_select_efp_point_child_promotee_list_item_under_items_view() -> None:
+    """List host is non-hub; under-cursor Explorer folder list_item still opens hub."""
+    host = {
+        "name": "項目檢視",
+        "value": "",
+        "control_type": "list",
+        "bbox": [339, 128, 1101, 876],
+    }
+    folder = {
+        "name": "新增資料夾 (2)",
+        "value": "新增資料夾 (2)",
+        "control_type": "list_item",
+        "bbox": [800, 200, 90, 100],
+    }
+    assert not efp_payload_opens_uia_hub(host)
+    picked = select_efp_point_child_promotee([host, folder])
+    assert picked is not None
+    assert picked["name"] == "新增資料夾 (2)"
+    assert picked["control_type"] == "list_item"
+    assert efp_payload_opens_uia_hub(picked)
 
 
 def test_efp_host_snapshot_and_promoted_payload_open_hub() -> None:

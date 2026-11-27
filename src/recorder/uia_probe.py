@@ -128,6 +128,7 @@ _UIA_COMBOBOX_CONTROL_TYPE_ID = 50003
 _UIA_EDIT_CONTROL_TYPE_ID = 50004
 _UIA_HYPERLINK_CONTROL_TYPE_ID = 50005
 _UIA_LISTITEM_CONTROL_TYPE_ID = 50007
+_UIA_LIST_CONTROL_TYPE_ID = 50008
 _UIA_MENUITEM_CONTROL_TYPE_ID = 50011
 _UIA_RADIOBUTTON_CONTROL_TYPE_ID = 50013
 _UIA_TABITEM_CONTROL_TYPE_ID = 50019
@@ -565,6 +566,7 @@ def control_type_token_from_id(control_type_id: int | None) -> str:
         _UIA_CHECKBOX_CONTROL_TYPE_ID: "check_box",
         _UIA_HYPERLINK_CONTROL_TYPE_ID: "hyperlink",
         _UIA_LISTITEM_CONTROL_TYPE_ID: "list_item",
+        _UIA_LIST_CONTROL_TYPE_ID: "list",
         _UIA_MENUITEM_CONTROL_TYPE_ID: "menu_item",
         _UIA_RADIOBUTTON_CONTROL_TYPE_ID: "radio_button",
         _UIA_TABITEM_CONTROL_TYPE_ID: "tab_item",
@@ -5364,6 +5366,7 @@ def control_type_id_from_token(token: str | None) -> int | None:
         "check_box": _UIA_CHECKBOX_CONTROL_TYPE_ID,
         "hyperlink": _UIA_HYPERLINK_CONTROL_TYPE_ID,
         "list_item": _UIA_LISTITEM_CONTROL_TYPE_ID,
+        "list": _UIA_LIST_CONTROL_TYPE_ID,
         "menu_item": _UIA_MENUITEM_CONTROL_TYPE_ID,
         "radio_button": _UIA_RADIOBUTTON_CONTROL_TYPE_ID,
         "tab_item": _UIA_TABITEM_CONTROL_TYPE_ID,

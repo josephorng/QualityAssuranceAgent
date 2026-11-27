@@ -479,6 +479,9 @@ def test_efp_payload_looks_like_scrollbar() -> None:
     assert efp_payload_looks_like_scrollbar({"name": "Line down"})
     assert efp_payload_looks_like_scrollbar({"control_type": "thumb"})
     assert efp_payload_looks_like_scrollbar({"control_type": "scrollbar"})
+    assert efp_payload_looks_like_scrollbar(
+        {"parents": [{"automation_id": "VerticalScrollBar"}]}
+    )
     assert not efp_payload_looks_like_scrollbar(
         {"name": "關閉", "control_type": "button"}
     )

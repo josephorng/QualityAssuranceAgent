@@ -30,6 +30,7 @@ from src.recorder.uia_input_boxes import (
     compose_uia_input_landmark_label,
     control_type_token_from_id,
     element_from_point_name_value,
+    efp_payload_is_scrollbar_part,
     efp_payload_is_usable_labeled_leaf,
     efp_payload_opens_uia_hub,
     filter_uia_input_rects,
@@ -1333,6 +1334,34 @@ def test_efp_payload_is_usable_labeled_leaf() -> None:
     )
 
 
+def test_efp_payload_is_scrollbar_part() -> None:
+    assert efp_payload_is_scrollbar_part(
+        {"name": "位置", "control_type": "thumb", "bbox": [1423, 145, 17, 695]}
+    )
+    assert efp_payload_is_scrollbar_part({"control_type": "scrollbar"})
+    assert efp_payload_is_scrollbar_part(
+        {
+            "name": "位置",
+            "parents": [{"name": "垂直", "automation_id": "VerticalScrollBar"}],
+        }
+    )
+    assert efp_payload_is_scrollbar_part(
+        {
+            "name": "thumb",
+            "parents": [{"control_type": "scrollbar", "name": "垂直"}],
+        }
+    )
+    assert efp_payload_is_scrollbar_part(
+        {"parents": [{"automation_id": "HorizontalScrollBar"}]}
+    )
+    # Localized Name alone is not structural.
+    assert not efp_payload_is_scrollbar_part({"name": "位置", "bbox": [1, 1, 10, 10]})
+    assert not efp_payload_is_scrollbar_part(
+        {"name": "關閉", "control_type": "button"}
+    )
+    assert not efp_payload_is_scrollbar_part(None)
+
+
 def test_efp_payload_opens_uia_hub() -> None:
     assert efp_payload_opens_uia_hub(
         {
@@ -1342,11 +1371,47 @@ def test_efp_payload_opens_uia_hub() -> None:
             "bbox": [466, 477, 72, 22],
         }
     )
+    # Structural Explorer thumb (event_020 shape).
+    assert efp_payload_opens_uia_hub(
+        {
+            "name": "位置",
+            "value": "",
+            "control_type": "thumb",
+            "bbox": [1423, 145, 17, 695],
+            "parents": [{"name": "垂直", "automation_id": "VerticalScrollBar"}],
+        }
+    )
+    assert efp_payload_opens_uia_hub(
+        {
+            "control_type": "thumb",
+            "bbox": [1900, 400, 17, 200],
+        }
+    )
+    assert efp_payload_opens_uia_hub(
+        {
+            "name": "x",
+            "bbox": [1, 1, 10, 10],
+            "parents": [{"automation_id": "VerticalScrollBar"}],
+        }
+    )
+    # Legacy WinForms Name=Position without typed leaf/parents.
     assert efp_payload_opens_uia_hub(
         {"name": "Position", "value": "", "bbox": [1900, 400, 17, 200]}
     )
     assert efp_payload_opens_uia_hub(
         {"name": "Position", "value": "50", "bbox": [1, 1, 10, 10]}
+    )
+    # Usable input Name|Value (event_021 shape).
+    assert efp_payload_opens_uia_hub(
+        {
+            "name": "名稱",
+            "value": "活頁簿2.xlsx",
+            "control_type": "input",
+            "bbox": [375, 981, 462, 21],
+        }
+    )
+    assert not efp_payload_opens_uia_hub(
+        {"name": "CoreInput", "control_type": "input", "bbox": [1, 1, 10, 10]}
     )
     assert not efp_payload_opens_uia_hub(
         {"name": "CoreInput", "control_type": "button", "bbox": [1, 1, 10, 10]}
@@ -1355,6 +1420,25 @@ def test_efp_payload_opens_uia_hub() -> None:
         {"name": "Position", "value": "", "bbox": [1, 1, 0, 10]}
     )
     assert not efp_payload_opens_uia_hub(None)
+
+
+def test_efp_payload_is_usable_labeled_leaf_allows_input() -> None:
+    assert efp_payload_is_usable_labeled_leaf(
+        {
+            "name": "名稱",
+            "value": "活頁簿2.xlsx",
+            "control_type": "input",
+            "bbox": [375, 981, 462, 21],
+        }
+    )
+    assert not efp_payload_is_usable_labeled_leaf(
+        {
+            "name": "CoreInput",
+            "value": "",
+            "control_type": "input",
+            "bbox": [500, 155, 832, 864],
+        }
+    )
 
 
 def test_select_uia_field_clip_picks_smallest_containing_caret() -> None:

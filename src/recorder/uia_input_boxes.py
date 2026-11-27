@@ -230,6 +230,10 @@ _SCROLLBAR_THUMB_AUTOMATION_ID = "ScrollbarThumb"
 _SCROLLBAR_LINE_BUTTON_AUTOMATION_IDS = frozenset({"UpButton", "DownButton"})
 # Win32/WinForms accessible Names when AutomationId is empty / non-WPF.
 _SCROLLBAR_THUMB_NAMES = frozenset({"position"})
+# Stable scrollbar host AutomationIds (locale-independent; ControlType may be absent).
+_SCROLLBAR_PARENT_AUTOMATION_IDS = frozenset(
+    {"VerticalScrollBar", "HorizontalScrollBar"}
+)
 _SCROLLBAR_LINE_BUTTON_NAMES = frozenset(
     {
         "line up",
@@ -280,21 +284,53 @@ def is_winforms_scrollbar_thumb_efp_name(name: str | None) -> bool:
     return str(name or "").strip().casefold() in _SCROLLBAR_THUMB_NAMES
 
 
+def _efp_parent_signature_is_scrollbar(signature: Any) -> bool:
+    """True when a parent fingerprint is a ScrollBar host (type or AutomationId)."""
+    if not isinstance(signature, dict):
+        return False
+    control_type = str(signature.get("control_type") or "").strip().casefold()
+    if control_type == "scrollbar":
+        return True
+    auto = str(signature.get("automation_id") or "").strip()
+    return auto in _SCROLLBAR_PARENT_AUTOMATION_IDS
+
+
+def efp_payload_is_scrollbar_part(payload: dict[str, Any] | None) -> bool:
+    """True when press/idle EFP is a scrollbar leaf or under a ScrollBar parent.
+
+    Structural only: leaf ``thumb`` / ``scrollbar``, or any ``parents[]`` with
+    ``control_type=scrollbar`` or AutomationId ``VerticalScrollBar`` /
+    ``HorizontalScrollBar``. Does not use localized leaf Names.
+    """
+    if not isinstance(payload, dict):
+        return False
+    control_type = str(payload.get("control_type") or "").strip().casefold()
+    if control_type in {"thumb", "scrollbar"}:
+        return True
+    parents = payload.get("parents")
+    if not isinstance(parents, list):
+        return False
+    return any(_efp_parent_signature_is_scrollbar(item) for item in parents)
+
+
 def efp_payload_looks_like_scrollbar(payload: dict[str, Any] | None) -> bool:
     """True when idle EFP should also probe ScrollPattern / RangeValue percent.
 
     Gated so ordinary buttons/cells do not pay a second COM parent walk. Covers
-    WinForms ``Position`` thumbs and Up/Down/Page line-button Names.
+    structural scrollbar parts, WinForms ``Position`` thumbs, and Up/Down/Page
+    line-button Names.
     """
     if not isinstance(payload, dict):
         return False
+    if efp_payload_is_scrollbar_part(payload):
+        return True
     name = str(payload.get("name") or "").strip()
     if is_winforms_scrollbar_thumb_efp_name(name):
         return True
     if is_uia_scrollbar_line_button_part(automation_id=None, name=name):
         return True
     control_type = str(payload.get("control_type") or "").strip().casefold()
-    return control_type in {"scrollbar", "thumb", "scroll_bar"}
+    return control_type == "scroll_bar"
 
 # DataItem (Excel cells, dense grids) is intentionally omitted: FindAll under
 # XLMAIN would return every visible cell and block settle/hover for tens of
@@ -720,6 +756,7 @@ _EFP_USABLE_LABELED_LEAF_CONTROL_TYPES = frozenset(
         "custom",
         "header",
         "header_item",
+        "input",
     }
 )
 
@@ -779,16 +816,22 @@ def efp_payload_opens_uia_hub(payload: dict[str, Any] | None) -> bool:
 
     Shared by the recording LED green gate and analysis
     ``_press_efp_opens_uia_hub``: usable labeled leaf / ``data_item``, or a
-    WinForms scrollbar thumb (``Position``) with a screen bbox.
+    structural scrollbar part (leaf ``thumb``/``scrollbar`` or ScrollBar
+    parent) with a screen bbox. Legacy WinForms Name ``Position`` without
+    typed leaf/parents still opens when bbox is present.
     """
     if efp_payload_is_usable_labeled_leaf(payload):
         return True
     if not isinstance(payload, dict):
         return False
-    name = str(payload.get("name") or "").strip()
-    if not is_winforms_scrollbar_thumb_efp_name(name):
+    if efp_payload_screen_bbox_xywh(payload) is None:
         return False
-    return efp_payload_screen_bbox_xywh(payload) is not None
+    if efp_payload_is_scrollbar_part(payload):
+        return True
+    # Legacy WinForms: Name=Position, often no control_type / parents.
+    return is_winforms_scrollbar_thumb_efp_name(
+        str(payload.get("name") or "").strip()
+    )
 
 
 def efp_payload_is_usable_data_item(payload: dict[str, Any] | None) -> bool:

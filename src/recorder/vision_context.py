@@ -3756,7 +3756,8 @@ def _press_efp_opens_uia_hub(element_from_point: dict[str, Any] | None) -> bool:
     """True when press EFP alone opens the UIA analysis hub (no FindAll).
 
     Delegates to :func:`efp_payload_opens_uia_hub` so the recording LED green
-    gate and analysis stay aligned (labeled leaf or ``Position`` thumb + bbox).
+    gate and analysis stay aligned (labeled leaf, structural scrollbar part,
+    or legacy ``Position`` thumb + bbox).
     """
     from src.recorder.uia_input_boxes import efp_payload_opens_uia_hub
 
@@ -4879,8 +4880,9 @@ def _efp_peer_detection_from_payload(
 
     - ``input`` → named input peer (or Name copied onto an overlapping FindAll
       Edit, returning ``None`` so a second same-box peer is not injected)
-    - Win32/WinForms thumb Name ``Position`` with empty control_type → scrollbar
-      peer (skipped when FindAll already has a scrollbar covering the press)
+    - structural scrollbar part (leaf ``thumb``/``scrollbar`` or ScrollBar
+      parent) or legacy WinForms Name ``Position`` → scrollbar peer (skipped
+      when FindAll already has a scrollbar covering the press)
     - tokens in ``UIA_CONTROL_TYPE_SUFFIX`` → labeled text peer
     - empty / legacy → text peer (contained/coextensive promotion may name Edit)
 
@@ -4901,6 +4903,7 @@ def _efp_peer_detection_from_payload(
         return None
     from src.recorder.uia_input_boxes import (
         UIA_CONTROL_TYPE_SUFFIX,
+        efp_payload_is_scrollbar_part,
         is_usable_uia_landmark_label,
         is_weak_efp_hub_label,
         is_winforms_scrollbar_thumb_efp_name,
@@ -4911,6 +4914,46 @@ def _efp_peer_detection_from_payload(
     name = str(element_from_point.get("name") or "").strip()
     value = str(element_from_point.get("value") or "").strip()
     label = resolve_usable_uia_probe_label(name=name, value=value)
+    control_type = str(element_from_point.get("control_type") or "").strip() or None
+    if not control_type and isinstance(focused_element, dict):
+        focused_type = str(focused_element.get("control_type") or "").strip()
+        if focused_type:
+            control_type = focused_type
+
+    # Scrollbar structure (and legacy Name=Position) before landmark-label gate —
+    # thumb Names like 位置 must not become labeled text hubs.
+    is_scrollbar_peer = efp_payload_is_scrollbar_part(
+        element_from_point
+    ) or (
+        is_winforms_scrollbar_thumb_efp_name(name) and control_type is None
+    )
+    if is_scrollbar_peer:
+        resolved = _efp_peer_local_bbox(
+            element_from_point,
+            monitor_offset=monitor_offset,
+            local_x=local_x,
+            local_y=local_y,
+            control_type=control_type or "thumb",
+            efp_label=label or name or "scrollbar",
+            focused_element=focused_element,
+        )
+        if resolved is None:
+            return None
+        local_bbox, bbox_source = resolved
+        if isinstance(timing_out, dict):
+            timing_out["efp_peer_bbox_source"] = bbox_source
+        for det in existing:
+            if str(det.class_name or "").strip() != "scrollbar":
+                continue
+            if point_in_rect_xywh(int(local_x), int(local_y), det.bbox):
+                return None
+        return _detection_from_bbox(
+            local_bbox,
+            YOLO_CLASS_SCROLLBAR,
+            text=None,
+            source="uia_efp",
+        )
+
     # Weak host generics (CoreInput) stay EFP-only; do not inject as FindAll peers.
     if (
         not label
@@ -4918,12 +4961,6 @@ def _efp_peer_detection_from_payload(
         or is_weak_efp_hub_label(label)
     ):
         return None
-
-    control_type = str(element_from_point.get("control_type") or "").strip() or None
-    if not control_type and isinstance(focused_element, dict):
-        focused_type = str(focused_element.get("control_type") or "").strip()
-        if focused_type:
-            control_type = focused_type
 
     # Note FindAll covering-label disagree for debug; still inject so both
     # channels remain editable and typed precedence can choose the primary.
@@ -4982,20 +5019,6 @@ def _efp_peer_detection_from_payload(
             text=label,
             source="uia_efp",
             uia_control_type=None,
-        )
-
-    # WinForms thumb: Name=Position, Thumb control type unmapped → empty token.
-    if is_winforms_scrollbar_thumb_efp_name(name) and control_type is None:
-        for det in existing:
-            if str(det.class_name or "").strip() != "scrollbar":
-                continue
-            if point_in_rect_xywh(int(local_x), int(local_y), det.bbox):
-                return None
-        return _detection_from_bbox(
-            local_bbox,
-            YOLO_CLASS_SCROLLBAR,
-            text=None,
-            source="uia_efp",
         )
 
     label_n = _visible_text(label).casefold()

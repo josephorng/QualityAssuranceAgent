@@ -306,6 +306,28 @@ def test_efp_position_thumb_injects_scrollbar_peer() -> None:
     assert efp.source == "uia_efp"
 
 
+def test_efp_structural_thumb_injects_scrollbar_peer() -> None:
+    """Explorer thumb + VerticalScrollBar parent → scrollbar, not 「位置」 text."""
+    efp = _efp_peer_detection_from_payload(
+        {
+            "name": "位置",
+            "value": "",
+            "control_type": "thumb",
+            "bbox": [1423, 145, 17, 695],
+            "parents": [{"name": "垂直", "automation_id": "VerticalScrollBar"}],
+        },
+        monitor_offset=(0, 0),
+        local_x=1430,
+        local_y=284,
+        existing=[],
+    )
+    assert efp is not None
+    assert efp.class_name == "scrollbar"
+    assert efp.text is None
+    assert efp.source == "uia_efp"
+    assert efp.bbox == (1423, 145, 17, 695)
+
+
 def test_efp_position_skipped_when_findall_scrollbar_covers_press() -> None:
     existing = [
         _detection_from_bbox(

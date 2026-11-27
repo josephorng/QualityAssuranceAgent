@@ -10,8 +10,12 @@ from src.recorder.uia_probe import (
     _UIA_COMBOBOX_CONTROL_TYPE_ID,
     _UIA_CREATE_AND_CONDITION,
     _UIA_CUSTOM_CONTROL_TYPE_ID,
+    _UIA_DATAGRID_CONTROL_TYPE_ID,
+    _UIA_DATAITEM_CONTROL_TYPE_ID,
     _UIA_DOCUMENT_CONTROL_TYPE_ID,
     _UIA_EDIT_CONTROL_TYPE_ID,
+    _UIA_SCROLLBAR_CONTROL_TYPE_ID,
+    _UIA_THUMB_CONTROL_TYPE_ID,
     _UIA_FIND_ALL_BUILD_CACHE,
     _UIA_FIND_FIRST,
     _UIA_HEADER_CONTROL_TYPE_ID,
@@ -73,6 +77,20 @@ def test_control_type_token_from_id_maps_edit_hosts_to_input() -> None:
     assert control_type_token_from_id(_UIA_BUTTON_CONTROL_TYPE_ID) == "button"
     assert control_type_token_from_id(_UIA_TEXT_CONTROL_TYPE_ID) == "text"
     assert control_type_token_from_id(None) == ""
+
+
+def test_control_type_token_from_id_maps_scrollbar_and_datagrid_official_ids() -> None:
+    """ScrollBar is 50014; DataGrid is 50028 (Excel Grid/格線). Never swap them."""
+    assert _UIA_SCROLLBAR_CONTROL_TYPE_ID == 50014
+    assert _UIA_DATAGRID_CONTROL_TYPE_ID == 50028
+    assert _UIA_DATAITEM_CONTROL_TYPE_ID == 50029
+    assert _UIA_THUMB_CONTROL_TYPE_ID == 50027
+    assert control_type_token_from_id(_UIA_SCROLLBAR_CONTROL_TYPE_ID) == "scrollbar"
+    assert control_type_token_from_id(_UIA_DATAGRID_CONTROL_TYPE_ID) == "data_grid"
+    assert control_type_token_from_id(50028) == "data_grid"
+    assert control_type_token_from_id(50014) == "scrollbar"
+    assert control_type_id_from_token("scrollbar") == 50014
+    assert control_type_id_from_token("data_grid") == 50028
 
 
 def test_control_type_token_from_id_maps_expanded_labeled_types() -> None:
@@ -1361,6 +1379,24 @@ def test_efp_payload_is_scrollbar_part() -> None:
         {"name": "關閉", "control_type": "button"}
     )
     assert not efp_payload_is_scrollbar_part(None)
+    # Excel cell under Grid/格線 (DataGrid=50028): parent must not count as scrollbar.
+    assert (
+        control_type_token_from_id(_UIA_DATAGRID_CONTROL_TYPE_ID) == "data_grid"
+    )
+    assert not efp_payload_is_scrollbar_part(
+        {
+            "name": "I9",
+            "control_type": "data_item",
+            "bbox": [2525, 495, 72, 22],
+            "parents": [
+                {
+                    "control_type": "data_grid",
+                    "name": "格線",
+                    "automation_id": "Grid",
+                }
+            ],
+        }
+    )
 
 
 def test_efp_payload_opens_uia_hub() -> None:

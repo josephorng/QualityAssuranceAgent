@@ -134,7 +134,9 @@ _UIA_TABITEM_CONTROL_TYPE_ID = 50019
 _UIA_TEXT_CONTROL_TYPE_ID = 50020
 _UIA_TREEITEM_CONTROL_TYPE_ID = 50025
 _UIA_THUMB_CONTROL_TYPE_ID = 50027
-_UIA_SCROLLBAR_CONTROL_TYPE_ID = 50028
+# Official UIA ids: ScrollBar=50014, DataGrid=50028 (not swapped).
+_UIA_SCROLLBAR_CONTROL_TYPE_ID = 50014
+_UIA_DATAGRID_CONTROL_TYPE_ID = 50028
 _UIA_DATAITEM_CONTROL_TYPE_ID = 50029
 _UIA_DOCUMENT_CONTROL_TYPE_ID = 50030
 _UIA_SPLITBUTTON_CONTROL_TYPE_ID = 50031
@@ -569,6 +571,7 @@ def control_type_token_from_id(control_type_id: int | None) -> str:
         _UIA_TEXT_CONTROL_TYPE_ID: "text",
         _UIA_TREEITEM_CONTROL_TYPE_ID: "tree_item",
         _UIA_DATAITEM_CONTROL_TYPE_ID: "data_item",
+        _UIA_DATAGRID_CONTROL_TYPE_ID: "data_grid",
         _UIA_SPLITBUTTON_CONTROL_TYPE_ID: "split_button",
         _UIA_HEADER_CONTROL_TYPE_ID: "header",
         _UIA_HEADERITEM_CONTROL_TYPE_ID: "header_item",
@@ -5299,9 +5302,12 @@ def control_type_id_from_token(token: str | None) -> int | None:
         "tab_item": _UIA_TABITEM_CONTROL_TYPE_ID,
         "tree_item": _UIA_TREEITEM_CONTROL_TYPE_ID,
         "data_item": _UIA_DATAITEM_CONTROL_TYPE_ID,
+        "data_grid": _UIA_DATAGRID_CONTROL_TYPE_ID,
         "split_button": _UIA_SPLITBUTTON_CONTROL_TYPE_ID,
         "header": _UIA_HEADER_CONTROL_TYPE_ID,
         "header_item": _UIA_HEADERITEM_CONTROL_TYPE_ID,
+        "scrollbar": _UIA_SCROLLBAR_CONTROL_TYPE_ID,
+        "thumb": _UIA_THUMB_CONTROL_TYPE_ID,
     }.get(key)
 
 

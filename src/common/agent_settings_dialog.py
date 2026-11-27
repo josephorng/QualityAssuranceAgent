@@ -14,9 +14,13 @@ from src.common.monitor_prompt import (
 )
 from src.common.settings import (
     BACKEND_PRESETS,
+    UIA_ELEMENT_FROM_POINT_TIMEOUT_S_DEFAULT,
+    UIA_ELEMENT_FROM_POINT_TIMEOUT_S_MAX,
+    UIA_ELEMENT_FROM_POINT_TIMEOUT_S_MIN,
     VISION_BACKEND_PRESETS,
     canonicalize_llm_backend,
     canonicalize_vision_backend,
+    clamp_uia_element_from_point_timeout_s,
     default_uia_findall_settings,
     load_agent_settings_dict,
     preset_for_backend,
@@ -138,8 +142,15 @@ def open_agent_settings_dialog(
     tab_agent = tabs.add("代理設定")
     tab_script = tabs.add("腳本編輯器")
     tab_monitor = tabs.add("螢幕畫面")
+    tab_uia = tabs.add("UIA")
     backend_var = ctk.StringVar(value=_backend_to_label(backend_initial))
     vision_var = ctk.StringVar(value=_vision_backend_to_label(vision_initial))
+    initial_efp_timeout = clamp_uia_element_from_point_timeout_s(
+        initial.get(
+            "uia_element_from_point_timeout_s",
+            UIA_ELEMENT_FROM_POINT_TIMEOUT_S_DEFAULT,
+        )
+    )
 
     # ── Tab: 代理設定 ───────────────────────────────────────────────
     backend_row = ctk.CTkFrame(tab_agent, fg_color="transparent")
@@ -348,6 +359,52 @@ def open_agent_settings_dialog(
         text_color=("gray30", "gray70"),
     ).pack(anchor="w", pady=(4, 0))
 
+    # ── Tab: UIA ────────────────────────────────────────────────────
+    ctk.CTkLabel(
+        tab_uia,
+        text="調整錄製時 ElementFromPoint（EFP）探測的最長等待時間。",
+        font=ctk.CTkFont(size=12),
+        text_color=("gray30", "gray70"),
+    ).pack(anchor="w", pady=(8, 10))
+
+    efp_row = ctk.CTkFrame(tab_uia, fg_color="transparent")
+    efp_row.pack(fill="x", pady=(0, 10))
+    ctk.CTkLabel(efp_row, text="EFP 逾時", width=120, anchor="w").pack(side="left")
+    efp_value_label = ctk.CTkLabel(
+        efp_row,
+        text=f"{int(round(initial_efp_timeout))} 秒",
+        width=56,
+        anchor="e",
+    )
+    efp_value_label.pack(side="right")
+
+    def _apply_efp_timeout_preview(value: float) -> None:
+        seconds = int(round(clamp_uia_element_from_point_timeout_s(value)))
+        efp_value_label.configure(text=f"{seconds} 秒")
+
+    efp_timeout_steps = int(
+        round(
+            UIA_ELEMENT_FROM_POINT_TIMEOUT_S_MAX
+            - UIA_ELEMENT_FROM_POINT_TIMEOUT_S_MIN
+        )
+    )
+    efp_slider = ctk.CTkSlider(
+        efp_row,
+        from_=UIA_ELEMENT_FROM_POINT_TIMEOUT_S_MIN,
+        to=UIA_ELEMENT_FROM_POINT_TIMEOUT_S_MAX,
+        number_of_steps=max(1, efp_timeout_steps),
+        command=_apply_efp_timeout_preview,
+    )
+    efp_slider.set(initial_efp_timeout)
+    efp_slider.pack(side="left", fill="x", expand=True, padx=(0, 10))
+
+    ctk.CTkLabel(
+        tab_uia,
+        text="影響閒置 LED 與按下時的 EFP 探測。儲存後立即生效。",
+        font=ctk.CTkFont(size=12),
+        text_color=("gray30", "gray70"),
+    ).pack(anchor="w", pady=(4, 0))
+
     btn_row = ctk.CTkFrame(inner, fg_color="transparent")
     btn_row.pack(fill="x")
 
@@ -369,6 +426,9 @@ def open_agent_settings_dialog(
             findall_defaults = default_uia_findall_settings()
             for key, default in findall_defaults.items():
                 payload[key] = initial.get(key, default)
+            payload["uia_element_from_point_timeout_s"] = (
+                clamp_uia_element_from_point_timeout_s(efp_slider.get())
+            )
             validated = validate_agent_settings_dict(payload)
             save_agent_settings_dict(validated)
         except ValueError as e:

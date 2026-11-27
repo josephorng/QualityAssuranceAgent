@@ -24,6 +24,7 @@ AGENT_SETTINGS_KEYS = (
     "uia_findall_hover_max_hits",
     "uia_findall_hover_max_nodes",
     "uia_findall_hover_roi_half_px",
+    "uia_element_from_point_timeout_s",
 )
 
 # FindAll density knobs stay in AGENT_SETTINGS_KEYS / defaults for replay walks,
@@ -56,6 +57,10 @@ UIA_FINDALL_HOVER_MAX_NODES_MAX = 10_000
 UIA_FINDALL_HOVER_ROI_HALF_PX_DEFAULT = 400
 UIA_FINDALL_HOVER_ROI_HALF_PX_MIN = 50
 UIA_FINDALL_HOVER_ROI_HALF_PX_MAX = 2000
+# Idle/press ElementFromPoint Name/Value probe wait (agent_settings.json).
+UIA_ELEMENT_FROM_POINT_TIMEOUT_S_DEFAULT = 10.0
+UIA_ELEMENT_FROM_POINT_TIMEOUT_S_MIN = 1.0
+UIA_ELEMENT_FROM_POINT_TIMEOUT_S_MAX = 60.0
 _UIA_FINDALL_NUMERIC_KEYS = frozenset(
     {
         "uia_findall_max_seconds",
@@ -66,6 +71,9 @@ _UIA_FINDALL_NUMERIC_KEYS = frozenset(
         "uia_findall_hover_max_nodes",
         "uia_findall_hover_roi_half_px",
     }
+)
+_UIA_NUMERIC_KEYS = _UIA_FINDALL_NUMERIC_KEYS | frozenset(
+    {"uia_element_from_point_timeout_s"}
 )
 
 # One-click FindAll 走訪 tab scenarios (fill settle + hover fields).
@@ -413,6 +421,19 @@ def clamp_uia_findall_hover_roi_half_px(value: Any) -> int:
     )
 
 
+def clamp_uia_element_from_point_timeout_s(value: Any) -> float:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        seconds = float(UIA_ELEMENT_FROM_POINT_TIMEOUT_S_DEFAULT)
+    if seconds != seconds:  # NaN
+        seconds = float(UIA_ELEMENT_FROM_POINT_TIMEOUT_S_DEFAULT)
+    return max(
+        float(UIA_ELEMENT_FROM_POINT_TIMEOUT_S_MIN),
+        min(float(UIA_ELEMENT_FROM_POINT_TIMEOUT_S_MAX), float(seconds)),
+    )
+
+
 def default_uia_findall_settings() -> dict[str, Any]:
     return {
         "uia_findall_max_seconds": float(UIA_FINDALL_MAX_SECONDS_DEFAULT),
@@ -422,6 +443,14 @@ def default_uia_findall_settings() -> dict[str, Any]:
         "uia_findall_hover_max_hits": int(UIA_FINDALL_HOVER_MAX_HITS_DEFAULT),
         "uia_findall_hover_max_nodes": int(UIA_FINDALL_HOVER_MAX_NODES_DEFAULT),
         "uia_findall_hover_roi_half_px": int(UIA_FINDALL_HOVER_ROI_HALF_PX_DEFAULT),
+    }
+
+
+def default_uia_element_from_point_settings() -> dict[str, Any]:
+    return {
+        "uia_element_from_point_timeout_s": float(
+            UIA_ELEMENT_FROM_POINT_TIMEOUT_S_DEFAULT
+        ),
     }
 
 
@@ -461,6 +490,7 @@ def default_agent_settings_dict() -> dict[str, Any]:
     data["vision_backend"] = base.vision_backend
     data["triton_http_url"] = preset_for_vision_backend(base.vision_backend)["triton_http_url"]
     data.update(default_uia_findall_settings())
+    data.update(default_uia_element_from_point_settings())
     return data
 
 
@@ -488,7 +518,7 @@ def _overlay_agent_keys(target: dict[str, Any], raw: Any) -> dict[str, Any]:
         if key in ("llm_backend", "brain_lm", "ollama_host", "vision_backend", "triton_http_url"):
             if isinstance(value, str) and value.strip():
                 out[key] = value.strip()
-        elif key in _UIA_FINDALL_NUMERIC_KEYS:
+        elif key in _UIA_NUMERIC_KEYS:
             out[key] = value
     if isinstance(raw, dict):
         legacy_host = raw.get("vllm_host")
@@ -546,6 +576,13 @@ def normalize_agent_settings_dict(data: dict[str, Any]) -> dict[str, Any]:
             defaults["uia_findall_hover_roi_half_px"],
         )
     )
+    efp_defaults = default_uia_element_from_point_settings()
+    out["uia_element_from_point_timeout_s"] = clamp_uia_element_from_point_timeout_s(
+        data.get(
+            "uia_element_from_point_timeout_s",
+            efp_defaults["uia_element_from_point_timeout_s"],
+        )
+    )
     return out
 
 
@@ -568,6 +605,12 @@ def findall_hover_settings() -> dict[str, float | int]:
         "max_nodes": int(data["uia_findall_hover_max_nodes"]),
         "roi_half_px": int(data["uia_findall_hover_roi_half_px"]),
     }
+
+
+def element_from_point_timeout_s() -> float:
+    """Clamped ElementFromPoint probe timeout from agent settings (live read)."""
+    data = load_agent_settings_dict()
+    return float(data["uia_element_from_point_timeout_s"])
 
 
 def vllm_host_responds(host: str, *, timeout_seconds: float = _LLM_PROBE_TIMEOUT_SECONDS) -> bool:

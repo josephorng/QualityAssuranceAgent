@@ -6,6 +6,7 @@ from src.common.settings import (
     apply_startup_vllm_host_probe,
     canonicalize_llm_backend,
     canonicalize_vision_backend,
+    clamp_uia_element_from_point_timeout_s,
     clamp_uia_findall_hover_max_hits,
     clamp_uia_findall_hover_max_nodes,
     clamp_uia_findall_hover_max_seconds,
@@ -15,6 +16,7 @@ from src.common.settings import (
     clamp_uia_findall_max_seconds,
     clamp_uia_findall_scenario_values,
     default_agent_settings_dict,
+    element_from_point_timeout_s,
     findall_hover_settings,
     findall_walk_settings,
     normalize_agent_settings_dict,
@@ -267,6 +269,7 @@ def test_default_agent_settings_include_findall_budgets() -> None:
     assert data["uia_findall_hover_max_hits"] == 120
     assert data["uia_findall_hover_max_nodes"] == 1000
     assert data["uia_findall_hover_roi_half_px"] == 400
+    assert data["uia_element_from_point_timeout_s"] == 10.0
 
 
 def test_normalize_clamps_findall_budgets() -> None:
@@ -321,6 +324,32 @@ def test_clamp_uia_findall_helpers() -> None:
     assert clamp_uia_findall_hover_max_hits(None) == 120
     assert clamp_uia_findall_hover_max_nodes("x") == 1000
     assert clamp_uia_findall_hover_roi_half_px(-1) == 50
+
+
+def test_clamp_uia_element_from_point_timeout_s() -> None:
+    assert clamp_uia_element_from_point_timeout_s("nope") == 10.0
+    assert clamp_uia_element_from_point_timeout_s(0) == 1.0
+    assert clamp_uia_element_from_point_timeout_s(999) == 60.0
+    assert clamp_uia_element_from_point_timeout_s(12.5) == 12.5
+
+
+def test_normalize_clamps_element_from_point_timeout() -> None:
+    out = normalize_agent_settings_dict(
+        {"llm_backend": "vllm_server", "uia_element_from_point_timeout_s": 999}
+    )
+    assert out["uia_element_from_point_timeout_s"] == 60.0
+    out = normalize_agent_settings_dict(
+        {"llm_backend": "vllm_server", "uia_element_from_point_timeout_s": 15}
+    )
+    assert out["uia_element_from_point_timeout_s"] == 15.0
+
+
+def test_element_from_point_timeout_s_reads_defaults(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.common.settings.load_agent_settings_dict",
+        lambda: {"uia_element_from_point_timeout_s": 10.0},
+    )
+    assert element_from_point_timeout_s() == 10.0
 
 
 def test_uia_findall_scenario_presets_within_clamps() -> None:

@@ -185,6 +185,18 @@ _SPARSE_LABELED_TEXT_FLOOR = 8
 # Outer uia_call waits (must cover walk budget; cursor enrich may stack a refetch).
 _SNAPSHOT_UIA_TIMEOUT_S = 5.5
 _SNAPSHOT_UIA_ENRICH_TIMEOUT_S = 15.0
+# Idle/press ElementFromPoint Name/Value probe fallback (agent settings override).
+_ELEMENT_FROM_POINT_TIMEOUT_S = 10.0
+
+
+def _element_from_point_timeout_s() -> float:
+    """Live ElementFromPoint wait from agent settings; module default on failure."""
+    try:
+        from src.common.settings import element_from_point_timeout_s
+
+        return float(element_from_point_timeout_s())
+    except Exception:
+        return float(_ELEMENT_FROM_POINT_TIMEOUT_S)
 # One FindAll snapshot at a time across seed/settle/hover callers.
 _SNAPSHOT_FINDALL_LOCK = threading.Lock()
 # Set while a gated snapshot owns the lock (inner UIA-worker reentry skips).
@@ -1968,7 +1980,7 @@ def element_from_point_name_value(x: int, y: int) -> dict[str, Any]:
             _element_from_point_name_value_impl,
             int(x),
             int(y),
-            timeout_s=2.5,
+            timeout_s=_element_from_point_timeout_s(),
         )
     except Exception:
         return {"element_from_point_s": 0.0}

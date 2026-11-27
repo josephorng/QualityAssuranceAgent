@@ -25,7 +25,9 @@ def test_install_faulthandler_writes_session_start(tmp_path: Path, monkeypatch) 
     assert fault_path.is_file()
     text = fault_path.read_text(encoding="utf-8", errors="replace")
     assert "kind=session_start" in text
-    assert faulthandler.is_enabled()
+    # Windows uses a custom VEH instead of faulthandler.enable().
+    if os.name != "nt":
+        assert faulthandler.is_enabled()
 
     main_mod._fault_heartbeat_stop.set()
 
@@ -41,6 +43,9 @@ def test_nonfatal_com_exception_codes_cover_cantcallout() -> None:
     assert 0xC0020015 in main_mod._NONFATAL_COM_EXCEPTION_CODES
     # Breakpoint SEH while UIA hits an app that is still launching.
     assert 0x80000003 in main_mod._NONFATAL_COM_EXCEPTION_CODES
+    # Real fatals are dumped; COM codes must not share that set.
+    assert 0xC00000FD in main_mod._FATAL_WINDOWS_EXCEPTION_CODES
+    assert 0x8001010D not in main_mod._FATAL_WINDOWS_EXCEPTION_CODES
 
 
 def test_advance_past_breakpoint_bumps_instruction_pointer() -> None:

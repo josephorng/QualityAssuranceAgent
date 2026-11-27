@@ -48,15 +48,20 @@ _FAULT_HEARTBEAT_INTERVAL_S = 60.0
 _fault_log_path_active: Path | None = None
 _fault_heartbeat_stop = threading.Event()
 
-# faulthandler dumps every Windows SEH with the error bit set, including
-# transient COM/RPC failures raised as first-chance exceptions during UIA.
-# HRESULT forms (0x8001xxxx) and NTSTATUS RPC_NT_* forms (0xC002xxxx) both
-# appear; continuing execution lets the COM call return failure instead of
-# killing the process.
+# Transient COM/RPC failures raised as first-chance SEH during UIA.
+# HRESULT forms (0x8001xxxx) and NTSTATUS RPC_NT_* forms (0xC002xxxx).
 #
-# EXCEPTION_BREAKPOINT (0x80000003) also shows up when UIA talks to an app
-# that is still launching (DebugBreak / provider assert). Without a debugger
-# attached that becomes a fatal dump; skip the int3 and keep recording.
+# These are RaiseException-based: returning EXCEPTION_CONTINUE_EXECUTION
+# re-enters the raise and stack-overflows (seen as many 0x8001010d then
+# "stack overflow" while a target window is still creating). Let structured
+# exception handlers convert them to HRESULT via EXCEPTION_CONTINUE_SEARCH.
+#
+# EXCEPTION_BREAKPOINT (0x80000003) is a real int3; skip it with
+# CONTINUE_EXECUTION after advancing Rip/Eip.
+#
+# On Windows we do not use faulthandler.enable()'s VEH: it dumps every
+# error-bit SEH (including these COM codes) as "Windows fatal exception".
+# Our VEH silences the non-fatal list and dump_traceback's real fatals.
 _RPC_E_CALL_REJECTED = 0x80010001
 _RPC_E_SERVERCALL_RETRYLATER = 0x8001010A
 _RPC_E_CANTCALLOUT_ININPUTSYNCCALL = 0x8001010D
@@ -66,6 +71,13 @@ _RPC_NT_CALL_FAILED_DNE = 0xC0020018
 _RPC_NT_INTERNAL_ERROR = 0xC0020043
 _EXCEPTION_BREAKPOINT = 0x80000003
 _EXCEPTION_NONCONTINUABLE = 0x1
+_EXCEPTION_ACCESS_VIOLATION = 0xC0000005
+_EXCEPTION_ILLEGAL_INSTRUCTION = 0xC000001D
+_EXCEPTION_INT_DIVIDE_BY_ZERO = 0xC0000094
+_EXCEPTION_PRIV_INSTRUCTION = 0xC0000096
+_EXCEPTION_STACK_OVERFLOW = 0xC00000FD
+_STATUS_HEAP_CORRUPTION = 0xC0000374
+_STATUS_STACK_BUFFER_OVERRUN = 0xC0000409
 # AMD64 CONTEXT.Rip / x86 CONTEXT.Eip offsets (winnt.h).
 _CONTEXT_RIP_OFFSET = 0xF8
 _CONTEXT_EIP_OFFSET = 0xB8
@@ -81,11 +93,25 @@ _NONFATAL_COM_EXCEPTION_CODES = frozenset(
         _EXCEPTION_BREAKPOINT,
     }
 )
+_FATAL_WINDOWS_EXCEPTION_CODES = frozenset(
+    {
+        _EXCEPTION_ACCESS_VIOLATION,
+        _EXCEPTION_ILLEGAL_INSTRUCTION,
+        _EXCEPTION_INT_DIVIDE_BY_ZERO,
+        _EXCEPTION_PRIV_INSTRUCTION,
+        _EXCEPTION_STACK_OVERFLOW,
+        _STATUS_HEAP_CORRUPTION,
+        _STATUS_STACK_BUFFER_OVERRUN,
+    }
+)
 _EXCEPTION_CONTINUE_EXECUTION = -1
 _EXCEPTION_CONTINUE_SEARCH = 0
 # Keep the WINFUNCTYPE callback alive for the process lifetime.
 _nonfatal_com_veh_handler: Any = None
 _nonfatal_com_veh_handle: Any = None
+_fault_dump_file: Any = None
+_fault_dump_lock = threading.Lock()
+_fault_dump_in_progress = False
 
 
 def _advance_past_breakpoint(context_addr: int) -> None:
@@ -100,12 +126,39 @@ def _advance_past_breakpoint(context_addr: int) -> None:
         eip.value += 1
 
 
-def _install_nonfatal_com_veh() -> None:
-    """Swallow known non-fatal COM SEH so faulthandler does not dump them.
+def _dump_windows_fatal(code: int) -> None:
+    """Write a faulthandler-style dump for real fatals (not transient COM SEH)."""
+    global _fault_dump_in_progress
+    fault_file = _fault_dump_file
+    if fault_file is None:
+        return
+    with _fault_dump_lock:
+        if _fault_dump_in_progress:
+            return
+        _fault_dump_in_progress = True
+    try:
+        try:
+            fault_file.write(f"Windows fatal exception: code 0x{code:08x}\n")
+            fault_file.flush()
+        except OSError:
+            pass
+        try:
+            faulthandler.dump_traceback(file=fault_file, all_threads=True)
+        except Exception:
+            pass
+    finally:
+        _fault_dump_in_progress = False
 
-    Registered after ``faulthandler.enable`` so this handler runs first
-    (VEH is LIFO). Allowlisted codes return ``EXCEPTION_CONTINUE_EXECUTION``
-    and never reach faulthandler; real fatals fall through.
+
+def _install_nonfatal_com_veh() -> None:
+    """Windows VEH: silence transient COM SEH; dump only real fatals.
+
+    COM allowlist codes use ``EXCEPTION_CONTINUE_SEARCH`` so ole32 can turn
+    ``RaiseException(hr)`` into a failed HRESULT. ``CONTINUE_EXECUTION`` on
+    those codes re-raises until stack overflow.
+
+    Breakpoints skip the int3 via ``CONTINUE_EXECUTION``. Fatals call
+    ``faulthandler.dump_traceback`` then continue the search.
     """
     global _nonfatal_com_veh_handler, _nonfatal_com_veh_handle
     if os.name != "nt":
@@ -142,15 +195,18 @@ def _install_nonfatal_com_veh() -> None:
             if not record:
                 return _EXCEPTION_CONTINUE_SEARCH
             flags = int(record.contents.ExceptionFlags) & 0xFFFFFFFF
-            if flags & _EXCEPTION_NONCONTINUABLE:
-                return _EXCEPTION_CONTINUE_SEARCH
             code = int(record.contents.ExceptionCode) & 0xFFFFFFFF
-            if code not in _NONFATAL_COM_EXCEPTION_CODES:
-                return _EXCEPTION_CONTINUE_SEARCH
             if code == _EXCEPTION_BREAKPOINT:
+                if flags & _EXCEPTION_NONCONTINUABLE:
+                    return _EXCEPTION_CONTINUE_SEARCH
                 ctx = exc_info.contents.ContextRecord
                 _advance_past_breakpoint(int(ctx) if ctx else 0)
-            return _EXCEPTION_CONTINUE_EXECUTION
+                return _EXCEPTION_CONTINUE_EXECUTION
+            if code in _NONFATAL_COM_EXCEPTION_CODES:
+                # Let frame SEH / COM convert RaiseException → HRESULT.
+                return _EXCEPTION_CONTINUE_SEARCH
+            if code in _FATAL_WINDOWS_EXCEPTION_CODES:
+                _dump_windows_fatal(code)
         except Exception:
             pass
         return _EXCEPTION_CONTINUE_SEARCH
@@ -158,8 +214,6 @@ def _install_nonfatal_com_veh() -> None:
     add_veh = ctypes.windll.kernel32.AddVectoredExceptionHandler
     add_veh.argtypes = [ctypes.c_ulong, handler_type]
     add_veh.restype = ctypes.c_void_p
-    # FirstHandler=1: run before later-registered handlers when possible;
-    # still register after faulthandler.enable so we outrank its VEH.
     handle = add_veh(1, _handler)
     if handle:
         _nonfatal_com_veh_handler = _handler
@@ -193,21 +247,22 @@ def _fault_heartbeat_loop(path: Path) -> None:
 def _install_faulthandler() -> None:
     """Dump native / fatal-error traces (segfaults bypass sys.excepthook).
 
-    Windows SEH dumps from faulthandler have no timestamps of their own, so we
-    write a session banner at enable time and a heartbeat every
-    ``_FAULT_HEARTBEAT_INTERVAL_S`` seconds. Correlate a dump with the nearest
-    preceding/following ``kind=heartbeat`` / ``kind=session_start`` marker.
+    On Windows, skip ``faulthandler.enable`` (its VEH treats transient COM
+    SEH as fatal dumps). A custom VEH silences those and dumps real fatals.
+    Elsewhere, use faulthandler as usual. Session banner + heartbeat bracket
+    dumps that have no timestamps of their own.
     """
-    global _fault_log_path_active
+    global _fault_log_path_active, _fault_dump_file
     candidates = [_fault_log_path(), Path(tempfile.gettempdir()) / FAULT_LOG_FILENAME]
     for path in candidates:
         try:
-            # Keep the handle open for the process lifetime; faulthandler needs it.
+            # Keep the handle open for the process lifetime; dumps need it.
             fault_file = open(path, "a", encoding="utf-8", errors="replace")
-            faulthandler.enable(file=fault_file, all_threads=True)
-            # After faulthandler's VEH so ours runs first (LIFO) and can
-            # suppress known non-fatal COM codes before they are dumped.
-            _install_nonfatal_com_veh()
+            _fault_dump_file = fault_file
+            if os.name == "nt":
+                _install_nonfatal_com_veh()
+            else:
+                faulthandler.enable(file=fault_file, all_threads=True)
             _fault_log_path_active = path
             _write_fault_marker(
                 path,

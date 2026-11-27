@@ -150,7 +150,7 @@ async def test_drag_pins_scrollbar_track_percent_to_start_scrollbar(
         lambda *_a, **_k: 42,
     )
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes.find_uia_scrollbar_thumb_center",
+        "src.recorder.uia_probe.find_uia_scrollbar_thumb_center",
         lambda *_a, **_k: live_thumb,
     )
     monkeypatch.setattr(
@@ -223,7 +223,7 @@ async def test_drag_scrollbar_start_falls_back_to_track_percent_without_thumb(
         lambda *_a, **_k: 7,
     )
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes.find_uia_scrollbar_thumb_center",
+        "src.recorder.uia_probe.find_uia_scrollbar_thumb_center",
         lambda *_a, **_k: None,
     )
     monkeypatch.setattr(
@@ -565,7 +565,7 @@ async def test_drag_scrollbar_start_uses_pixel_thumb_when_uia_misses(
         lambda *_a, **_k: 9,
     )
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes.find_uia_scrollbar_thumb_center",
+        "src.recorder.uia_probe.find_uia_scrollbar_thumb_center",
         lambda *_a, **_k: None,
     )
     monkeypatch.setattr(

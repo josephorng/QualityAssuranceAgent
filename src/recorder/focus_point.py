@@ -348,7 +348,7 @@ def sample_focused_element() -> dict | None:
     ``automation_id``. Returns ``None`` when UIA focus is unavailable.
     """
     try:
-        from src.recorder.uia_input_boxes import uia_focused_element_snapshot
+        from src.recorder.uia_probe import uia_focused_element_snapshot
 
         payload = uia_focused_element_snapshot()
     except Exception:

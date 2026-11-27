@@ -1,8 +1,8 @@
-"""Unit tests for UIA input/scrollbar/text refine geometry and prefer-UIA policy."""
+"""Unit tests for ``src.recorder.uia_probe`` (EFP, walks, inputs/scrollbars)."""
 
 from __future__ import annotations
 
-from src.recorder.uia_input_boxes import (
+from src.recorder.uia_probe import (
     UIA_CONTROL_TYPE_SUFFIX,
     _LABELED_TEXT_CONTROL_TYPES,
     _UIA_BUTTON_CONTROL_TYPE_ID,
@@ -33,6 +33,7 @@ from src.recorder.uia_input_boxes import (
     efp_payload_is_scrollbar_part,
     efp_payload_is_usable_labeled_leaf,
     efp_payload_opens_uia_hub,
+    select_efp_point_child_promotee,
     filter_uia_input_rects,
     filter_uia_scrollbar_rects,
     control_type_id_from_token,
@@ -108,7 +109,7 @@ def test_findall_build_cache_slot_and_timing_helpers() -> None:
     assert _UIA_FIND_FIRST == 5
     assert _UIA_CREATE_AND_CONDITION == 25
     with bind_findall_timing() as samples:
-        from src.recorder.uia_input_boxes import _note_findall_timing
+        from src.recorder.uia_probe import _note_findall_timing
 
         _note_findall_timing(elapsed_s=0.125, count=12)
         _note_findall_timing(elapsed_s=0.05, count=3)
@@ -166,7 +167,7 @@ def test_find_uia_data_item_by_name_value_uses_findall_filter(
     monkeypatch,
 ) -> None:
     """Non-empty value → FindAll Name hits, then unique Value post-filter."""
-    import src.recorder.uia_input_boxes as uia_mod
+    import src.recorder.uia_probe as uia_mod
 
     monkeypatch.setattr(uia_mod, "os", type("O", (), {"name": "nt"})())
 
@@ -201,7 +202,7 @@ def test_bring_uia_named_element_into_view_marshals_impl_result(
     monkeypatch,
 ) -> None:
     """Public API returns the worker-thread refreshed bbox tuple unchanged."""
-    import src.recorder.uia_input_boxes as uia_mod
+    import src.recorder.uia_probe as uia_mod
 
     monkeypatch.setattr(uia_mod, "os", type("O", (), {"name": "nt"})())
     expected = ((228, 108, 125, 24), "龜速的網域 (3)", "1", "tree_item")
@@ -231,7 +232,7 @@ def test_bring_uia_named_element_into_view_impl_zero_size_scrolls(
     """Zero-size Name hit stays eligible; ScrollIntoView then positive bbox."""
     import ctypes
 
-    import src.recorder.uia_input_boxes as uia_mod
+    import src.recorder.uia_probe as uia_mod
 
     class _FakeOle:
         def CoUninitialize(self) -> None:
@@ -352,7 +353,7 @@ def test_bring_uia_named_element_into_view_impl_still_zero_after_scroll(
     """If bbox stays non-positive after scroll/focus, return None."""
     import ctypes
 
-    import src.recorder.uia_input_boxes as uia_mod
+    import src.recorder.uia_probe as uia_mod
 
     class _FakeOle:
         def CoUninitialize(self) -> None:
@@ -504,11 +505,11 @@ def test_snapshot_uia_screen_refetch_on_efp_cover_miss(monkeypatch) -> None:
         }
 
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes._snapshot_uia_screen_impl",
+        "src.recorder.uia_probe._snapshot_uia_screen_impl",
         _impl,
     )
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes._element_from_point_name_value_impl",
+        "src.recorder.uia_probe._element_from_point_name_value_impl",
         lambda x, y: {
             "element_from_point_s": 0.01,
             "name": "龜速的網域 (3)",
@@ -521,7 +522,7 @@ def test_snapshot_uia_screen_refetch_on_efp_cover_miss(monkeypatch) -> None:
     class _OsStub:
         name = "nt"
 
-    monkeypatch.setattr("src.recorder.uia_input_boxes.os", _OsStub())
+    monkeypatch.setattr("src.recorder.uia_probe.os", _OsStub())
     snap = snapshot_uia_screen(99, cursor_xy=(150, 110))
     assert snap is not None
     assert snap.get("findall_refetch") == 1
@@ -550,11 +551,11 @@ def test_snapshot_uia_screen_refetch_miss_stays_without_efp_scan(monkeypatch) ->
         }
 
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes._snapshot_uia_screen_impl",
+        "src.recorder.uia_probe._snapshot_uia_screen_impl",
         _impl,
     )
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes._element_from_point_name_value_impl",
+        "src.recorder.uia_probe._element_from_point_name_value_impl",
         lambda x, y: {
             "element_from_point_s": 0.01,
             "name": "龜速的網域 (3)",
@@ -567,7 +568,7 @@ def test_snapshot_uia_screen_refetch_miss_stays_without_efp_scan(monkeypatch) ->
     class _OsStub:
         name = "nt"
 
-    monkeypatch.setattr("src.recorder.uia_input_boxes.os", _OsStub())
+    monkeypatch.setattr("src.recorder.uia_probe.os", _OsStub())
     snap = snapshot_uia_screen(99, cursor_xy=(150, 110))
     assert snap is not None
     assert snap.get("findall_refetch") == 1
@@ -579,7 +580,7 @@ def test_snapshot_uia_screen_refetch_miss_stays_without_efp_scan(monkeypatch) ->
 
 def test_snapshot_uia_screen_keeps_expanded_labeled_control_types(monkeypatch) -> None:
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes.enumerate_edit_document_scrollbar_screen",
+        "src.recorder.uia_probe.enumerate_edit_document_scrollbar_screen",
         lambda hwnd, **_kwargs: (
             [],
             [],
@@ -592,14 +593,14 @@ def test_snapshot_uia_screen_keeps_expanded_labeled_control_types(monkeypatch) -
         ),
     )
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes._window_screen_xywh",
+        "src.recorder.uia_probe._window_screen_xywh",
         lambda hwnd: (0, 0, 100, 100),
     )
 
     class _OsStub:
         name = "nt"
 
-    monkeypatch.setattr("src.recorder.uia_input_boxes.os", _OsStub())
+    monkeypatch.setattr("src.recorder.uia_probe.os", _OsStub())
     snap = snapshot_uia_screen(123)
     assert snap is not None
     assert snap["texts"] == [
@@ -620,7 +621,7 @@ def test_snapshot_uia_screen_keeps_expanded_labeled_control_types(monkeypatch) -
 
 
 def test_uia_hr_is_retryable_for_transient_com_codes() -> None:
-    from src.recorder.uia_input_boxes import (
+    from src.recorder.uia_probe import (
         _RPC_E_CALL_REJECTED,
         _RPC_E_CANTCALLOUT_ININPUTSYNCCALL,
         _RPC_E_SERVERCALL_RETRYLATER,
@@ -640,7 +641,7 @@ def test_uia_hr_is_retryable_for_transient_com_codes() -> None:
 
 
 def test_call_element_from_point_with_retry_recovers_after_cantcallout() -> None:
-    from src.recorder.uia_input_boxes import (
+    from src.recorder.uia_probe import (
         _RPC_E_CANTCALLOUT_ININPUTSYNCCALL,
         _S_OK,
         _call_element_from_point_with_retry,
@@ -665,7 +666,7 @@ def test_call_element_from_point_with_retry_recovers_after_cantcallout() -> None
 
 
 def test_call_element_from_point_with_retry_gives_up_after_max_attempts() -> None:
-    from src.recorder.uia_input_boxes import (
+    from src.recorder.uia_probe import (
         _RPC_E_SERVERCALL_RETRYLATER,
         _call_element_from_point_with_retry,
     )
@@ -689,7 +690,7 @@ def test_call_element_from_point_with_retry_gives_up_after_max_attempts() -> Non
 
 
 def test_call_element_from_point_with_retry_skips_non_retryable() -> None:
-    from src.recorder.uia_input_boxes import _call_element_from_point_with_retry
+    from src.recorder.uia_probe import _call_element_from_point_with_retry
 
     calls = {"n": 0}
 
@@ -704,7 +705,7 @@ def test_call_element_from_point_with_retry_skips_non_retryable() -> None:
 
 def test_element_from_point_name_value_extracts_raw_strings(monkeypatch) -> None:
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes._element_from_point_name_value_impl",
+        "src.recorder.uia_probe._element_from_point_name_value_impl",
         lambda x, y: {
             "element_from_point_s": 0.01,
             "name": "展開",
@@ -734,7 +735,7 @@ def test_element_from_point_name_value_extracts_raw_strings(monkeypatch) -> None
 
 def test_element_from_point_name_value_keeps_timing_when_empty(monkeypatch) -> None:
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes._element_from_point_name_value_impl",
+        "src.recorder.uia_probe._element_from_point_name_value_impl",
         lambda x, y: {"element_from_point_s": 0.02},
     )
     payload = element_from_point_name_value(1, 2)
@@ -748,7 +749,7 @@ def test_element_from_point_name_value_keeps_timing_when_empty(monkeypatch) -> N
 
 
 def test_parent_signature_usable_and_agree() -> None:
-    from src.recorder.uia_input_boxes import (
+    from src.recorder.uia_probe import (
         format_parents_chain_compact,
         parent_signature_usable,
         parent_signatures_agree,
@@ -931,7 +932,7 @@ def test_filter_uia_input_rects_drops_edge_sliver_from_wrong_monitor() -> None:
 
 
 def test_filter_uia_input_rects_drops_fully_off_and_intersects_partial() -> None:
-    from src.recorder.uia_input_boxes import filter_uia_labeled_text_rects
+    from src.recorder.uia_probe import filter_uia_labeled_text_rects
 
     window = (0, 0, 1920, 1080)
     boxes = filter_uia_input_rects(
@@ -965,7 +966,7 @@ def test_filter_uia_input_rects_drops_fully_off_and_intersects_partial() -> None
 
 
 def test_is_clipped_uia_sliver_keeps_uncropped_small_box() -> None:
-    from src.recorder.uia_input_boxes import _is_clipped_uia_sliver
+    from src.recorder.uia_probe import _is_clipped_uia_sliver
 
     assert (
         _is_clipped_uia_sliver(orig_w=2, orig_h=16, clipped_w=2, clipped_h=16) is False
@@ -1029,7 +1030,7 @@ def test_split_uia_name_value_label() -> None:
 
 
 def test_resolve_usable_uia_probe_label_combines_name_and_value() -> None:
-    from src.recorder.uia_input_boxes import resolve_usable_uia_probe_label
+    from src.recorder.uia_probe import resolve_usable_uia_probe_label
 
     assert (
         resolve_usable_uia_probe_label(preferred="1", name="自訂勾選", value="1")
@@ -1073,7 +1074,7 @@ def test_canonicalize_uia_shell_status_label_strips_taskbar_tails() -> None:
     assert uia_label_prefer_value("Excel - 已釘選", "name") == "Excel"
     assert is_usable_uia_landmark_label("Excel - 已釘選") is True
     assert is_usable_uia_landmark_label("（已釘選）") is False
-    from src.recorder.uia_input_boxes import is_weak_efp_hub_label
+    from src.recorder.uia_probe import is_weak_efp_hub_label
 
     assert is_weak_efp_hub_label("CoreInput") is True
     assert is_weak_efp_hub_label("Windows.UI.Core.CoreWindow") is True
@@ -1082,7 +1083,7 @@ def test_canonicalize_uia_shell_status_label_strips_taskbar_tails() -> None:
 
 
 def test_uia_snapshot_image_local_strips_shell_status_from_old_texts() -> None:
-    from src.recorder.uia_input_boxes import uia_snapshot_image_local
+    from src.recorder.uia_probe import uia_snapshot_image_local
 
     _inputs, _scrollbars, texts = uia_snapshot_image_local(
         {
@@ -1105,7 +1106,7 @@ def test_uia_snapshot_image_local_strips_shell_status_from_old_texts() -> None:
 
 
 def test_match_scrollbar_thumb_center_picks_aligned_shorter_thumb() -> None:
-    from src.recorder.uia_input_boxes import match_scrollbar_thumb_center
+    from src.recorder.uia_probe import match_scrollbar_thumb_center
 
     # Vertical bar at x=900; live thumb mid-track.
     bar = (900, 160, 16, 840)
@@ -1117,7 +1118,7 @@ def test_match_scrollbar_thumb_center_picks_aligned_shorter_thumb() -> None:
 
 
 def test_match_scrollbar_thumb_center_rejects_edge_clip_only() -> None:
-    from src.recorder.uia_input_boxes import match_scrollbar_thumb_center
+    from src.recorder.uia_probe import match_scrollbar_thumb_center
 
     bar = (900, 160, 16, 840)
     # Only clips the right edge of the bar column.
@@ -1126,7 +1127,7 @@ def test_match_scrollbar_thumb_center_rejects_edge_clip_only() -> None:
 
 
 def test_scrollbar_thumb_unions_same_line_arrow_buttons() -> None:
-    from src.recorder.uia_input_boxes import compose_scrollbar_screen_rects
+    from src.recorder.uia_probe import compose_scrollbar_screen_rects
 
     thumb = (900, 400, 916, 520)
     up = (900, 160, 916, 176)
@@ -1138,7 +1139,7 @@ def test_scrollbar_thumb_unions_same_line_arrow_buttons() -> None:
 
 
 def test_scrollbar_thumb_alone_is_a_scrollbar() -> None:
-    from src.recorder.uia_input_boxes import compose_scrollbar_screen_rects
+    from src.recorder.uia_probe import compose_scrollbar_screen_rects
 
     thumb = (900, 400, 916, 520)
     rects, used = compose_scrollbar_screen_rects([], [thumb], [])
@@ -1147,7 +1148,7 @@ def test_scrollbar_thumb_alone_is_a_scrollbar() -> None:
 
 
 def test_scrollbar_thumb_ignores_button_that_only_clips_the_edge() -> None:
-    from src.recorder.uia_input_boxes import compose_scrollbar_screen_rects
+    from src.recorder.uia_probe import compose_scrollbar_screen_rects
 
     thumb = (900, 400, 916, 520)
     clipped = (910, 160, 940, 176)
@@ -1157,7 +1158,7 @@ def test_scrollbar_thumb_ignores_button_that_only_clips_the_edge() -> None:
 
 
 def test_scrollbar_thumbs_keep_separate_columns() -> None:
-    from src.recorder.uia_input_boxes import compose_scrollbar_screen_rects
+    from src.recorder.uia_probe import compose_scrollbar_screen_rects
 
     left_thumb = (100, 400, 116, 520)
     right_thumb = (400, 400, 416, 520)
@@ -1173,7 +1174,7 @@ def test_scrollbar_thumbs_keep_separate_columns() -> None:
 
 
 def test_scrollbar_thumb_inside_control_is_not_added_again() -> None:
-    from src.recorder.uia_input_boxes import compose_scrollbar_screen_rects
+    from src.recorder.uia_probe import compose_scrollbar_screen_rects
 
     control = (890, 150, 920, 1000)
     thumb = (900, 400, 916, 520)
@@ -1185,7 +1186,7 @@ def test_scrollbar_thumb_inside_control_is_not_added_again() -> None:
 
 
 def test_scrollbar_thumb_inside_huge_control_is_kept() -> None:
-    from src.recorder.uia_input_boxes import compose_scrollbar_screen_rects
+    from src.recorder.uia_probe import compose_scrollbar_screen_rects
 
     window_sized = (0, 0, 800, 900)
     thumb = (780, 400, 796, 520)
@@ -1196,7 +1197,7 @@ def test_scrollbar_thumb_inside_huge_control_is_kept() -> None:
 
 def test_winforms_position_thumb_unions_line_up_down_by_name_gates() -> None:
     """Name gates accept Position + Line up/down; compose unions same column."""
-    from src.recorder.uia_input_boxes import (
+    from src.recorder.uia_probe import (
         compose_scrollbar_screen_rects,
         is_uia_scrollbar_line_button_part,
         is_uia_scrollbar_thumb_part,
@@ -1229,7 +1230,7 @@ def test_winforms_position_thumb_unions_line_up_down_by_name_gates() -> None:
 
 
 def test_line_up_without_thumb_does_not_create_scrollbar() -> None:
-    from src.recorder.uia_input_boxes import compose_scrollbar_screen_rects
+    from src.recorder.uia_probe import compose_scrollbar_screen_rects
 
     line_up = (2289, 137, 2312, 163)
     line_down = (2289, 579, 2312, 605)
@@ -1239,7 +1240,7 @@ def test_line_up_without_thumb_does_not_create_scrollbar() -> None:
 
 
 def test_labeled_text_control_types_include_interactive_items() -> None:
-    from src.recorder import uia_input_boxes as uia
+    from src.recorder import uia_probe as uia
 
     assert uia._UIA_BUTTON_CONTROL_TYPE_ID in uia._LABELED_TEXT_CONTROL_TYPES
     assert uia._UIA_MENUITEM_CONTROL_TYPE_ID in uia._LABELED_TEXT_CONTROL_TYPES
@@ -1253,7 +1254,7 @@ def test_labeled_text_control_types_include_interactive_items() -> None:
 
 
 def test_efp_payload_is_usable_data_item() -> None:
-    from src.recorder.uia_input_boxes import efp_payload_is_usable_data_item
+    from src.recorder.uia_probe import efp_payload_is_usable_data_item
 
     assert efp_payload_is_usable_data_item(
         {
@@ -1441,8 +1442,165 @@ def test_efp_payload_is_usable_labeled_leaf_allows_input() -> None:
     )
 
 
+def test_select_efp_point_child_promotee_picks_smallest_usable() -> None:
+    large = {
+        "name": "檔案總管",
+        "value": "",
+        "control_type": "list_item",
+        "bbox": [900, 560, 80, 80],
+    }
+    small = {
+        "name": "Launch 檔案總管",
+        "value": "",
+        "control_type": "button",
+        "bbox": [910, 570, 40, 40],
+    }
+    weak = {
+        "name": "CoreInput",
+        "value": "",
+        "control_type": "input",
+        "bbox": [500, 155, 10, 10],
+    }
+    picked = select_efp_point_child_promotee([large, weak, small])
+    assert picked is not None
+    assert picked["name"] == "Launch 檔案總管"
+    assert picked["bbox"] == [910, 570, 40, 40]
+    assert select_efp_point_child_promotee([weak]) is None
+    assert select_efp_point_child_promotee([]) is None
+    assert select_efp_point_child_promotee(None) is None
+
+
+def test_efp_host_snapshot_and_promoted_payload_open_hub() -> None:
+    from src.recorder.uia_probe import _efp_host_snapshot_from_leaf_payload
+
+    host = {
+        "name": "CoreInput",
+        "value": "",
+        "control_type": "input",
+        "bbox": [500, 155, 832, 864],
+        "parents": [{"name": "搜尋"}],
+    }
+    child = {
+        "name": "Launch 檔案總管",
+        "value": "",
+        "control_type": "list_item",
+        "bbox": [900, 570, 50, 50],
+    }
+    assert not efp_payload_opens_uia_hub(host)
+    snap = _efp_host_snapshot_from_leaf_payload(host)
+    assert snap == {
+        "name": "CoreInput",
+        "value": "",
+        "control_type": "input",
+        "bbox": [500, 155, 832, 864],
+    }
+    promotee = select_efp_point_child_promotee([child])
+    assert promotee is not None
+    assert efp_payload_opens_uia_hub(promotee)
+    # Wire-shaped payload after promote keeps host sidecar.
+    out = dict(promotee)
+    out["efp_host"] = snap
+    out["children"] = [child]
+    assert efp_payload_opens_uia_hub(out)
+    assert out["efp_host"]["name"] == "CoreInput"
+
+
+def test_efp_point_children_and_promote_picks_smallest_from_walk(
+    monkeypatch,
+) -> None:
+    from src.recorder import uia_probe as mod
+
+    large = {
+        "name": "檔案總管",
+        "value": "",
+        "control_type": "list_item",
+        "bbox": [900, 560, 80, 80],
+    }
+    small = {
+        "name": "Launch 檔案總管",
+        "value": "",
+        "control_type": "button",
+        "bbox": [910, 570, 40, 40],
+    }
+    el_large = object()
+    el_small = object()
+    leaf = object()
+    walk_roots: list[object] = []
+    released: list[object] = []
+
+    def _fake_walk(automation, root, x, y, *, budgets=None):
+        walk_roots.append(root)
+        return [(el_large, large), (el_small, small)]
+
+    monkeypatch.setattr(mod, "_walk_efp_point_children", _fake_walk)
+    monkeypatch.setattr(mod, "_com_release", lambda ptr: released.append(ptr))
+    monkeypatch.setattr(mod, "_com_addref", lambda ptr: None)
+
+    promoted, children = mod._efp_point_children_and_promote(None, leaf, 920, 590)
+    assert walk_roots == [leaf]  # usable hit → no parent climb
+    assert promoted is el_small
+    assert children[0]["name"] == "Launch 檔案總管"
+    assert children[1]["name"] == "檔案總管"
+    assert el_large in released and el_small in released
+
+
+def test_efp_point_children_and_promote_climbs_one_parent(monkeypatch) -> None:
+    from src.recorder import uia_probe as mod
+
+    child = {
+        "name": "Launch 檔案總管",
+        "value": "",
+        "control_type": "list_item",
+        "bbox": [900, 570, 50, 50],
+    }
+    leaf = object()
+    parent = object()
+    child_el = object()
+    walk_roots: list[object] = []
+    released: list[object] = []
+
+    def _fake_walk(automation, root, x, y, *, budgets=None):
+        walk_roots.append(root)
+        if root is parent:
+            return [(child_el, child)]
+        return []
+
+    monkeypatch.setattr(mod, "_walk_efp_point_children", _fake_walk)
+    monkeypatch.setattr(mod, "_control_view_parent", lambda _a, _e: parent)
+    monkeypatch.setattr(
+        mod, "_element_bounding_xyxy", lambda _e: (0, 0, 2000, 2000)
+    )
+    monkeypatch.setattr(mod, "_com_release", lambda ptr: released.append(ptr))
+    monkeypatch.setattr(mod, "_com_addref", lambda ptr: None)
+
+    promoted, children = mod._efp_point_children_and_promote(None, leaf, 920, 590)
+    assert walk_roots == [leaf, parent]
+    assert promoted is child_el
+    assert children == [child]
+    assert parent in released
+    assert child_el in released
+
+
+def test_usable_efp_leaf_skips_point_child_drill() -> None:
+    leaf = {
+        "name": "G8",
+        "value": "",
+        "control_type": "data_item",
+        "bbox": [466, 477, 72, 22],
+    }
+    # Impl only drills when opens_uia_hub is false; usable leaves skip.
+    assert efp_payload_opens_uia_hub(leaf) is True
+    assert not efp_payload_opens_uia_hub(
+        {
+            "name": "CoreInput",
+            "control_type": "input",
+            "bbox": [500, 155, 832, 864],
+        }
+    )
+
+
 def test_select_uia_field_clip_picks_smallest_containing_caret() -> None:
-    from src.recorder.uia_input_boxes import select_uia_field_clip_containing_point
+    from src.recorder.uia_probe import select_uia_field_clip_containing_point
 
     caret = (150, 100)
     outer = (50, 50, 400, 200)
@@ -1463,7 +1621,7 @@ def test_select_uia_field_clip_picks_smallest_containing_caret() -> None:
 
 
 def test_select_uia_field_clip_rejects_window_sized_document() -> None:
-    from src.recorder.uia_input_boxes import select_uia_field_clip_containing_point
+    from src.recorder.uia_probe import select_uia_field_clip_containing_point
 
     caret = (400, 300)
     sheet = (0, 0, 800, 600)  # whole window Document
@@ -1479,7 +1637,7 @@ def test_select_uia_field_clip_rejects_window_sized_document() -> None:
 
 
 def test_select_uia_field_clip_includes_focused_edit() -> None:
-    from src.recorder.uia_input_boxes import select_uia_field_clip_containing_point
+    from src.recorder.uia_probe import select_uia_field_clip_containing_point
 
     caret = (120, 90)
     focused = (100, 80, 300, 110)
@@ -1495,7 +1653,7 @@ def test_select_uia_field_clip_includes_focused_edit() -> None:
 
 
 def test_sample_uia_ocr_clip_rect_skips_wide_focus() -> None:
-    from src.recorder.uia_input_boxes import sample_uia_ocr_clip_rect
+    from src.recorder.uia_probe import sample_uia_ocr_clip_rect
 
     calls: list[tuple[int, int]] = []
 
@@ -1522,7 +1680,7 @@ def test_sample_uia_ocr_clip_rect_skips_wide_focus() -> None:
 
 
 def test_walk_visit_score_prefers_near_cursor_and_penalizes_offscreen() -> None:
-    from src.recorder.uia_input_boxes import (
+    from src.recorder.uia_probe import (
         chebyshev_distance_point_to_xyxy,
         walk_visit_score,
     )
@@ -1545,7 +1703,7 @@ def test_walk_visit_score_prefers_near_cursor_and_penalizes_offscreen() -> None:
 
 
 def test_budgeted_priority_walk_stops_on_max_hits_near_cursor_first() -> None:
-    from src.recorder.uia_input_boxes import WalkBudgets, run_budgeted_priority_walk
+    from src.recorder.uia_probe import WalkBudgets, run_budgeted_priority_walk
 
     # Flat siblings under an implicit root: ids 0..4 with bboxes left-to-right.
     boxes = {
@@ -1583,7 +1741,7 @@ def test_budgeted_priority_walk_stops_on_max_hits_near_cursor_first() -> None:
 
 
 def test_budgeted_priority_walk_stops_on_max_nodes() -> None:
-    from src.recorder.uia_input_boxes import WalkBudgets, run_budgeted_priority_walk
+    from src.recorder.uia_probe import WalkBudgets, run_budgeted_priority_walk
 
     boxes = {i: (i * 10, 0, i * 10 + 5, 5) for i in range(10)}
     matched: list[int] = []
@@ -1611,7 +1769,7 @@ def test_budgeted_priority_walk_stops_on_max_nodes() -> None:
 
 
 def test_budgeted_priority_walk_sibling_cap_keeps_nearest_children() -> None:
-    from src.recorder.uia_input_boxes import WalkBudgets, run_budgeted_priority_walk
+    from src.recorder.uia_probe import WalkBudgets, run_budgeted_priority_walk
 
     # Root seed is parent 0; it expands to many children. Cap keeps 2 nearest.
     boxes = {
@@ -1662,7 +1820,7 @@ def test_budgeted_priority_walk_sibling_cap_keeps_nearest_children() -> None:
 
 
 def test_budgeted_priority_walk_stops_on_max_seconds() -> None:
-    from src.recorder.uia_input_boxes import WalkBudgets, run_budgeted_priority_walk
+    from src.recorder.uia_probe import WalkBudgets, run_budgeted_priority_walk
 
     boxes = {i: (i, 0, i + 1, 1) for i in range(5)}
     ticks = {"t": 0.0}
@@ -1711,7 +1869,7 @@ def test_uia_worker_call_runs_and_is_reentrant() -> None:
 
 
 def test_default_walk_budgets_match_short_limits() -> None:
-    from src.recorder.uia_input_boxes import (
+    from src.recorder.uia_probe import (
         WalkBudgets,
         _SNAPSHOT_UIA_ENRICH_TIMEOUT_S,
         _SNAPSHOT_UIA_TIMEOUT_S,
@@ -1726,7 +1884,7 @@ def test_default_walk_budgets_match_short_limits() -> None:
 
 
 def test_default_walk_budgets_reads_agent_settings(monkeypatch) -> None:
-    from src.recorder.uia_input_boxes import default_walk_budgets
+    from src.recorder.uia_probe import default_walk_budgets
 
     monkeypatch.setattr(
         "src.common.settings.findall_walk_settings",
@@ -1739,7 +1897,7 @@ def test_default_walk_budgets_reads_agent_settings(monkeypatch) -> None:
 
 
 def test_hover_walk_budgets_cap_below_settle_settings(monkeypatch) -> None:
-    from src.recorder.uia_input_boxes import hover_walk_budgets
+    from src.recorder.uia_probe import hover_walk_budgets
 
     monkeypatch.setattr(
         "src.common.settings.findall_walk_settings",
@@ -1761,7 +1919,7 @@ def test_hover_walk_budgets_cap_below_settle_settings(monkeypatch) -> None:
 
 
 def test_hover_walk_budgets_respect_lower_settle_settings(monkeypatch) -> None:
-    from src.recorder.uia_input_boxes import hover_walk_budgets
+    from src.recorder.uia_probe import hover_walk_budgets
 
     monkeypatch.setattr(
         "src.common.settings.findall_walk_settings",
@@ -1783,7 +1941,7 @@ def test_hover_walk_budgets_respect_lower_settle_settings(monkeypatch) -> None:
 
 
 def test_hover_walk_budgets_use_hover_settings(monkeypatch) -> None:
-    from src.recorder.uia_input_boxes import hover_cursor_roi_half_px, hover_walk_budgets
+    from src.recorder.uia_probe import hover_cursor_roi_half_px, hover_walk_budgets
 
     monkeypatch.setattr(
         "src.common.settings.findall_walk_settings",
@@ -1806,7 +1964,7 @@ def test_hover_walk_budgets_use_hover_settings(monkeypatch) -> None:
 
 
 def test_cursor_roi_clip_xyxy_clamps_to_root() -> None:
-    from src.recorder.uia_input_boxes import cursor_roi_clip_xyxy
+    from src.recorder.uia_probe import cursor_roi_clip_xyxy
 
     roi = cursor_roi_clip_xyxy(
         (100, 100),
@@ -1817,7 +1975,7 @@ def test_cursor_roi_clip_xyxy_clamps_to_root() -> None:
 
 
 def test_budgeted_priority_walk_skips_children_outside_clip() -> None:
-    from src.recorder.uia_input_boxes import WalkBudgets, run_budgeted_priority_walk
+    from src.recorder.uia_probe import WalkBudgets, run_budgeted_priority_walk
 
     boxes = {
         0: (0, 0, 20, 20),
@@ -1851,7 +2009,7 @@ def test_budgeted_priority_walk_skips_children_outside_clip() -> None:
 
 
 def test_snapshot_uia_hover_subtree_uses_hover_budgets_and_roi(monkeypatch) -> None:
-    from src.recorder import uia_input_boxes as uia
+    from src.recorder import uia_probe as uia
 
     captured: dict = {}
 
@@ -1881,7 +2039,7 @@ def test_snapshot_uia_hover_subtree_uses_hover_budgets_and_roi(monkeypatch) -> N
 
 
 def test_snapshot_uia_timeouts_derived_from_budgets() -> None:
-    from src.recorder.uia_input_boxes import (
+    from src.recorder.uia_probe import (
         WalkBudgets,
         snapshot_uia_timeouts_for_budgets,
     )
@@ -1894,7 +2052,7 @@ def test_snapshot_uia_timeouts_derived_from_budgets() -> None:
 
 
 def test_snapshot_uia_screen_wait_false_skips_when_busy() -> None:
-    from src.recorder import uia_input_boxes as uia
+    from src.recorder import uia_probe as uia
 
     assert uia._SNAPSHOT_FINDALL_LOCK.acquire(blocking=False)
     try:
@@ -1905,8 +2063,8 @@ def test_snapshot_uia_screen_wait_false_skips_when_busy() -> None:
 
 
 def test_uia_text_element_at_point_marshals_impl(monkeypatch) -> None:
-    from src.recorder import uia_input_boxes as uia_mod
-    from src.recorder.uia_input_boxes import (
+    from src.recorder import uia_probe as uia_mod
+    from src.recorder.uia_probe import (
         _uia_text_element_at_point_impl,
         uia_text_element_at_point,
     )
@@ -1927,8 +2085,8 @@ def test_uia_text_element_at_point_marshals_impl(monkeypatch) -> None:
 
 
 def test_uia_focused_element_snapshot_marshals_impl(monkeypatch) -> None:
-    from src.recorder import uia_input_boxes as uia_mod
-    from src.recorder.uia_input_boxes import (
+    from src.recorder import uia_probe as uia_mod
+    from src.recorder.uia_probe import (
         _uia_focused_element_snapshot_impl,
         uia_focused_element_snapshot,
     )
@@ -1949,8 +2107,8 @@ def test_uia_focused_element_snapshot_marshals_impl(monkeypatch) -> None:
 
 
 def test_enumerate_ocr_clip_field_screen_xyxy_marshals_impl(monkeypatch) -> None:
-    from src.recorder import uia_input_boxes as uia_mod
-    from src.recorder.uia_input_boxes import (
+    from src.recorder import uia_probe as uia_mod
+    from src.recorder.uia_probe import (
         _enumerate_ocr_clip_field_screen_xyxy_impl,
         enumerate_ocr_clip_field_screen_xyxy,
     )

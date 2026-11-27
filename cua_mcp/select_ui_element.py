@@ -320,7 +320,7 @@ def _detection_anchor_label(d: UiDetection) -> str:
     if visible:
         suffix = _ANCHOR_SUFFIX_BY_CLASS.get(d.class_name)
         if d.uia_control_type:
-            from src.recorder.uia_input_boxes import UIA_CONTROL_TYPE_SUFFIX
+            from src.recorder.uia_probe import UIA_CONTROL_TYPE_SUFFIX
 
             suffix = UIA_CONTROL_TYPE_SUFFIX.get(d.uia_control_type, suffix)
         if suffix:

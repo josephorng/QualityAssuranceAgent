@@ -925,7 +925,7 @@ def test_detect_empty_uia_scrollbars_keeps_yolo_arrow_pipeline(
         lambda *_a, **_k: [],
     )
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes.list_uia_input_and_scrollbar_boxes_image_local",
+        "src.recorder.uia_probe.list_uia_input_and_scrollbar_boxes_image_local",
         lambda *_a, **_k: ([], [], []),
     )
     create_calls: list[object] = []
@@ -1045,7 +1045,7 @@ def test_detect_live_hwnd_uia_scrollbar_prefer_replace(
         lambda *_a, **_k: [],
     )
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes.list_uia_input_and_scrollbar_boxes_image_local",
+        "src.recorder.uia_probe.list_uia_input_and_scrollbar_boxes_image_local",
         lambda *_a, **_k: ([], [uia_bar], []),
     )
     create_calls: list[object] = []
@@ -5855,7 +5855,7 @@ async def test_find_mouse_point_input_hub_efp_miss_commits_geometry(
     _install_find_mouse_point_fakes(monkeypatch, detections, pick=fake_pick)
     monkeypatch.setattr(smt, "parse_mouse_target_instruction", fake_parse)
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes.uia_text_element_at_point",
+        "src.recorder.uia_probe.uia_text_element_at_point",
         probe_miss,
     )
 
@@ -5915,7 +5915,7 @@ async def test_find_mouse_point_soft_hub_rejects_out_of_bounds_synth(
     _install_find_mouse_point_fakes(monkeypatch, detections, pick=fake_pick)
     monkeypatch.setattr(smt, "parse_mouse_target_instruction", fake_parse)
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes.uia_text_element_at_point",
+        "src.recorder.uia_probe.uia_text_element_at_point",
         probe_miss,
     )
     # Force synth to a known off-screen point regardless of geometry math.
@@ -5975,7 +5975,7 @@ async def test_find_mouse_point_input_hub_efp_hit_prefers_matching_box(
     _install_find_mouse_point_fakes(monkeypatch, detections, pick=fake_pick)
     monkeypatch.setattr(smt, "parse_mouse_target_instruction", fake_parse)
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes.uia_text_element_at_point",
+        "src.recorder.uia_probe.uia_text_element_at_point",
         probe,
     )
     # Keep both inputs in the shortlist so EFP can prefer the far Name match.
@@ -6035,7 +6035,7 @@ async def test_find_mouse_point_efp_leaf_snap_appends_detection(
     _install_find_mouse_point_fakes(monkeypatch, detections, pick=fake_pick)
     monkeypatch.setattr(smt, "parse_mouse_target_instruction", fake_parse)
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes.uia_text_element_at_point",
+        "src.recorder.uia_probe.uia_text_element_at_point",
         probe,
     )
     monkeypatch.setattr(
@@ -6089,7 +6089,7 @@ async def test_find_mouse_point_text_hub_efp_miss_still_hard_fails(
     _install_find_mouse_point_fakes(monkeypatch, detections, pick=fake_pick)
     monkeypatch.setattr(smt, "parse_mouse_target_instruction", fake_parse)
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes.uia_text_element_at_point",
+        "src.recorder.uia_probe.uia_text_element_at_point",
         probe_miss,
     )
 
@@ -6438,7 +6438,7 @@ def test_detect_defer_ocr_skips_recognize_until_finish(
         lambda *_a, **_k: [],
     )
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes.list_uia_input_and_scrollbar_boxes_image_local",
+        "src.recorder.uia_probe.list_uia_input_and_scrollbar_boxes_image_local",
         lambda *_a, **_k: ([], [], []),
     )
     ocr_calls: list[list[tuple[int, int, int, int]]] = []
@@ -7314,7 +7314,7 @@ def test_detect_defer_ocr_icon_retry_only_on_finish(
         lambda *_a, **_k: [],
     )
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes.list_uia_input_and_scrollbar_boxes_image_local",
+        "src.recorder.uia_probe.list_uia_input_and_scrollbar_boxes_image_local",
         lambda *_a, **_k: ([], [], []),
     )
     monkeypatch.setattr(

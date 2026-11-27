@@ -293,7 +293,7 @@ Targeted Name lookup (not a budgeted window walk):
 |------|---------|
 | `src/brain/module.py` | Cache replay bind of repair + twin slots |
 | `src/recorder/uia_replay_repair.py` | `YoloOcrMoveFallback`, twin bind/take, `replay_repair_slots`, `attempt_uia_replay_repair` |
-| `src/recorder/uia_input_boxes.py` | `find_uia_leaf_by_efp_path`, `parents_chains_agree`, `find_uia_data_item_by_name` |
+| `src/recorder/uia_probe.py` | `find_uia_leaf_by_efp_path`, `parents_chains_agree`, `find_uia_data_item_by_name` |
 | `cua_mcp/select_mouse_target.py` | `find_mouse_point`, `_try_uia_first_unique_select`, constellation + path lookup |
 | `tests/test_select_mouse_target.py` | Contract tests for reasons / methods |
 | `tests/test_landmark_geometry_efp.py` | Constellation / parents / soft-miss gates |

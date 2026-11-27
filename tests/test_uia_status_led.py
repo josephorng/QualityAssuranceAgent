@@ -163,7 +163,7 @@ def test_worker_idle_efp_greens_usable_leaf(tmp_path: Path) -> None:
     session._idle_efp_generation = 1
 
     with patch(
-        "src.recorder.uia_input_boxes.element_from_point_name_value",
+        "src.recorder.uia_probe.element_from_point_name_value",
         return_value={
             "name": "關閉",
             "value": "",
@@ -195,7 +195,7 @@ def test_worker_idle_efp_no_hover_findall(tmp_path: Path) -> None:
 
     with (
         patch(
-            "src.recorder.uia_input_boxes.element_from_point_name_value",
+            "src.recorder.uia_probe.element_from_point_name_value",
             return_value={
                 "name": "Launch 檔案總管",
                 "value": "",
@@ -205,10 +205,10 @@ def test_worker_idle_efp_no_hover_findall(tmp_path: Path) -> None:
             },
         ),
         patch(
-            "src.recorder.uia_input_boxes.snapshot_uia_hover_subtree",
+            "src.recorder.uia_probe.snapshot_uia_hover_subtree",
         ) as hover,
         patch(
-            "src.recorder.uia_input_boxes.snapshot_uia_screen",
+            "src.recorder.uia_probe.snapshot_uia_screen",
         ) as settle,
     ):
         session._worker_idle_efp(
@@ -230,7 +230,7 @@ def test_worker_idle_efp_ignores_stale_generation() -> None:
     session._idle_efp_generation = 9
 
     with patch(
-        "src.recorder.uia_input_boxes.element_from_point_name_value",
+        "src.recorder.uia_probe.element_from_point_name_value",
         return_value={
             "name": "Stale",
             "value": "X",
@@ -275,7 +275,7 @@ def test_worker_idle_efp_coalesces_to_newest() -> None:
         )
     )
     with patch(
-        "src.recorder.uia_input_boxes.element_from_point_name_value",
+        "src.recorder.uia_probe.element_from_point_name_value",
         side_effect=_probe,
     ):
         session._worker_idle_efp(
@@ -471,7 +471,7 @@ def test_format_scroll_percent_label() -> None:
 
 
 def test_efp_payload_looks_like_scrollbar() -> None:
-    from src.recorder.uia_input_boxes import efp_payload_looks_like_scrollbar
+    from src.recorder.uia_probe import efp_payload_looks_like_scrollbar
 
     assert efp_payload_looks_like_scrollbar(
         {"name": "Position", "control_type": "data_item"}
@@ -513,7 +513,7 @@ def test_window_step_skips_settle_findall() -> None:
         patch.object(session, "_sleep_remaining_window_settle"),
         patch.object(session, "_notify_pending_text_input"),
         patch.object(session, "_release_drag_uia_notify"),
-        patch("src.recorder.uia_input_boxes.snapshot_uia_screen") as snap,
+        patch("src.recorder.uia_probe.snapshot_uia_screen") as snap,
     ):
         session._window_step_body(item)  # type: ignore[arg-type]
     snap.assert_not_called()

@@ -20,7 +20,7 @@ from typing import Any, Iterator
 
 from src.common.io_utils import read_json, write_json
 from src.recorder.models import RecordedEvent, event_json_path
-from src.recorder.uia_input_boxes import OCR_UIA_LABEL_SOFT_AGREE_THRESHOLD
+from src.recorder.uia_probe import OCR_UIA_LABEL_SOFT_AGREE_THRESHOLD
 
 RectXywh = tuple[int, int, int, int]
 # (bbox, label) or (bbox, label, uia_control_type)
@@ -406,7 +406,7 @@ def snapshot_has_usable_text(snapshot: dict[str, Any] | None) -> bool:
     texts = snapshot.get("texts")
     if not isinstance(texts, list):
         return False
-    from src.recorder.uia_input_boxes import is_usable_uia_landmark_label
+    from src.recorder.uia_probe import is_usable_uia_landmark_label
 
     for item in texts:
         if not isinstance(item, dict):
@@ -430,7 +430,7 @@ def snapshot_usable_covering_labels(
     texts = snapshot.get("texts")
     if not isinstance(texts, list):
         return []
-    from src.recorder.uia_input_boxes import (
+    from src.recorder.uia_probe import (
         is_oversized_uia_rect,
         is_usable_uia_landmark_label,
     )
@@ -656,7 +656,7 @@ def choose_uia_replay_repair_with_reason(
         )
         return hit, reason
     if text == "輸入欄":
-        from src.recorder.uia_input_boxes import (
+        from src.recorder.uia_probe import (
             is_usable_uia_landmark_label,
             is_weak_efp_hub_label,
         )
@@ -801,7 +801,7 @@ def _choose_efp_leaf_probe_with_reason(
     Builds the EFP sidecar from the probe tuple only. ``attempt_uia_replay_repair``
     enriches ``parents`` via ``parents_chain_at_point`` after a hit.
     """
-    from src.recorder.uia_input_boxes import (
+    from src.recorder.uia_probe import (
         ocr_uia_labels_soft_agree,
         resolve_usable_uia_probe_label,
     )
@@ -964,7 +964,7 @@ def attempt_uia_replay_repair(
     live_uia_snapshot: dict[str, Any] | None = None,
 ) -> tuple[int, int, dict[str, Any]] | None:
     """Match, persist the UIA instruction, and return the click point."""
-    from src.recorder.uia_input_boxes import (
+    from src.recorder.uia_probe import (
         bind_element_from_point_timing,
         summarize_element_from_point_timing,
         uia_text_element_at_point,
@@ -1037,7 +1037,7 @@ def attempt_uia_replay_repair(
     efp_s, efp_n = summarize_element_from_point_timing(efp_samples)
     efp_timing_note = f" element_from_point_s={efp_s:.3f} n={efp_n}"
     if hit is not None and hit.source == "element_from_point":
-        from src.recorder.uia_input_boxes import parents_chain_at_point
+        from src.recorder.uia_probe import parents_chain_at_point
 
         try:
             parents = parents_chain_at_point(int(hit.cx), int(hit.cy))
@@ -1175,7 +1175,7 @@ def write_uia_replay_repair(
         return None
     # Stamp live EFP onto the event so compile emits hub_source=uia_efp + parents.
     if isinstance(element_from_point, dict) and element_from_point:
-        from src.recorder.uia_input_boxes import _normalize_parents_chain
+        from src.recorder.uia_probe import _normalize_parents_chain
 
         efp_out: dict[str, Any] = {}
         if "name" in element_from_point:
@@ -1475,7 +1475,7 @@ def _load_request_with_reason(
             probe,
         )
         if covering:
-            from src.recorder.uia_input_boxes import ocr_uia_labels_soft_agree
+            from src.recorder.uia_probe import ocr_uia_labels_soft_agree
 
             if not any(ocr_uia_labels_soft_agree(text, label) for label in covering):
                 return None, "recorded_uia_snapshot_already_usable"
@@ -1961,7 +1961,7 @@ def _candidate(
     if source == "uia_efp":
         payload["source"] = "uia_efp"
     if token:
-        from src.recorder.uia_input_boxes import UIA_CONTROL_TYPE_SUFFIX
+        from src.recorder.uia_probe import UIA_CONTROL_TYPE_SUFFIX
 
         if token in UIA_CONTROL_TYPE_SUFFIX:
             payload["uia_control_type"] = token
@@ -2005,7 +2005,7 @@ def _hit(
     x, y, w, h = (int(v) for v in box)
     token = str(control_type or "").strip()
     if token:
-        from src.recorder.uia_input_boxes import UIA_CONTROL_TYPE_SUFFIX
+        from src.recorder.uia_probe import UIA_CONTROL_TYPE_SUFFIX
 
         # Field hosts are outside the labeled-suffix map but must stay typed so
         # repair rebuilds 「…」文字所在的輸入欄 / 滾動條 hubs.

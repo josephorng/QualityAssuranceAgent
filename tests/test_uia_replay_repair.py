@@ -784,7 +784,7 @@ def test_uia_walk_uses_live_hwnd_when_recorded_hwnd_is_stale(monkeypatch) -> Non
         "src.recorder.window_snapshot.find_matching_click_window", fake_match
     )
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes.snapshot_uia_screen", fake_snapshot
+        "src.recorder.uia_probe.snapshot_uia_screen", fake_snapshot
     )
     monkeypatch.setattr(smt, "active_monitor_offset", lambda _index: (0, 0))
     bgr = np.zeros((80, 80, 3), dtype=np.uint8)
@@ -1869,7 +1869,7 @@ def test_attempt_icon_repair_hits_button_via_element_from_point(
         return "下拉", probe_box, "button", "下拉", ""
 
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes._uia_text_element_at_point_impl",
+        "src.recorder.uia_probe._uia_text_element_at_point_impl",
         probe,
     )
     request = UiaReplayRepairRequest(
@@ -1978,7 +1978,7 @@ def test_attempt_icon_miss_falls_back_to_input(tmp_path: Path, monkeypatch) -> N
         lambda _cw: live,
     )
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes._uia_text_element_at_point_impl",
+        "src.recorder.uia_probe._uia_text_element_at_point_impl",
         lambda *_a, **_k: None,
     )
     request = UiaReplayRepairRequest(
@@ -2082,7 +2082,7 @@ def test_attempt_input_repair_keeps_class_and_nearby(tmp_path: Path, monkeypatch
     )
     # No usable EFP leaf → repair keeps the class input hit.
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes.uia_text_element_at_point",
+        "src.recorder.uia_probe.uia_text_element_at_point",
         lambda x, y: None,
     )
     request = UiaReplayRepairRequest(

@@ -557,7 +557,7 @@ def _resolve_or_sample_ocr_clip_rect(
     """Prefer recorded ``ocr_clip_rect``; else live-sample when focus is caret-thin."""
     if event.ocr_clip_rect is not None:
         return event.ocr_clip_rect
-    from src.recorder.uia_input_boxes import sample_uia_ocr_clip_rect
+    from src.recorder.uia_probe import sample_uia_ocr_clip_rect
 
     caret_xy = event.cursor_xy or event.anchor_click_xy
     return sample_uia_ocr_clip_rect(

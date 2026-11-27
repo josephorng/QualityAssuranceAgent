@@ -1173,7 +1173,7 @@ def _vision_debug_layers(
     uia_scrollbars: list[tuple[int, int, int, int]],
 ) -> dict[str, Any]:
     """Image-local YOLO + UIA boxes for run/recording overlay debug."""
-    from src.recorder.uia_input_boxes import unpack_uia_labeled
+    from src.recorder.uia_probe import unpack_uia_labeled
 
     uia_boxes: list[dict[str, Any]] = []
     for item in uia_labeled_texts:
@@ -1636,7 +1636,7 @@ def _detect_mouse_targets_from_bgr(
             f"boxes_dropped={skipped_boxes}"
         )
 
-    from src.recorder.uia_input_boxes import merge_nested_element_boxes
+    from src.recorder.uia_probe import merge_nested_element_boxes
 
     element_before_nest = len(element_boxes)
     element_boxes = merge_nested_element_boxes(element_boxes)
@@ -1676,7 +1676,7 @@ def _detect_mouse_targets_from_bgr(
     uia_inputs: list[tuple[int, int, int, int]] = []
     uia_scrollbars: list[tuple[int, int, int, int]] = []
     if uia_prefetched is not None:
-        from src.recorder.uia_input_boxes import coerce_uia_input_xywh
+        from src.recorder.uia_probe import coerce_uia_input_xywh
 
         pref_inputs, pref_scrollbars, uia_labeled_texts = uia_prefetched
         uia_inputs = [
@@ -1689,7 +1689,7 @@ def _detect_mouse_targets_from_bgr(
         and live_input_monitor_offset is not None
         and live_input_window_screen_xywh is not None
     ):
-        from src.recorder.uia_input_boxes import (
+        from src.recorder.uia_probe import (
             list_uia_input_and_scrollbar_boxes_image_local,
         )
 
@@ -2133,7 +2133,7 @@ def _normalize_recorded_anchor_label(label: str) -> str:
     the role suffix and break exact match. Shell status tails (running-window
     counts, pinned) are stripped before lookalike folds so ``1`` stays a digit.
     """
-    from src.recorder.uia_input_boxes import canonicalize_uia_shell_status_label
+    from src.recorder.uia_probe import canonicalize_uia_shell_status_label
 
     text = _strip_similarity_edges(label or "", _SIMILARITY_WHITESPACE)
     if not text:
@@ -2182,7 +2182,7 @@ def _normalize_similarity_label(label: str) -> str:
             )
             if inner:
                 text = inner
-    from src.recorder.uia_input_boxes import canonicalize_uia_shell_status_label
+    from src.recorder.uia_probe import canonicalize_uia_shell_status_label
 
     # Shell status before lookalike folds (``1``→``l`` would break running counts).
     return _canonicalize_similarity_text(canonicalize_uia_shell_status_label(text))
@@ -2208,7 +2208,7 @@ def _pipe_aware_normalized_similarity(left_n: str, right_n: str) -> float:
     if "|" not in left_n and "|" not in right_n:
         return score
 
-    from src.recorder.uia_input_boxes import split_uia_name_value_label
+    from src.recorder.uia_probe import split_uia_name_value_label
 
     left_name, left_value = split_uia_name_value_label(left_n)
     right_name, right_value = split_uia_name_value_label(right_n)
@@ -4589,7 +4589,7 @@ def _phrase_match_pool(
     control_type_token: str | None = None,
 ) -> list[UiDetection]:
     """Keep detections of ``phrase``'s UIA type. Empty typed set falls back to all."""
-    from src.recorder.uia_input_boxes import (
+    from src.recorder.uia_probe import (
         UIA_CONTROL_TYPE_SUFFIX,
         control_token_for_suffix,
     )
@@ -4728,7 +4728,7 @@ def _probe_efp_leaf_at(
     """Live ElementFromPoint Name/Value and optional leaf bbox xywh."""
     probe = point_probe_fn
     if probe is None:
-        from src.recorder.uia_input_boxes import uia_text_element_at_point
+        from src.recorder.uia_probe import uia_text_element_at_point
 
         probe = uia_text_element_at_point
     try:
@@ -4912,7 +4912,7 @@ def _detection_from_efp_leaf_bbox(
     pool_det: UiDetection | None = None,
 ) -> UiDetection:
     """Build a click hub from live EFP leaf geometry (not the FindAll pool box)."""
-    from src.recorder.uia_input_boxes import uia_label_combine_name_value
+    from src.recorder.uia_probe import uia_label_combine_name_value
 
     text = uia_label_combine_name_value(
         str(live_name or ""),
@@ -5466,7 +5466,7 @@ def _findall_pool_near_synth(
     Full-frame overlays that swallow sibling centers (NVIDIA GeForce Overlay)
     are dropped so they cannot win at ``dist=0``.
     """
-    from src.recorder.uia_input_boxes import is_oversized_uia_rect
+    from src.recorder.uia_probe import is_oversized_uia_rect
 
     radius: float | None = None
     if scale is not None and scale > 0.0:
@@ -5523,7 +5523,7 @@ def _filter_uia_anchor_by_name_then_value(
     with the query Value is rejected (header vs cell guardrail). Unique Name
     with empty live Value still accepts a query that carries a Value.
     """
-    from src.recorder.uia_input_boxes import split_uia_name_value_label
+    from src.recorder.uia_probe import split_uia_name_value_label
 
     normalize = (
         _normalize_recorded_anchor_label
@@ -5676,7 +5676,7 @@ def _try_uia_first_unique_select(
     del nearby_hints, nearby_labels, nearby_phrases
     del filter_by_control_type, recorded_anchor
 
-    from src.recorder.uia_input_boxes import (
+    from src.recorder.uia_probe import (
         _normalize_parents_chain,
         control_type_id_from_token,
         parents_chain_at_point,
@@ -6419,7 +6419,7 @@ def _detections_from_uia_prefetched(
     """Text, input, and scrollbar candidates from a snapshot. URL names are omitted."""
     if uia_prefetched is None:
         return []
-    from src.recorder.uia_input_boxes import (
+    from src.recorder.uia_probe import (
         coerce_uia_input_xywh,
         is_usable_uia_landmark_label,
         unpack_uia_labeled,
@@ -6563,7 +6563,7 @@ def _live_uia_snapshot_for_click_window(
     """
     if not isinstance(click_window, dict):
         return None
-    from src.recorder.uia_input_boxes import snapshot_uia_screen
+    from src.recorder.uia_probe import snapshot_uia_screen
     from src.recorder.window_snapshot import find_matching_click_window
 
     live = find_matching_click_window(click_window)
@@ -6679,7 +6679,7 @@ def _detections_from_live_uia_snapshot(
     """Map a finished FindAll onto the captured monitor. Screen-space boxes."""
     if not captured:
         return []
-    from src.recorder.uia_input_boxes import uia_snapshot_image_local
+    from src.recorder.uia_probe import uia_snapshot_image_local
 
     picked = _pick_captured_monitor_for_window(captured, live)
     if picked is None:
@@ -7309,7 +7309,7 @@ async def _find_mouse_point_attempt(
         str(recorded_efp_value).strip() if isinstance(recorded_efp_value, str) else ""
     )
     hub_source = _normalize_hub_source(hub_source)
-    from src.recorder.uia_input_boxes import _normalize_parents_chain
+    from src.recorder.uia_probe import _normalize_parents_chain
 
     recorded_efp_parents = _normalize_parents_chain(recorded_efp_parents) or None
     recorded_anchor_match = structured_anchor_text is not None
@@ -7497,7 +7497,7 @@ async def _find_mouse_point_attempt(
             name: str,
             value: str = "",
         ) -> tuple[tuple[int, int, int, int], str, str] | None:
-            from src.recorder.uia_input_boxes import find_uia_data_item_by_name
+            from src.recorder.uia_probe import find_uia_data_item_by_name
             from src.recorder.window_snapshot import find_matching_click_window
 
             live = find_matching_click_window(click_window)
@@ -7515,7 +7515,7 @@ async def _find_mouse_point_attempt(
             control_type_id: int | None,
             parents: list[dict[str, str]] | None,
         ) -> tuple[tuple[int, int, int, int], str, str, str] | None:
-            from src.recorder.uia_input_boxes import find_uia_leaf_by_efp_path
+            from src.recorder.uia_probe import find_uia_leaf_by_efp_path
             from src.recorder.window_snapshot import find_matching_click_window
 
             live = find_matching_click_window(click_window)

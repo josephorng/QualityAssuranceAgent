@@ -411,7 +411,7 @@ def _override_scrollbar_drag_start_to_live_thumb(
     hwnd = _hwnd_for_scrollbar_drag_start(start_click_window, x1, y1)
     if hwnd is not None:
         try:
-            from src.recorder.uia_input_boxes import find_uia_scrollbar_thumb_center
+            from src.recorder.uia_probe import find_uia_scrollbar_thumb_center
 
             thumb_xy = find_uia_scrollbar_thumb_center(hwnd, pinned_bbox)
             if thumb_xy is not None:

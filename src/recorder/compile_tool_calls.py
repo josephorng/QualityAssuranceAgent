@@ -280,7 +280,7 @@ def _element_from_point_args(
         out["name"] = str(element_from_point.get("name") or "")
     if "value" in element_from_point:
         out["value"] = str(element_from_point.get("value") or "")
-    from src.recorder.uia_input_boxes import _normalize_parents_chain
+    from src.recorder.uia_probe import _normalize_parents_chain
 
     parents = _normalize_parents_chain(element_from_point.get("parents"))
     if parents:

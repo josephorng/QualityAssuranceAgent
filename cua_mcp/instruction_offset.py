@@ -56,7 +56,7 @@ def control_type_suffix_zh(control_type: str | None) -> str:
     token = str(control_type or "").strip()
     if not token:
         return ""
-    from src.recorder.uia_input_boxes import UIA_CONTROL_TYPE_SUFFIX
+    from src.recorder.uia_probe import UIA_CONTROL_TYPE_SUFFIX
 
     if token in UIA_CONTROL_TYPE_SUFFIX:
         return UIA_CONTROL_TYPE_SUFFIX[token]
@@ -103,7 +103,7 @@ def hub_match_fields(
     if not rest:
         return mode, None, None
 
-    from src.recorder.uia_input_boxes import UIA_CONTROL_TYPE_SUFFIX
+    from src.recorder.uia_probe import UIA_CONTROL_TYPE_SUFFIX
 
     quoted = _HUB_QUOTED_NAME_RE.search(rest)
     if quoted is not None:

@@ -86,7 +86,7 @@ A pointer event typically stores:
 
 - `index`, `kind`, `cursor_xy`, button / modifiers / click count
 - `screenshot_path`, `monitor_index`, `monitor_offset`, `click_window`
-- `element_from_point` — Name / Value / bbox / control_type / **`parents`** (ControlView ancestor chain; worker probe, not the mouse hook)
+- `element_from_point` — Name / Value / bbox / control_type / **`parents`** (ControlView ancestor chain; worker probe, not the mouse hook). When the raw leaf cannot open the UIA hub (e.g. weak `CoreInput`), a budgeted point-child drill may promote a usable labeled descendant and attach **`efp_host`** (original leaf) plus capped **`children`**
 - **no** `uia_snapshot` / `end_uia_snapshot` on new recordings (fields absent; FindAll walks are gone)
 - later patches: `window_change`, `focused_element`, drag `end_*`
 
@@ -200,7 +200,7 @@ sequenceDiagram
 | Analyze | `src/recorder/orchestrator.py` | `analyze_recording_session`, `prepare_event_vision`, `_write_event_analysis` |
 | Instructions | `src/recorder/analyze.py` | `analyze_event_to_cache`, `instruction_for_click` |
 | UIA vs YOLO | `src/recorder/vision_context.py` | `_detect_recording_mouse_targets`, `_press_efp_opens_uia_hub`, `_maybe_demote_uia_path_for_weak_efp_ocr_disagree` |
-| EFP probe | `src/recorder/uia_input_boxes.py` | `element_from_point_name_value`, `efp_payload_opens_uia_hub` |
+| EFP probe | `src/recorder/uia_probe.py` | `element_from_point_name_value`, `efp_payload_opens_uia_hub` |
 | Tool compile | `src/recorder/compile_tool_calls.py` | `compile_tool_calls`, `_move_mouse_call`, `_hub_source_from_vision` |
 | Twin / repair | `src/recorder/uia_replay_repair.py` | `build_yolo_ocr_fallback_from_vision`, `yolo_ocr_fallback_slots`, `replay_repair_slots` |
 | Geometry | `src/recorder/landmark_geometry.py` | `build_landmark_geometry` |

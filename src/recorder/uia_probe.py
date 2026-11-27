@@ -1,9 +1,11 @@
-"""Live UIA Edit/Document/ComboBox/Pane/ScrollBar + labeled-control enumeration.
+"""Live UIA probing for recording and replay.
 
-Budgeted ControlView walk under a window hwnd (legacy FindAllBuildCache via
-``CUA_UIA_FINDALL_LEGACY=1``). Recording and replay use the snapshot as its
-own candidate list, or YOLO+OCR when that list is not enough. The two lists
-are not merged.
+Covers ElementFromPoint (Name/Value/bbox/parents, weak-host point-child
+drill), hub-open gates, budgeted ControlView walks, and enumeration of
+Edit/Document/ComboBox/Pane/ScrollBar plus labeled controls (legacy
+FindAllBuildCache via ``CUA_UIA_FINDALL_LEGACY=1``). Recording and replay
+use a snapshot as its own candidate list, or YOLO+OCR when that list is
+not enough — the two lists are not merged.
 
 A control-type ScrollBar is a scrollbar. A Thumb whose AutomationId is
 ``ScrollbarThumb`` (or Win32/WinForms Name ``Position``) is one too.
@@ -211,6 +213,19 @@ class WalkBudgets:
     max_nodes: int = _DEFAULT_WALK_MAX_NODES
     max_seconds: float = _DEFAULT_WALK_MAX_SECONDS
     max_children_per_parent: int = _DEFAULT_WALK_MAX_CHILDREN_PER_PARENT
+
+
+# Weak-EFP point-child drill (Search CoreInput → tile). Fits inside EFP timeout.
+_EFP_POINT_CHILD_LIST_CAP = 8
+
+
+def _efp_point_child_budgets() -> WalkBudgets:
+    return WalkBudgets(
+        max_hits=24,
+        max_nodes=200,
+        max_seconds=1.5,
+        max_children_per_parent=40,
+    )
 
 
 @dataclass(frozen=True)
@@ -832,6 +847,60 @@ def efp_payload_opens_uia_hub(payload: dict[str, Any] | None) -> bool:
     return is_winforms_scrollbar_thumb_efp_name(
         str(payload.get("name") or "").strip()
     )
+
+
+def _efp_payload_bbox_area(payload: dict[str, Any] | None) -> int | None:
+    """Area of EFP ``bbox`` xywh, or ``None`` when missing/invalid."""
+    box = efp_payload_screen_bbox_xywh(payload)
+    if box is None:
+        return None
+    return int(box[2]) * int(box[3])
+
+
+def select_efp_point_child_promotee(
+    candidates: list[dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    """Pick the smallest-area usable labeled leaf among point-child hits.
+
+    Weak hub names (``CoreInput``, …) never win: they fail
+    :func:`efp_payload_is_usable_labeled_leaf`. Empty / non-dict entries are
+    skipped. Returns a shallow copy of the winning dict, or ``None``.
+    """
+    best: dict[str, Any] | None = None
+    best_area: int | None = None
+    for raw in candidates or []:
+        if not isinstance(raw, dict):
+            continue
+        if not efp_payload_is_usable_labeled_leaf(raw):
+            continue
+        area = _efp_payload_bbox_area(raw)
+        if area is None:
+            continue
+        if best is None or int(area) < int(best_area or 0):
+            best = raw
+            best_area = int(area)
+    return dict(best) if best is not None else None
+
+
+def _efp_host_snapshot_from_leaf_payload(
+    payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Compact original-leaf sidecar for a weak-EFP child drill."""
+    if not isinstance(payload, dict):
+        return {}
+    host: dict[str, Any] = {}
+    name = str(payload.get("name") or "").strip()
+    value = str(payload.get("value") or "").strip()
+    if name or value:
+        host["name"] = name
+        host["value"] = value
+    control_type = str(payload.get("control_type") or "").strip()
+    if control_type:
+        host["control_type"] = control_type
+    bbox = efp_payload_screen_bbox_xywh(payload)
+    if bbox is not None:
+        host["bbox"] = [int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])]
+    return host
 
 
 def efp_payload_is_usable_data_item(payload: dict[str, Any] | None) -> bool:
@@ -1934,8 +2003,206 @@ def parent_signature_at_point(x: int, y: int) -> dict[str, str]:
     return dict(chain[0]) if chain else {}
 
 
+def _efp_point_child_hit_dict(
+    element: ctypes.c_void_p,
+) -> dict[str, Any] | None:
+    """Labeled point-child snapshot, or ``None`` when empty/weak/unusable."""
+    _label, name, value = _element_label_parts(element)
+    name = str(name or "").strip()
+    value = str(value or "").strip()
+    label = resolve_usable_uia_probe_label(name=name, value=value)
+    if (
+        not label
+        or not is_usable_uia_landmark_label(label)
+        or is_weak_efp_hub_label(label)
+    ):
+        return None
+    bounds = _element_bounding_xyxy(element)
+    if bounds is None:
+        return None
+    left, top, right, bottom = bounds
+    width = int(right) - int(left)
+    height = int(bottom) - int(top)
+    if width <= 0 or height <= 0:
+        return None
+    out: dict[str, Any] = {
+        "name": name,
+        "value": value,
+        "bbox": [int(left), int(top), width, height],
+    }
+    control_type = control_type_token_from_id(_element_control_type(element))
+    if control_type:
+        out["control_type"] = control_type
+    return out
+
+
+def _apply_efp_leaf_fields(
+    out: dict[str, Any],
+    element: ctypes.c_void_p,
+    automation: ctypes.c_void_p | None = None,
+) -> None:
+    """Write name/value/bbox/control_type/(parents) from ``element`` onto ``out``."""
+    for key in ("name", "value", "bbox", "control_type", "parents"):
+        out.pop(key, None)
+    _label, name, value = _element_label_parts(element)
+    name = str(name or "").strip()
+    value = str(value or "").strip()
+    if name or value:
+        out["name"] = name
+        out["value"] = value
+    bounds = _element_bounding_xyxy(element)
+    if bounds is not None:
+        left, top, right, bottom = bounds
+        width = int(right) - int(left)
+        height = int(bottom) - int(top)
+        if width > 0 and height > 0:
+            out["bbox"] = [int(left), int(top), width, height]
+    control_type = control_type_token_from_id(_element_control_type(element))
+    if control_type:
+        out["control_type"] = control_type
+    if automation is not None:
+        parents = _element_parents_chain(automation, element)
+        if parents:
+            out["parents"] = parents
+
+
+def _walk_efp_point_children(
+    automation: ctypes.c_void_p,
+    root: ctypes.c_void_p,
+    x: int,
+    y: int,
+    *,
+    budgets: WalkBudgets | None = None,
+) -> list[tuple[ctypes.c_void_p, dict[str, Any]]]:
+    """Budgeted ControlView descendants under ``root`` that contain ``(x, y)``.
+
+    Each hit is ``(AddRef'd element, hit dict)``. Caller must ``_com_release``
+    every element. Root itself is not a hit (descendant walk only).
+    """
+    walker = _get_control_view_walker(automation)
+    if walker is None:
+        return []
+    kept: list[tuple[ctypes.c_void_p, dict[str, Any]]] = []
+    try:
+        clip = _element_bounding_xyxy(root)
+        if clip is None:
+            return []
+        if not _point_in_screen_xyxy(int(x), int(y), clip):
+            return []
+        seeds = _walker_children(walker, root)
+        if not seeds:
+            return []
+
+        def _node_matches(node: ctypes.c_void_p) -> bool:
+            box = _element_bounding_xyxy(node)
+            if box is None or not _point_in_screen_xyxy(int(x), int(y), box):
+                return False
+            return _efp_point_child_hit_dict(node) is not None
+
+        def _on_match(node: ctypes.c_void_p) -> None:
+            hit = _efp_point_child_hit_dict(node)
+            if hit is None:
+                return
+            _com_addref(node)
+            kept.append((node, hit))
+
+        run_budgeted_priority_walk(
+            seeds,
+            node_bbox=_element_bounding_xyxy,
+            node_matches=_node_matches,
+            on_match=_on_match,
+            node_children=lambda node: _walker_children(walker, node),
+            release_node=_com_release,
+            clip=clip,
+            cursor_xy=(int(x), int(y)),
+            budgets=budgets or _efp_point_child_budgets(),
+        )
+        return kept
+    finally:
+        _com_release(walker)
+
+
+def _efp_point_children_and_promote(
+    automation: ctypes.c_void_p,
+    element: ctypes.c_void_p,
+    x: int,
+    y: int,
+) -> tuple[ctypes.c_void_p | None, list[dict[str, Any]]]:
+    """Walk point children under ``element``, then one parent if needed.
+
+    Returns ``(promoted_element_or_None, children)``. ``promoted_element`` is
+    AddRef'd for the caller to release. ``children`` is sorted by ascending
+    bbox area and capped at ``_EFP_POINT_CHILD_LIST_CAP``.
+    """
+    budgets = _efp_point_child_budgets()
+    owned: list[tuple[ctypes.c_void_p, dict[str, Any]]] = []
+    try:
+        owned.extend(
+            _walk_efp_point_children(
+                automation, element, int(x), int(y), budgets=budgets
+            )
+        )
+        has_usable = any(
+            efp_payload_is_usable_labeled_leaf(hit) for _el, hit in owned
+        )
+        if not has_usable:
+            parent = _control_view_parent(automation, element)
+            if parent is not None:
+                try:
+                    parent_box = _element_bounding_xyxy(parent)
+                    if parent_box is not None and _point_in_screen_xyxy(
+                        int(x), int(y), parent_box
+                    ):
+                        owned.extend(
+                            _walk_efp_point_children(
+                                automation,
+                                parent,
+                                int(x),
+                                int(y),
+                                budgets=budgets,
+                            )
+                        )
+                finally:
+                    _com_release(parent)
+
+        if not owned:
+            return None, []
+
+        owned_sorted = sorted(
+            owned,
+            key=lambda item: (_efp_payload_bbox_area(item[1]) or 10**18),
+        )
+        children = [
+            dict(hit)
+            for _el, hit in owned_sorted[: int(_EFP_POINT_CHILD_LIST_CAP)]
+        ]
+        promotee = select_efp_point_child_promotee([hit for _el, hit in owned])
+        promoted: ctypes.c_void_p | None = None
+        if promotee is not None:
+            for el, hit in owned:
+                if (
+                    hit.get("bbox") == promotee.get("bbox")
+                    and hit.get("name") == promotee.get("name")
+                    and hit.get("value") == promotee.get("value")
+                    and hit.get("control_type") == promotee.get("control_type")
+                ):
+                    _com_addref(el)
+                    promoted = el
+                    break
+        return promoted, children
+    finally:
+        for el, _hit in owned:
+            _com_release(el)
+
+
 def _element_from_point_name_value_impl(x: int, y: int) -> dict[str, Any]:
-    """EFP Name/Value/bbox/type plus optional parents chain (same leaf)."""
+    """EFP Name/Value/bbox/type plus optional parents chain (same leaf).
+
+    When the raw leaf cannot open the UIA hub, drills budgeted point-containing
+    ControlView children (then one parent) and may promote a usable labeled
+    descendant. Successful drills attach ``efp_host`` (original leaf) and
+    ``children`` (capped labeled hits).
+    """
     started = time.perf_counter()
     out: dict[str, Any] = {}
     if os.name != "nt":
@@ -1970,25 +2237,20 @@ def _element_from_point_name_value_impl(x: int, y: int) -> dict[str, Any]:
         element = _element_from_point(automation, int(x), int(y))
         if not element:
             return out
-        _label, name, value = _element_label_parts(element)
-        name = str(name or "").strip()
-        value = str(value or "").strip()
-        if name or value:
-            out["name"] = name
-            out["value"] = value
-        bounds = _element_bounding_xyxy(element)
-        if bounds is not None:
-            left, top, right, bottom = bounds
-            width = int(right) - int(left)
-            height = int(bottom) - int(top)
-            if width > 0 and height > 0:
-                out["bbox"] = [int(left), int(top), width, height]
-        control_type = control_type_token_from_id(_element_control_type(element))
-        if control_type:
-            out["control_type"] = control_type
-        parents = _element_parents_chain(automation, element)
-        if parents:
-            out["parents"] = parents
+        _apply_efp_leaf_fields(out, element, automation)
+        if not efp_payload_opens_uia_hub(out):
+            host = _efp_host_snapshot_from_leaf_payload(out)
+            promoted, children = _efp_point_children_and_promote(
+                automation, element, int(x), int(y)
+            )
+            if children:
+                if host:
+                    out["efp_host"] = host
+                out["children"] = children
+            if promoted is not None:
+                _com_release(element)
+                element = promoted
+                _apply_efp_leaf_fields(out, element, automation)
         return out
     except Exception:
         return out
@@ -2013,6 +2275,8 @@ def element_from_point_name_value(x: int, y: int) -> dict[str, Any]:
     screen ``"bbox"`` xywh and ``"control_type"`` (UIA suffix token). When
     ControlView ancestors are readable, also includes ``"parents"`` — a list of
     ``{control_type?, name?, automation_id?}`` from immediate parent to root.
+    When a weak host leaf is drilled, may also include ``efp_host`` (original
+    leaf) and ``children`` (capped labeled point-containing descendants).
     Analysis uses the leaf as the UIA hub; nearby landmarks come from YOLO+OCR.
     Marshals onto the UIA worker.
     """

@@ -45,7 +45,7 @@ def test_settle_pre_key_job_skips_findall_prefetch(tmp_path: Path) -> None:
     with (
         patch.object(session, "_refresh_pending_pre_key") as refresh,
         patch(
-            "src.recorder.uia_input_boxes.snapshot_uia_screen",
+            "src.recorder.uia_probe.snapshot_uia_screen",
         ) as snap,
     ):
         session._process_deferred_capture_job(

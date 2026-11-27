@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from cua_mcp.yolo_onnx import YOLO_CLASS_TEXT
-from src.recorder.uia_input_boxes import uia_snapshot_image_local
+from src.recorder.uia_probe import uia_snapshot_image_local
 
 
 def test_uia_snapshot_image_local_does_not_query_hwnd(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -18,7 +18,7 @@ def test_uia_snapshot_image_local_does_not_query_hwnd(monkeypatch: pytest.Monkey
         raise AssertionError("FindAll must not run for a stored snapshot")
 
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes.enumerate_edit_document_scrollbar_screen",
+        "src.recorder.uia_probe.enumerate_edit_document_scrollbar_screen",
         _boom,
     )
     inputs, scrollbars, texts = uia_snapshot_image_local(
@@ -177,7 +177,7 @@ def test_detect_without_snapshot_returns_only_yolo_ocr(
         lambda *_a, **_k: [],
     )
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes.list_uia_input_and_scrollbar_boxes_image_local",
+        "src.recorder.uia_probe.list_uia_input_and_scrollbar_boxes_image_local",
         lambda *_a, **_k: ([], [], []),
     )
     monkeypatch.setattr(
@@ -298,10 +298,10 @@ def test_recording_press_leaves_uia_snapshot_empty(tmp_path: Path) -> None:
         patch.object(session, "_latch_settle_frame", return_value=(None, None)),
         patch.object(session, "_enqueue"),
         patch(
-            "src.recorder.uia_input_boxes.snapshot_uia_screen",
+            "src.recorder.uia_probe.snapshot_uia_screen",
         ) as snap,
         patch(
-            "src.recorder.uia_input_boxes.element_from_point_name_value",
+            "src.recorder.uia_probe.element_from_point_name_value",
             return_value={"name": "關閉", "value": "", "control_type": "button"},
         ),
         patch.object(
@@ -347,7 +347,7 @@ def test_recording_scroll_leaves_uia_snapshot_empty(tmp_path: Path) -> None:
             return_value=("shot.jpeg", 0, (0, 0)),
         ),
         patch(
-            "src.recorder.uia_input_boxes.snapshot_uia_screen",
+            "src.recorder.uia_probe.snapshot_uia_screen",
         ) as snap,
     ):
         # Use the same worker path as scroll/middle-click.

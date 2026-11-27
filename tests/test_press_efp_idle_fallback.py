@@ -146,7 +146,7 @@ def test_worker_idle_efp_stores_full_payload(tmp_path: Path) -> None:
     }
     with (
         patch(
-            "src.recorder.uia_input_boxes.element_from_point_name_value",
+            "src.recorder.uia_probe.element_from_point_name_value",
             return_value=payload,
         ),
         patch(
@@ -211,7 +211,7 @@ def test_worker_pending_left_press_idle_fallback(tmp_path: Path) -> None:
             return_value=("shot.jpeg", 1, (0, 0)),
         ),
         patch(
-            "src.recorder.uia_input_boxes.element_from_point_name_value",
+            "src.recorder.uia_probe.element_from_point_name_value",
             return_value=live,
         ) as live_probe,
     ):
@@ -265,7 +265,7 @@ def test_worker_pending_left_press_keeps_live_when_idle_far(tmp_path: Path) -> N
             return_value=("shot.jpeg", 1, (0, 0)),
         ),
         patch(
-            "src.recorder.uia_input_boxes.element_from_point_name_value",
+            "src.recorder.uia_probe.element_from_point_name_value",
             return_value=live,
         ),
     ):
@@ -340,7 +340,7 @@ def test_worker_pending_right_press_idle_fallback(tmp_path: Path) -> None:
             return_value=("shot.jpeg", 1, (0, 0)),
         ),
         patch(
-            "src.recorder.uia_input_boxes.element_from_point_name_value",
+            "src.recorder.uia_probe.element_from_point_name_value",
             return_value=live,
         ) as live_probe,
     ):

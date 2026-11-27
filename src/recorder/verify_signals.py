@@ -1442,7 +1442,7 @@ def _read_uia_fields_impl(
         automation = automation_ptr
 
         if (want_control or want_scroll) and cursor_xy is not None:
-            from src.recorder.uia_input_boxes import _element_from_point
+            from src.recorder.uia_probe import _element_from_point
 
             point_element = _element_from_point(
                 automation, int(cursor_xy[0]), int(cursor_xy[1])
@@ -1581,7 +1581,7 @@ def _set_scroll_percents_impl(
             return False
         automation = automation_ptr
 
-        from src.recorder.uia_input_boxes import _element_from_point
+        from src.recorder.uia_probe import _element_from_point
 
         point_element = _element_from_point(
             automation, int(cursor_xy[0]), int(cursor_xy[1])

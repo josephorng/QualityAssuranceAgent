@@ -25,7 +25,7 @@ from src.recorder.focus_point import (
     sample_debug_focus_rect,
     sample_focused_element,
 )
-from src.recorder.uia_input_boxes import sample_uia_ocr_clip_rect
+from src.recorder.uia_probe import sample_uia_ocr_clip_rect
 from src.recorder.frame_similarity import last_settle_frame_path
 from src.recorder.models import (
     RecordedEvent,
@@ -1948,7 +1948,7 @@ class RecordingSession:
         efp_payload: dict[str, Any] | None = None,
     ) -> str:
         """Compact parent token for the LED from EFP ``parents`` (or legacy ``parent``)."""
-        from src.recorder.uia_input_boxes import (
+        from src.recorder.uia_probe import (
             format_parent_signature_compact,
             format_parents_chain_compact,
         )
@@ -2092,7 +2092,7 @@ class RecordingSession:
         Excel cell, File-tab button, or ``Position`` thumb; force-refresh
         bypasses this.
         """
-        from src.recorder.uia_input_boxes import (
+        from src.recorder.uia_probe import (
             efp_payload_opens_uia_hub,
             efp_payload_screen_bbox_xywh,
         )
@@ -2199,7 +2199,7 @@ class RecordingSession:
         if efp_payload is _EFP_UNSET:
             with self._lock:
                 efp_payload = self._idle_efp_payload
-        from src.recorder.uia_input_boxes import efp_payload_opens_uia_hub
+        from src.recorder.uia_probe import efp_payload_opens_uia_hub
 
         return efp_payload_opens_uia_hub(
             efp_payload if isinstance(efp_payload, dict) else None
@@ -2341,7 +2341,7 @@ class RecordingSession:
         if stale_before_probe:
             self._emit_uia_status(bg_remove="EFP")
             return
-        from src.recorder.uia_input_boxes import (
+        from src.recorder.uia_probe import (
             efp_payload_looks_like_scrollbar,
             element_from_point_name_value,
         )
@@ -4985,7 +4985,7 @@ class RecordingSession:
         """ElementFromPoint Name/Value (+elapsed) off the hook for tool args."""
         if cursor_xy is None:
             return None
-        from src.recorder.uia_input_boxes import element_from_point_name_value
+        from src.recorder.uia_probe import element_from_point_name_value
 
         x = int(cursor_xy[0])
         y = int(cursor_xy[1])
@@ -6094,7 +6094,7 @@ class RecordingSession:
         Prefers GetFocusedElement name/value/bbox/type/automationId. Falls back
         to caret/UIA bounds-only sampling when the rich snapshot is unavailable.
         """
-        from src.recorder.uia_input_boxes import focused_element_focus_rect
+        from src.recorder.uia_probe import focused_element_focus_rect
 
         focused = sample_focused_element()
         if isinstance(focused, dict):

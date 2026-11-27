@@ -8,7 +8,7 @@ from src.recorder.focus_point import (
     sample_debug_focus_rect,
     sample_focused_element,
 )
-from src.recorder.uia_input_boxes import focused_element_focus_rect
+from src.recorder.uia_probe import focused_element_focus_rect
 
 
 def test_resolve_typing_prefers_rect_center_when_last_click_outside_focus_rect() -> None:
@@ -127,7 +127,7 @@ def test_sample_focused_element_returns_snapshot(monkeypatch) -> None:
         "automation_id": "Documents",
     }
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes.uia_focused_element_snapshot",
+        "src.recorder.uia_probe.uia_focused_element_snapshot",
         lambda: payload,
     )
     assert sample_focused_element() == payload
@@ -138,7 +138,7 @@ def test_sample_focused_element_swallows_errors(monkeypatch) -> None:
         raise RuntimeError("uia down")
 
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes.uia_focused_element_snapshot",
+        "src.recorder.uia_probe.uia_focused_element_snapshot",
         _boom,
     )
     assert sample_focused_element() is None

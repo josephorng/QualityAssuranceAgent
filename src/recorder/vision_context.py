@@ -146,7 +146,7 @@ _DECORATIVE_ICON_IDS = frozenset(
     }
 )
 # UIA Name/AutomationId strings longer than this (or URL-like) do not count
-# toward recording landmark sufficiency. The check lives in uia_input_boxes.
+# toward recording landmark sufficiency. The check lives in uia_probe.
 # Sentinel: build_vision_context_at_point uses the event press snapshot unless
 # the caller passes a snapshot (including None to force a live FindAll).
 _UIA_SNAPSHOT_UNSET = object()
@@ -683,7 +683,7 @@ def _usable_uia_landmark_label(text: str | None) -> bool:
     Rejects URL-like names and ultra-long AutomationIds that replay soft-match
     poorly and should not count toward the UIA-sufficiency gate.
     """
-    from src.recorder.uia_input_boxes import is_usable_uia_landmark_label
+    from src.recorder.uia_probe import is_usable_uia_landmark_label
 
     return is_usable_uia_landmark_label(_visible_text(text))
 
@@ -1895,7 +1895,7 @@ def format_drag_candidate_anchor(candidate: dict[str, Any]) -> str | None:
     rows keep the readable caption (e.g. 「速的網域 (3)」文字, not 「下載」圖示).
     """
     class_name = str(candidate.get("class_name") or "").strip()
-    from src.recorder.uia_input_boxes import UIA_CONTROL_TYPE_SUFFIX
+    from src.recorder.uia_probe import UIA_CONTROL_TYPE_SUFFIX
 
     uia_suffix = UIA_CONTROL_TYPE_SUFFIX.get(
         str(candidate.get("uia_control_type") or "").strip(),
@@ -3759,7 +3759,7 @@ def _press_efp_opens_uia_hub(element_from_point: dict[str, Any] | None) -> bool:
     gate and analysis stay aligned (labeled leaf, structural scrollbar part,
     or legacy ``Position`` thumb + bbox).
     """
-    from src.recorder.uia_input_boxes import efp_payload_opens_uia_hub
+    from src.recorder.uia_probe import efp_payload_opens_uia_hub
 
     return efp_payload_opens_uia_hub(element_from_point)
 
@@ -3768,7 +3768,7 @@ def _press_efp_is_weak_hub(element_from_point: dict[str, Any] | None) -> bool:
     """True when press-time EFP Name/Value is missing or a weak host generic."""
     if not isinstance(element_from_point, dict):
         return False
-    from src.recorder.uia_input_boxes import (
+    from src.recorder.uia_probe import (
         is_weak_efp_hub_label,
         resolve_usable_uia_probe_label,
     )
@@ -3798,7 +3798,7 @@ def _maybe_demote_uia_path_for_weak_efp_ocr_disagree(
         return False
     if not _press_efp_is_weak_hub(element_from_point):
         return False
-    from src.recorder.uia_input_boxes import ocr_uia_labels_soft_agree
+    from src.recorder.uia_probe import ocr_uia_labels_soft_agree
 
     uia_label = _visible_text(uia_primary_text)
     yolo_label = _visible_text(yolo_primary_text)
@@ -4403,7 +4403,7 @@ def _prefetched_uia_from_snapshot(
     """Image-local UIA boxes from a click-time snapshot. ``None`` means query live."""
     if not isinstance(snapshot, dict):
         return None
-    from src.recorder.uia_input_boxes import uia_snapshot_image_local
+    from src.recorder.uia_probe import uia_snapshot_image_local
 
     return uia_snapshot_image_local(
         snapshot,
@@ -4430,7 +4430,7 @@ def _attach_unused_uia_debug(
     layers = vision_timing.get("debug_layers")
     if not isinstance(layers, dict):
         return
-    from src.recorder.uia_input_boxes import unpack_uia_labeled
+    from src.recorder.uia_probe import unpack_uia_labeled
 
     inputs, scrollbars, labeled = uia_prefetched
     uia_boxes: list[dict[str, Any]] = []
@@ -4802,7 +4802,7 @@ def _efp_focused_labels_agree(
     """True when post-settle focused Name/Value soft-agrees with the EFP label."""
     if not isinstance(focused_element, dict):
         return False
-    from src.recorder.uia_input_boxes import (
+    from src.recorder.uia_probe import (
         ocr_uia_labels_soft_agree,
         resolve_usable_uia_probe_label,
     )
@@ -4901,7 +4901,7 @@ def _efp_peer_detection_from_payload(
     """
     if not isinstance(element_from_point, dict):
         return None
-    from src.recorder.uia_input_boxes import (
+    from src.recorder.uia_probe import (
         UIA_CONTROL_TYPE_SUFFIX,
         efp_payload_is_scrollbar_part,
         is_usable_uia_landmark_label,
@@ -5875,7 +5875,7 @@ def _uia_content_leaf_owns_point(
     and similar leaves that sit inside a pane-sized covering scrollbar. Generic
     on-bar chrome (icon/element without a UIA leaf type) does not qualify.
     """
-    from src.recorder.uia_input_boxes import UIA_CONTROL_TYPE_SUFFIX
+    from src.recorder.uia_probe import UIA_CONTROL_TYPE_SUFFIX
 
     sb_area = max(1, int(scrollbar_bbox[2]) * int(scrollbar_bbox[3]))
     for item in items:

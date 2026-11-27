@@ -779,6 +779,7 @@ def test_element_from_point_name_value_keeps_timing_when_empty(monkeypatch) -> N
 def test_parent_signature_usable_and_agree() -> None:
     from src.recorder.uia_probe import (
         format_parents_chain_compact,
+        is_uia_desktop_root_name,
         is_uia_desktop_root_parent,
         parent_signature_usable,
         parent_signatures_agree,
@@ -840,6 +841,13 @@ def test_parent_signature_usable_and_agree() -> None:
     assert parents_chains_agree([], live_ok)
     assert format_parents_chain_compact(recorded) == "清單 row 1"
 
+    assert is_uia_desktop_root_name("桌面")
+    assert is_uia_desktop_root_name("桌面 1")
+    assert is_uia_desktop_root_name("Desktop")
+    assert is_uia_desktop_root_name("Desktop 2")
+    assert not is_uia_desktop_root_name("WinMaster7 Console")
+    assert not is_uia_desktop_root_name("")
+    assert not is_uia_desktop_root_name(None)
     assert is_uia_desktop_root_parent(
         {"control_type": "input", "name": "桌面 1"}
     )
@@ -1517,6 +1525,38 @@ def test_efp_payload_opens_uia_hub() -> None:
             "bbox": [339, 128, 1101, 876],
         }
     )
+    # Shell Desktop root (event_001 shape: empty control_type + full desktop
+    # bbox) must not open hub so point-child drill can promote the icon.
+    desktop_root = {
+        "name": "桌面",
+        "value": "",
+        "bbox": [0, 0, 1918, 920],
+        "parents": [
+            {"control_type": "input", "name": "Program Manager"},
+            {"control_type": "input", "name": "桌面 1"},
+        ],
+    }
+    assert not efp_payload_is_usable_labeled_leaf(desktop_root)
+    assert not efp_payload_opens_uia_hub(desktop_root)
+    assert not efp_payload_opens_uia_hub(
+        {"name": "Desktop 1", "value": "", "bbox": [0, 0, 1920, 1080]}
+    )
+    assert not efp_payload_opens_uia_hub(
+        {
+            "name": "桌面",
+            "value": "",
+            "control_type": "list",
+            "bbox": [0, 0, 1918, 920],
+        }
+    )
+    assert not efp_payload_opens_uia_hub(
+        {
+            "name": "桌面",
+            "value": "",
+            "control_type": "list_item",
+            "bbox": [0, 0, 1918, 920],
+        }
+    )
     assert not efp_payload_opens_uia_hub(
         {"name": "Position", "value": "", "bbox": [1, 1, 0, 10]}
     )
@@ -1588,6 +1628,27 @@ def test_select_efp_point_child_promotee_list_item_under_items_view() -> None:
     picked = select_efp_point_child_promotee([host, folder])
     assert picked is not None
     assert picked["name"] == "新增資料夾 (2)"
+    assert picked["control_type"] == "list_item"
+    assert efp_payload_opens_uia_hub(picked)
+
+
+def test_select_efp_point_child_promotee_list_item_under_desktop_root() -> None:
+    """Desktop root is non-hub; under-cursor shortcut list_item still opens hub."""
+    host = {
+        "name": "桌面",
+        "value": "",
+        "bbox": [0, 0, 1918, 920],
+    }
+    icon = {
+        "name": "WinMaster7 Console",
+        "value": "",
+        "control_type": "list_item",
+        "bbox": [76, 110, 76, 85],
+    }
+    assert not efp_payload_opens_uia_hub(host)
+    picked = select_efp_point_child_promotee([host, icon])
+    assert picked is not None
+    assert picked["name"] == "WinMaster7 Console"
     assert picked["control_type"] == "list_item"
     assert efp_payload_opens_uia_hub(picked)
 

@@ -804,9 +804,10 @@ def efp_payload_is_usable_labeled_leaf(payload: dict[str, Any] | None) -> bool:
 
     Covers Excel ``data_item`` cells, concrete chrome (button/tab/tree/…), and
     untyped Name|Value leaves (some UltraTree peers omit ControlType) that
-    analysis injects as ``uia_efp`` peers. Rejects weak hubs and WinForms
-    ``Position`` thumbs (those open the UIA hub as scrollbars via
-    :func:`efp_payload_opens_uia_hub`).
+    analysis injects as ``uia_efp`` peers. Rejects weak hubs, shell Desktop
+    root names (``桌面`` / ``Desktop`` — forces point-child drill onto icon
+    list_items), and WinForms ``Position`` thumbs (those open the UIA hub as
+    scrollbars via :func:`efp_payload_opens_uia_hub`).
     """
     if not isinstance(payload, dict):
         return False
@@ -822,6 +823,7 @@ def efp_payload_is_usable_labeled_leaf(payload: dict[str, Any] | None) -> bool:
         not label
         or not is_usable_uia_landmark_label(label)
         or is_weak_efp_hub_label(label)
+        or is_uia_desktop_root_name(label)
     ):
         return False
     if control_type and control_type not in _EFP_USABLE_LABELED_LEAF_CONTROL_TYPES:
@@ -1836,6 +1838,8 @@ def format_parents_chain_compact(raw: Any) -> str:
 
 # Shell Desktop / root pane names (``桌面 1``, ``Desktop 2``, …). Trailing
 # recorded-only hops of this form may be missing from live ControlView climbs.
+# Also used to reject Desktop-list EFP leaves so point-child drill can promote
+# under-cursor icon list_items (same idea as Explorer「項目檢視」list hosts).
 _UIA_DESKTOP_ROOT_PARENT_NAME_RE = re.compile(
     r"^(?:桌面|desktop)(?:\s+\d+)?$",
     re.IGNORECASE,
@@ -1865,6 +1869,18 @@ def parent_signature_usable(signature: Any) -> bool:
     return bool(control_type)
 
 
+def is_uia_desktop_root_name(text: str | None) -> bool:
+    """True when ``text`` is the UIA Desktop / shell root label.
+
+    Matches canonicalized ``桌面`` / ``Desktop`` with an optional monitor
+    index (``桌面 1``, ``Desktop 2``). Used for parent-chain soft-agree and
+    to keep Desktop-list EFP leaves from opening the hub without a child drill.
+    """
+    name = canonicalize_uia_shell_status_label(text)
+    if not name:
+        return False
+    return bool(_UIA_DESKTOP_ROOT_PARENT_NAME_RE.match(name))
+
 
 def is_uia_desktop_root_parent(signature: Any) -> bool:
     """True when ``signature`` names the UIA Desktop / shell root pane.
@@ -1874,10 +1890,7 @@ def is_uia_desktop_root_parent(signature: Any) -> bool:
     Desktop is often recorded as ``input`` / ``pane``.
     """
     sig = _normalize_parent_signature(signature)
-    name = canonicalize_uia_shell_status_label(str(sig.get("name") or ""))
-    if not name:
-        return False
-    return bool(_UIA_DESKTOP_ROOT_PARENT_NAME_RE.match(name))
+    return is_uia_desktop_root_name(str(sig.get("name") or ""))
 
 def parent_signatures_agree(recorded: Any, live: Any) -> bool:
     """True when live parent soft-agrees with a usable recorded signature.

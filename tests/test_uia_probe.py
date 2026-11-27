@@ -769,6 +769,7 @@ def test_element_from_point_name_value_keeps_timing_when_empty(monkeypatch) -> N
 def test_parent_signature_usable_and_agree() -> None:
     from src.recorder.uia_probe import (
         format_parents_chain_compact,
+        is_uia_desktop_root_parent,
         parent_signature_usable,
         parent_signatures_agree,
         parents_chains_agree,
@@ -828,6 +829,42 @@ def test_parent_signature_usable_and_agree() -> None:
     assert not parents_chains_agree(recorded, live_bad)
     assert parents_chains_agree([], live_ok)
     assert format_parents_chain_compact(recorded) == "清單 row 1"
+
+    assert is_uia_desktop_root_parent(
+        {"control_type": "input", "name": "桌面 1"}
+    )
+    assert is_uia_desktop_root_parent({"name": "Desktop 1"})
+    assert is_uia_desktop_root_parent({"name": "Desktop"})
+    assert not is_uia_desktop_root_parent(
+        {"control_type": "input", "name": "活頁簿1 - Excel"}
+    )
+    assert not is_uia_desktop_root_parent({"control_type": "input"})
+
+    # Live climb often stops at the top-level window; missing Desktop root OK.
+    recorded_excel = [
+        {"control_type": "data_grid", "name": "格線", "automation_id": "Grid"},
+        {"control_type": "input", "name": "工作表 工作表1", "automation_id": "工作表1"},
+        {"control_type": "input", "name": "活頁簿1", "automation_id": "活頁簿1"},
+        {"control_type": "input"},
+        {"name": "活頁簿1 - Excel"},
+        {"control_type": "input", "name": "桌面 1"},
+    ]
+    live_through_window = [
+        {"control_type": "data_grid", "name": "格線", "automation_id": "Grid"},
+        {"control_type": "input", "name": "工作表 工作表1", "automation_id": "工作表1"},
+        {"control_type": "input", "name": "活頁簿1", "automation_id": "活頁簿1"},
+        {"control_type": "input"},
+        {"name": "活頁簿1 - Excel"},
+    ]
+    assert parents_chains_agree(recorded_excel, live_through_window)
+    assert parents_chains_agree(
+        recorded_excel[:-1]
+        + [{"control_type": "input", "name": "Desktop 1"}],
+        live_through_window,
+    )
+    # Mid-chain under-climb (missing window) still rejects.
+    live_before_window = live_through_window[:-1]
+    assert not parents_chains_agree(recorded_excel, live_before_window)
 
 
 def test_merge_nested_element_boxes_keeps_larger() -> None:

@@ -1829,6 +1829,14 @@ def format_parents_chain_compact(raw: Any) -> str:
     return format_parent_signature_compact(chain[0])
 
 
+# Shell Desktop / root pane names (``桌面 1``, ``Desktop 2``, …). Trailing
+# recorded-only hops of this form may be missing from live ControlView climbs.
+_UIA_DESKTOP_ROOT_PARENT_NAME_RE = re.compile(
+    r"^(?:桌面|desktop)(?:\s+\d+)?$",
+    re.IGNORECASE,
+)
+
+
 def parent_signature_usable(signature: Any) -> bool:
     """True when a recorded parent fingerprint can gate replay.
 
@@ -1851,6 +1859,20 @@ def parent_signature_usable(signature: Any) -> bool:
         return False
     return bool(control_type)
 
+
+
+def is_uia_desktop_root_parent(signature: Any) -> bool:
+    """True when ``signature`` names the UIA Desktop / shell root pane.
+
+    Matches canonicalized ``桌面`` / ``Desktop`` with an optional monitor
+    index (``桌面 1``, ``Desktop 2``). Does not key on ``control_type`` —
+    Desktop is often recorded as ``input`` / ``pane``.
+    """
+    sig = _normalize_parent_signature(signature)
+    name = canonicalize_uia_shell_status_label(str(sig.get("name") or ""))
+    if not name:
+        return False
+    return bool(_UIA_DESKTOP_ROOT_PARENT_NAME_RE.match(name))
 
 def parent_signatures_agree(recorded: Any, live: Any) -> bool:
     """True when live parent soft-agrees with a usable recorded signature.
@@ -1886,13 +1908,17 @@ def parents_chains_agree(recorded: Any, live: Any) -> bool:
     chrome nodes in the recorded chain are skipped without consuming a live
     node when the live peer is also unusable; otherwise live advances with
     recorded. Empty recorded chain never vetoes.
+
+    When live runs out first, remaining usable recorded ancestors still agree
+    if each is a Desktop/shell root (``桌面 1``, ``Desktop``, …) — ControlView
+    climbs often stop at the top-level window and omit that hop.
     """
     rec_chain = _normalize_parents_chain(recorded)
     liv_chain = _normalize_parents_chain(live)
     if not rec_chain:
         return True
     live_i = 0
-    for rec in rec_chain:
+    for rec_i, rec in enumerate(rec_chain):
         if not parent_signature_usable(rec):
             # Skip weak recorded chrome; also skip a matching weak live peer.
             if live_i < len(liv_chain) and not parent_signature_usable(
@@ -1901,7 +1927,14 @@ def parents_chains_agree(recorded: Any, live: Any) -> bool:
                 live_i += 1
             continue
         if live_i >= len(liv_chain):
-            return False
+            # Live prefix: accept only when every remaining usable recorded
+            # ancestor is Desktop/shell root chrome.
+            for rest in rec_chain[rec_i:]:
+                if not parent_signature_usable(rest):
+                    continue
+                if not is_uia_desktop_root_parent(rest):
+                    return False
+            return True
         if not parent_signatures_agree(rec, liv_chain[live_i]):
             return False
         live_i += 1

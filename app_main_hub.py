@@ -4181,7 +4181,8 @@ class MainHub(ctk.CTk):
         self._restore_hub_after_final_capture()
         if run_dir is None:
             self._set_hub_controls_idle()
-            self._status.configure(text="錄製已停止。")
+            # Empty fresh recordings discard the folder in finalize_stop.
+            self._status.configure(text="錄製已停止（無步驟，未建立資料夾）。")
             return
         if analyze and self._analysis_cancel_event.is_set():
             self._set_hub_controls_idle()

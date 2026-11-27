@@ -1874,7 +1874,76 @@ def test_delete_all_pending_chars_emits_no_text_input(tmp_path) -> None:
             session.stop()
 
     assert session.event_count() == 0
-    assert not (run_dir / "events" / "event_001.json").is_file()
+    assert not run_dir.exists()
+    assert session.run_dir() is None
+
+
+def test_stop_without_steps_discards_new_recording_folder(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        assert run_dir.is_dir()
+        try:
+            pass
+        finally:
+            finalized = session.stop()
+
+    assert finalized is None
+    assert not run_dir.exists()
+    assert session.event_count() == 0
+    assert session.run_dir() is None
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_continue_recording_stop_without_new_steps_keeps_folder(tmp_path) -> None:
+    existing = tmp_path / "opened_recording"
+    (existing / "events").mkdir(parents=True)
+    (existing / "screenshots").mkdir()
+    (existing / "yolo_ocr").mkdir()
+    seed = {
+        "index": 1,
+        "timestamp_utc": "2026-01-01T00:00:00+00:00",
+        "kind": "click",
+        "cursor_xy": [10, 10],
+        "screenshot_path": "screenshots/event_001.jpeg",
+    }
+    (existing / "events" / "event_001.json").write_text(
+        json.dumps(seed),
+        encoding="utf-8",
+    )
+    (existing / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": "opened_recording",
+                "started_at_utc": "2026-01-01T00:00:00+00:00",
+                "stopped_at_utc": "2026-01-01T00:01:00+00:00",
+                "event_count": 1,
+                "events": ["events/event_001.json"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    session = RecordingSession(runs_root=tmp_path / "unused_root")
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start(existing_run_dir=existing)
+        try:
+            pass
+        finally:
+            finalized = session.stop()
+
+    assert finalized == existing
+    assert run_dir == existing
+    assert existing.is_dir()
+    assert (existing / "session.json").is_file()
+    assert (existing / "events" / "event_001.json").is_file()
 
 
 def test_mouse_click_inside_ignore_rect_is_skipped(tmp_path) -> None:

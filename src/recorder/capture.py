@@ -4,6 +4,7 @@ import copy
 import ctypes
 import os
 import queue
+import shutil
 import threading
 import time
 from collections import deque
@@ -1202,6 +1203,9 @@ class RecordingSession:
         # Full idle ElementFromPoint payload for press-time EFP fallback.
         self._idle_efp_payload: dict[str, Any] | None = None
         self._finalizing = False
+        # True when ``start()`` created a new folder; empty stop may delete it.
+        # Continue-into-existing recordings keep the folder even with no new steps.
+        self._created_run_dir = False
 
     def set_on_event(self, callback: Callable[[RecordedEvent], None] | None) -> None:
         self._on_event = callback
@@ -1270,6 +1274,7 @@ class RecordingSession:
                     raw_run_id = session.get("run_id")
                     if isinstance(raw_run_id, str) and raw_run_id.strip():
                         run_id = raw_run_id.strip()
+                created_run_dir = False
             else:
                 run_id = unique_run_folder_name("recording")
                 run_dir = self._runs_root / run_id
@@ -1279,11 +1284,13 @@ class RecordingSession:
                 (run_dir / "yolo_ocr").mkdir(exist_ok=True)
                 next_index = 1
                 started_at = utc_now_iso()
+                created_run_dir = True
             self._run_dir = run_dir
             self._run_id = run_id
             self._events = []
             self._next_index = next_index
             self._started_at = started_at
+            self._created_run_dir = created_run_dir
             self._ignore_rect_provider = provider
             self._accepting_input = False
             self._pressed_modifiers = set()
@@ -1581,6 +1588,7 @@ class RecordingSession:
             run_dir = self._run_dir
             run_id = self._run_id
             started_at = self._started_at
+            created_run_dir = self._created_run_dir
             worker = self._worker_thread
 
         if worker is not None and worker.is_alive():
@@ -1602,6 +1610,28 @@ class RecordingSession:
                     on_after_screenshot()
                 except Exception:
                     pass
+            return None
+
+        event_paths = recording_event_paths(run_dir)
+        # Fresh recording with no steps: drop the folder instead of keeping an
+        # empty shell (session.json / HTML / index entry).
+        if created_run_dir and not event_paths and not events:
+            if on_after_screenshot is not None:
+                try:
+                    on_after_screenshot()
+                except Exception:
+                    pass
+            try:
+                shutil.rmtree(run_dir)
+            except OSError:
+                pass
+            with self._lock:
+                self._finalizing = False
+                self._run_dir = None
+                self._run_id = None
+                self._started_at = None
+                self._created_run_dir = False
+                self._events = []
             return None
 
         # Capture settled UI before the hub restores (caller deiconifies after this).
@@ -1638,6 +1668,7 @@ class RecordingSession:
 
         with self._lock:
             self._finalizing = False
+            self._created_run_dir = False
         return run_dir
 
     def stop(self) -> Path | None:

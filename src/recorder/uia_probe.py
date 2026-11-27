@@ -1696,8 +1696,11 @@ def uia_text_element_at_point(
     ``ElementFromPoint`` can see a control that ``FindAll`` on the top-level
     hwnd does not return (Word's start page is one of those). The third value is
     a ``UIA_CONTROL_TYPE_SUFFIX`` token (``button``, ``text``, …) or ``""``.
-    Name and Value are the raw UIA strings before composition. Marshals onto
-    the UIA worker thread.
+    Name and Value are the raw UIA strings before composition. When the raw
+    leaf cannot open the UIA hub (e.g. weak ``CoreInput``), the same budgeted
+    point-child drill as :func:`element_from_point_name_value` may promote a
+    usable labeled descendant so replay EFP gates match recorded Names.
+    Marshals onto the UIA worker thread.
     """
     from src.recorder.uia_thread import uia_call
 
@@ -2158,6 +2161,31 @@ def _walk_efp_point_children(
         _com_release(walker)
 
 
+def _promote_weak_efp_leaf_element_if_needed(
+    automation: ctypes.c_void_p,
+    element: ctypes.c_void_p,
+    x: int,
+    y: int,
+) -> ctypes.c_void_p:
+    """If ``element`` is a weak EFP hub, replace it with a promoted point-child.
+
+    Used by replay ``uia_text_element_at_point`` so live Name/Value matches the
+    recording promote path (``CoreInput`` → Search tile). Releases ``element``
+    when replaced; caller always owns the returned pointer.
+    """
+    leaf: dict[str, Any] = {}
+    _apply_efp_leaf_fields(leaf, element)
+    if efp_payload_opens_uia_hub(leaf):
+        return element
+    promoted, _children = _efp_point_children_and_promote(
+        automation, element, int(x), int(y)
+    )
+    if promoted is None:
+        return element
+    _com_release(element)
+    return promoted
+
+
 def _efp_point_children_and_promote(
     automation: ctypes.c_void_p,
     element: ctypes.c_void_p,
@@ -2364,6 +2392,12 @@ def _uia_text_element_at_point_impl(
         element = _element_from_point(automation, int(x), int(y))
         if not element:
             return None
+        # Match recording ``element_from_point_name_value``: weak hosts such as
+        # Search ``CoreInput`` must drill point-children so replay EFP Name/Value
+        # gates see the promoted tile (e.g. ``Launch 檔案總管``), not the host.
+        element = _promote_weak_efp_leaf_element_if_needed(
+            automation, element, int(x), int(y)
+        )
         label, name, value = _element_label_parts(element)
         label = label.strip()
         name = str(name or "").strip()

@@ -1654,6 +1654,91 @@ def test_efp_point_children_and_promote_climbs_one_parent(monkeypatch) -> None:
     assert child_el in released
 
 
+def test_promote_weak_efp_leaf_element_if_needed_replaces_coreinput(
+    monkeypatch,
+) -> None:
+    """Replay EFP probe helper: CoreInput host → Launch 檔案總管 tile."""
+    from src.recorder import uia_probe as mod
+
+    host = object()
+    tile = object()
+    released: list[object] = []
+
+    def fake_apply(out, element, automation=None):
+        out.clear()
+        if element is host:
+            out.update(
+                {
+                    "name": "CoreInput",
+                    "value": "",
+                    "control_type": "input",
+                    "bbox": [522, 155, 832, 864],
+                }
+            )
+        else:
+            out.update(
+                {
+                    "name": "Launch 檔案總管",
+                    "value": "",
+                    "control_type": "hyperlink",
+                    "bbox": [882, 559, 114, 111],
+                }
+            )
+
+    monkeypatch.setattr(mod, "_apply_efp_leaf_fields", fake_apply)
+    monkeypatch.setattr(
+        mod,
+        "_efp_point_children_and_promote",
+        lambda _a, _e, _x, _y: (
+            tile,
+            [
+                {
+                    "name": "Launch 檔案總管",
+                    "value": "",
+                    "control_type": "hyperlink",
+                    "bbox": [882, 559, 114, 111],
+                }
+            ],
+        ),
+    )
+    monkeypatch.setattr(mod, "_com_release", lambda ptr: released.append(ptr))
+
+    out = mod._promote_weak_efp_leaf_element_if_needed(None, host, 940, 591)
+    assert out is tile
+    assert host in released
+
+
+def test_promote_weak_efp_leaf_element_if_needed_keeps_usable_leaf(
+    monkeypatch,
+) -> None:
+    from src.recorder import uia_probe as mod
+
+    leaf_el = object()
+    promote_calls: list[tuple] = []
+
+    def fake_apply(out, element, automation=None):
+        out.clear()
+        out.update(
+            {
+                "name": "Launch 檔案總管",
+                "value": "",
+                "control_type": "hyperlink",
+                "bbox": [882, 559, 114, 111],
+            }
+        )
+
+    monkeypatch.setattr(mod, "_apply_efp_leaf_fields", fake_apply)
+    monkeypatch.setattr(
+        mod,
+        "_efp_point_children_and_promote",
+        lambda *a, **k: promote_calls.append((a, k)) or (None, []),
+    )
+
+    out = mod._promote_weak_efp_leaf_element_if_needed(None, leaf_el, 940, 591)
+    assert out is leaf_el
+    assert promote_calls == []
+
+
 def test_usable_efp_leaf_skips_point_child_drill() -> None:
     leaf = {
         "name": "G8",

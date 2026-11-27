@@ -772,6 +772,53 @@ def test_verify_prefer_synth_first_snaps_to_matching_pool() -> None:
     assert point == (40, 10)
 
 
+def test_verify_launch_tile_misses_on_raw_coreinput_efp() -> None:
+    """Search host CoreInput must not satisfy recorded Launch tile Name."""
+    pool = [_det(940, 591, text="資料夾", class_name="element")]
+
+    def probe(x: int, y: int):
+        return ("label", (522, 155, 832, 864), "input", "CoreInput", "")
+
+    det, point, reason = _verify_geometry_candidates_with_efp(
+        pool,
+        synth=(940, 591),
+        geom_det=None,
+        recorded_name="Launch 檔案總管",
+        recorded_value="",
+        point_probe_fn=probe,
+    )
+    assert reason == "miss"
+    assert det is None
+    assert point is None
+
+
+def test_verify_launch_tile_hits_after_point_child_promote() -> None:
+    """Promoted Launch Name (recording child-walk) passes the EFP gate."""
+    pool = [_det(940, 591, text="資料夾", class_name="element")]
+
+    def probe(x: int, y: int):
+        # uia_text_element_at_point after CoreInput → Launch promote.
+        return (
+            "Launch 檔案總管",
+            (882, 559, 114, 111),
+            "hyperlink",
+            "Launch 檔案總管",
+            "",
+        )
+
+    det, point, reason = _verify_geometry_candidates_with_efp(
+        pool,
+        synth=(940, 591),
+        geom_det=None,
+        recorded_name="Launch 檔案總管",
+        recorded_value="",
+        point_probe_fn=probe,
+    )
+    assert reason == "hit"
+    assert det is not None
+    assert point == (940, 591)
+
+
 def test_verify_pool_first_findall_over_synth_coreinput() -> None:
     """Pool-first: FindAll Launch box with CoreInput EFP beats bare synth."""
     geom = _simple_landmark_geometry(

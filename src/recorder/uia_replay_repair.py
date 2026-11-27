@@ -221,8 +221,15 @@ def build_yolo_ocr_fallback_from_vision(
     twin_candidates = twin.get("candidates")
     if not isinstance(twin_candidates, list) or not twin_candidates:
         return None
+    from src.recorder.vision_context import trim_vision_candidates_near_click
+
     twin_vision = {**twin, "vision_path": "yolo_ocr"}
     twin_vision.pop("vision_path_reason", None)
+    # Dense Excel OCR twins can be hundreds of cells; nearby/geometry only need
+    # the click neighborhood (full payload stays in yolo_ocr/ on disk).
+    trimmed = trim_vision_candidates_near_click(twin_vision)
+    if isinstance(trimmed, dict):
+        twin_vision = trimmed
     destination = vision.get("destination")
     twin_destination: dict[str, Any] | None = None
     if isinstance(destination, dict):
@@ -231,6 +238,9 @@ def build_yolo_ocr_fallback_from_vision(
             if dest_twin["candidates"]:
                 twin_destination = {**dest_twin, "vision_path": "yolo_ocr"}
                 twin_destination.pop("vision_path_reason", None)
+                dest_trimmed = trim_vision_candidates_near_click(twin_destination)
+                if isinstance(dest_trimmed, dict):
+                    twin_destination = dest_trimmed
     from src.recorder.analyze import rebuild_pointer_instruction
     from src.recorder.compile_tool_calls import compile_tool_calls
 

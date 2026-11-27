@@ -1015,6 +1015,48 @@ async def analyze_event_to_cache(
             )
         return None
 
+    # Prefer deterministic rebuild (including YOLO twin) over burning LLM time.
+    rebuilt = rebuild_pointer_instruction(
+        event,
+        vision,
+        destination if destination else None,
+        include_nearby=True,
+    )
+    if isinstance(rebuilt, str) and rebuilt.strip():
+        if log_info is not None:
+            log_info(
+                f"analyze_event_to_cache skip LLM event={event.index} "
+                f"kind={event.kind}: deterministic rebuild"
+            )
+        return _instruction_result(rebuilt.strip(), event, vision, destination)
+    twin = vision.get("yolo_ocr_fallback_vision")
+    if isinstance(twin, dict) and isinstance(twin.get("candidates"), list) and twin["candidates"]:
+        twin_vision = {**twin, "vision_path": "yolo_ocr"}
+        twin_dest = None
+        if isinstance(destination, dict):
+            dest_twin = destination.get("yolo_ocr_fallback_vision")
+            if (
+                isinstance(dest_twin, dict)
+                and isinstance(dest_twin.get("candidates"), list)
+                and dest_twin["candidates"]
+            ):
+                twin_dest = {**dest_twin, "vision_path": "yolo_ocr"}
+        twin_rebuilt = rebuild_pointer_instruction(
+            event,
+            twin_vision,
+            twin_dest,
+            include_nearby=True,
+        )
+        if isinstance(twin_rebuilt, str) and twin_rebuilt.strip():
+            if log_info is not None:
+                log_info(
+                    f"analyze_event_to_cache skip LLM event={event.index} "
+                    f"kind={event.kind}: deterministic YOLO twin rebuild"
+                )
+            return _instruction_result(
+                twin_rebuilt.strip(), event, twin_vision, twin_dest or {}
+            )
+
     local = vision.get("local_cursor")
     if isinstance(local, (list, tuple)) and len(local) == 2:
         cursor_x, cursor_y = local[0], local[1]

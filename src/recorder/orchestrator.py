@@ -960,22 +960,26 @@ def _write_event_analysis(
     next_windows_before: list[Any] | None = None,
     time_profile: list[dict[str, Any]] | None = None,
     run_dir: Path | None = None,
-) -> None:
+) -> list[dict[str, Any]]:
+    """Write ``analysis/event_NNN.json``; return assemble timing profile entries."""
     from src.recorder.compile_tool_calls import compile_tool_calls
     from src.recorder.uia_replay_repair import (
         build_yolo_ocr_fallback_from_vision,
         yolo_ocr_fallback_payload,
     )
 
+    assemble_started = time.perf_counter()
     resolved_run_dir = Path(run_dir) if run_dir is not None else analysis_path.parent.parent
     # Pass run_dir so landmark_geometry can fall back to yolo_ocr/ when the
     # in-memory vision payload is candidate-thin (analysis only keeps text).
+    compile_started = time.perf_counter()
     tool_calls = compile_tool_calls(
         event,
         instruction,
         vision=vision,
         run_dir=resolved_run_dir,
     )
+    compile_seconds = _round_seconds(time.perf_counter() - compile_started)
     # Signal samples are often peeled to sidecar paths on disk. Hydrate before
     # building window_verify, and fall back to this step's after-foreground when
     # the caller omitted later_foregrounds (otherwise every appeared entry drops).
@@ -1013,6 +1017,7 @@ def _write_event_analysis(
     )
     window_verify = omit_foreground_when_structural(window_verify)
     disabled = _preserved_window_verify_disabled(analysis_path, window_verify)
+    fallback_started = time.perf_counter()
     fallback = build_yolo_ocr_fallback_from_vision(
         event,
         vision,
@@ -1025,6 +1030,18 @@ def _write_event_analysis(
             existing = None
         if isinstance(existing, dict):
             fallback = yolo_ocr_fallback_payload(existing.get("yolo_ocr_fallback"))
+    fallback_seconds = _round_seconds(time.perf_counter() - fallback_started)
+    profile = list(time_profile or [])
+    assemble_seconds = _round_seconds(time.perf_counter() - assemble_started)
+    profile.append(
+        {
+            "kind": "assemble",
+            "label": "Write analysis JSON",
+            "duration_seconds": assemble_seconds,
+            "assemble_compile_seconds": compile_seconds,
+            "assemble_fallback_seconds": fallback_seconds,
+        }
+    )
     write_json(
         analysis_path,
         {
@@ -1075,12 +1092,13 @@ def _write_event_analysis(
                 else {}
             ),
             **(
-                {"time_profile": time_profile}
-                if time_profile
+                {"time_profile": profile}
+                if profile
                 else {}
             ),
         },
     )
+    return profile
 
 
 def _count_pointer_yolo_ocr_failures(
@@ -1449,8 +1467,7 @@ async def analyze_recording_session(
                 expected_outcomes.append(None)
                 previous_instruction_event = event
                 event_time_profile = _build_event_analysis_time_profile(prepared)
-                prepared.time_profile = event_time_profile
-                _write_event_analysis(
+                prepared.time_profile = _write_event_analysis(
                     analysis_path,
                     event=event,
                     result=result,
@@ -1467,6 +1484,27 @@ async def analyze_recording_session(
                     time_profile=event_time_profile,
                     run_dir=run_dir,
                 )
+                assemble_entry = next(
+                    (
+                        entry
+                        for entry in prepared.time_profile
+                        if isinstance(entry, dict) and entry.get("kind") == "assemble"
+                    ),
+                    None,
+                )
+                assemble_s = (
+                    float(assemble_entry["duration_seconds"])
+                    if isinstance(assemble_entry, dict)
+                    and isinstance(assemble_entry.get("duration_seconds"), (int, float))
+                    else None
+                )
+                if assemble_s is not None and assemble_s >= 2.0:
+                    compile_s = assemble_entry.get("assemble_compile_seconds")
+                    fallback_s = assemble_entry.get("assemble_fallback_seconds")
+                    log_info(
+                        f"assemble event={event.index} {assemble_s:.3f}s "
+                        f"compile={compile_s} fallback={fallback_s}"
+                    )
                 log_info(f"cached event {event.index}: {instruction}")
 
         yolo_stats: dict[str, Any] | None = None

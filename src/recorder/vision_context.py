@@ -111,6 +111,10 @@ _MAX_PICK_TARGET_OPTIONS = 80
 _MAX_NEARBY_LANDMARK_OPTIONS_PER_SIDE = 10
 # Prefer at least this many multi-char text neighbors in each directional cell.
 _MIN_MULTI_CHAR_TEXT_PER_SIDE = 2
+# Cap uniqueness-grow trials (Excel sheets can have hundreds of lookalike peers).
+_MAX_UNIQUENESS_GROW_TRIALS = 24
+# Keep primary + nearest-N when rebuilding YOLO fallback / dense nearby work.
+_NEARBY_COMPILE_CANDIDATE_CAP = 48
 _DRAG_OFFSET_THRESHOLD_PX = 5
 # OCR boxes hug glyphs; pad so a near-miss click still counts as on-target.
 _BBOX_HIT_TOLERANCE_PX = 4
@@ -2398,12 +2402,14 @@ def _grow_locating_hints_for_prefilter_uniqueness(
     prefix_hints: list[NearbyHint],
     seed: list[NearbyHint],
     pool: list[_LocateLandmark],
+    max_trials: int = _MAX_UNIQUENESS_GROW_TRIALS,
 ) -> list[NearbyHint]:
     """Greedily add pool landmarks until prefilter keeps only ``primary``.
 
-    Walks the full eligible ``pool`` (no addition cap). Returns the locating
-    portion (not ``prefix_hints``). On failure, returns the best-effort locating
-    set with the smallest kept peer set (seed if none improve).
+    Tries at most ``max_trials`` additions (Excel OCR dumps can have hundreds of
+    lookalike peers). Returns the locating portion (not ``prefix_hints``). On
+    failure, returns the best-effort locating set with the smallest kept peer
+    set (seed if none improve).
     """
     used_labels = {hint.label for hint in prefix_hints} | {hint.label for hint in seed}
     current = list(seed)
@@ -2415,26 +2421,27 @@ def _grow_locating_hints_for_prefilter_uniqueness(
         return current
     if best_kept <= 0:
         best_kept = len(peers) + 1
+    current_kept = best_kept
+    trials = 0
 
     for item in pool:
+        if trials >= max(0, int(max_trials)):
+            break
         label = item.hint.label
         if not label or label in used_labels:
             continue
+        trials += 1
         trial = [*current, item.hint]
         kept, trial_unique = _prefilter_kept_among_peers(
             primary, peers, detections, [*prefix_hints, *trial]
         )
         if trial_unique:
             return trial
-        current_kept, _ = _prefilter_kept_among_peers(
-            primary, peers, detections, [*prefix_hints, *current]
-        )
-        if current_kept <= 0:
-            current_kept = len(peers) + 1
         if kept <= 0 or kept >= current_kept:
             continue
         current = trial
         used_labels.add(label)
+        current_kept = kept
         if kept < best_kept:
             best = list(trial)
             best_kept = kept
@@ -2449,6 +2456,7 @@ def _pick_minimal_locating_hints(
     primary_bbox: tuple[int, int, int, int] | None,
     click_xy: tuple[int, int] | None,
     prefix_hints: list[NearbyHint] | None = None,
+    grow_for_uniqueness: bool = True,
 ) -> list[NearbyHint]:
     """Closest unique multi-char text per side (else icon), plus spare neighbors.
 
@@ -2457,12 +2465,17 @@ def _pick_minimal_locating_hints(
     multi-char text (closest first); when none remain, unused known icons fill
     the rest.
 
-    When the primary has ambiguous peers (same-value text/icon, or multiple
-    inputs/scrollbars), grow the seed with more eligible landmarks until replay's
-    ``_prefilter_anchors_by_nearby`` keeps only the primary. ``prefix_hints``
-    (forced container / scrollbar-content) count toward that check but are not
-    returned. If uniqueness cannot be proven after exhausting the eligible pool,
-    keep the best-effort set (smallest kept peer set, else the original seed).
+    When ``grow_for_uniqueness`` is True and the primary has ambiguous peers
+    (same-value text/icon, or multiple inputs/scrollbars), grow the seed with
+    more eligible landmarks until replay's ``_prefilter_anchors_by_nearby``
+    keeps only the primary (budgeted). ``prefix_hints`` (forced container /
+    scrollbar-content) count toward that check but are not returned. If
+    uniqueness cannot be proven after the trial budget, keep the best-effort
+    set (smallest kept peer set, else the original seed).
+
+    Pass ``grow_for_uniqueness=False`` for ``hub_source=uia_efp`` hubs: replay
+    verifies with live EFP Name/Value (+ parents), so OCR uniqueness-grow is
+    unused work.
     """
     if len(candidates) < 2 or not isinstance(candidates[0], dict):
         return []
@@ -2495,6 +2508,9 @@ def _pick_minimal_locating_hints(
         picked.append(item.hint)
         used_labels.add(label)
         spare_count -= 1
+
+    if not grow_for_uniqueness:
+        return picked
 
     detections = _candidates_to_detections(candidates)
     # Re-bind primary to the detection instance from ``detections`` so peer
@@ -2660,10 +2676,68 @@ def _collect_scrollbar_adjacent_content_hints(
     return [NearbyHint(label=synth, side=default_side)]
 
 
+def _vision_skips_nearby_uniqueness_grow(vision: dict[str, Any] | None) -> bool:
+    """True when primary hub is ``uia_efp`` (replay verifies via EFP Name/Value)."""
+    if not isinstance(vision, dict):
+        return False
+    candidates = vision.get("candidates") or []
+    if not candidates or not isinstance(candidates[0], dict):
+        return False
+    source = str(candidates[0].get("source") or "").strip().lower()
+    return source == "uia_efp"
+
+
+def trim_vision_candidates_near_click(
+    vision: dict[str, Any] | None,
+    *,
+    max_candidates: int = _NEARBY_COMPILE_CANDIDATE_CAP,
+) -> dict[str, Any] | None:
+    """Return a copy of ``vision`` keeping primary + nearest ``max_candidates-1``.
+
+    Used when rebuilding YOLO fallback instructions / landmark geometry so dense
+    Excel OCR dumps (hundreds of cells) do not dominate nearby compile cost.
+    Full ``yolo_ocr/event_NNN.json`` stays on disk for HTML/debug.
+    """
+    if not isinstance(vision, dict):
+        return vision
+    candidates = vision.get("candidates")
+    if not isinstance(candidates, list) or len(candidates) <= max(1, int(max_candidates)):
+        return vision
+    primary = candidates[0]
+    if not isinstance(primary, dict):
+        return vision
+    click_xy = _click_xy_from_vision(vision, primary=primary)
+    ranked: list[tuple[float, int, dict[str, Any]]] = []
+    for order, candidate in enumerate(candidates[1:]):
+        if not isinstance(candidate, dict):
+            continue
+        bbox = _as_bbox_xywh(candidate.get("bbox"))
+        if click_xy is not None and bbox is not None:
+            dist_sq = _point_to_bbox_distance_sq(click_xy[0], click_xy[1], bbox)
+        else:
+            dist_sq = float(order)
+        ranked.append((dist_sq, order, candidate))
+    ranked.sort(key=lambda row: (row[0], row[1]))
+    keep = max(0, int(max_candidates) - 1)
+    trimmed = [primary, *[row[2] for row in ranked[:keep]]]
+    out = dict(vision)
+    out["candidates"] = trimmed
+    out["detection_count"] = len(trimmed)
+    out["candidate_text"] = _candidate_text_from_dicts(trimmed)
+    out["field_context"] = format_field_context_hint(
+        {
+            "candidates": trimmed,
+            "local_cursor": vision.get("local_cursor"),
+        }
+    )
+    return out
+
+
 def collect_nearby_hints(
     vision: dict[str, Any],
     *,
     instruction: str,
+    grow_for_uniqueness: bool | None = None,
 ) -> list[NearbyHint]:
     """Collect directed landmarks near the click.
 
@@ -2675,7 +2749,10 @@ def collect_nearby_hints(
     side (no text and no icon); spares prefer unused multi-character text, then
     unused known icons. When the primary is ambiguous among same-value text/icon
     peers or multiple inputs/scrollbars, locating hints grow until replay's
-    nearby prefilter keeps only the primary (best-effort if still tied).
+    nearby prefilter keeps only the primary (budgeted; skipped for
+    ``uia_efp`` hubs).
+
+    Pass ``grow_for_uniqueness`` to override the auto gate (``uia_efp`` → False).
     """
     candidates = vision.get("candidates") or []
     if len(candidates) < 2 or not isinstance(candidates[0], dict):
@@ -2698,6 +2775,11 @@ def collect_nearby_hints(
     )
     reserved = {hint.label for hint in forced} | {hint.label for hint in content_hints}
     prefix_hints = [*forced, *content_hints]
+    do_grow = (
+        bool(grow_for_uniqueness)
+        if grow_for_uniqueness is not None
+        else not _vision_skips_nearby_uniqueness_grow(vision)
+    )
     locating = _pick_minimal_locating_hints(
         candidates,
         instruction=instruction,
@@ -2705,6 +2787,7 @@ def collect_nearby_hints(
         primary_bbox=primary_bbox,
         click_xy=click_xy,
         prefix_hints=prefix_hints,
+        grow_for_uniqueness=do_grow,
     )
     return [*prefix_hints, *locating]
 

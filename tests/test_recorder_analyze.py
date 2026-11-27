@@ -433,6 +433,95 @@ def test_collect_nearby_hints_grows_until_unique_among_multiple_inputs() -> None
     )
 
 
+def test_collect_nearby_hints_skips_grow_for_uia_efp_primary() -> None:
+    """``uia_efp`` hubs use seed-only nearby (replay verifies via EFP Name/Value)."""
+    import time
+
+    from src.recorder.vision_context import collect_nearby_hints
+
+    primary = {
+        **_text_candidate([100, 100, 40, 16], "N14"),
+        "source": "uia_efp",
+        "control_type": "data_item",
+    }
+    # Many lookalike peers that would otherwise force a long uniqueness walk.
+    peers = [
+        _text_candidate([100 + (i % 20) * 40, 100 + (i // 20) * 22, 30, 16], f"N{i}")
+        for i in range(80)
+    ]
+    landmarks = [
+        _text_candidate([20, 100, 20, 14], "14"),
+        _text_candidate([100, 40, 30, 14], "設定"),
+    ]
+    vision = {
+        "used_vision": True,
+        "local_cursor": [120, 108],
+        "vision_path": "uia",
+        "candidates": [primary, *peers, *landmarks],
+    }
+    started = time.perf_counter()
+    hints = collect_nearby_hints(vision, instruction="點擊「N14」資料項目")
+    elapsed = time.perf_counter() - started
+    assert elapsed < 1.0
+    assert hints  # seed directed landmarks still present
+
+
+def test_grow_locating_hints_respects_trial_budget() -> None:
+    """Ambiguous peer sets finish under a tight bound via the trial cap."""
+    import time
+
+    from src.recorder.vision_context import (
+        _MAX_UNIQUENESS_GROW_TRIALS,
+        _grow_locating_hints_for_prefilter_uniqueness,
+        _candidates_to_detections,
+        _dict_to_detection,
+        _eligible_locate_landmarks,
+        _ambiguous_primary_peers,
+    )
+    from src.common.nearby_side import NearbyHint
+
+    primary = _text_candidate([500, 500, 20, 16], "X")
+    peers = [
+        _text_candidate([20 + (i % 25) * 30, 20 + (i // 25) * 20, 18, 14], "X")
+        for i in range(200)
+    ]
+    # Unique-looking labels that never fully isolate the primary among 200 peers.
+    decoys = [
+        _text_candidate([10 + i * 8, 700, 16, 12], f"L{i}")
+        for i in range(60)
+    ]
+    candidates = [primary, *peers, *decoys]
+    primary_det = _dict_to_detection(primary)
+    assert primary_det is not None
+    detections = _candidates_to_detections(candidates)
+    primary_bound = next(
+        det for det in detections if det.text == primary_det.text and det.bbox == primary_det.bbox
+    )
+    amb_peers = _ambiguous_primary_peers(primary_bound, detections)
+    assert len(amb_peers) >= 50
+    pool = _eligible_locate_landmarks(
+        candidates,
+        instruction="點擊「X」文字",
+        primary=primary_bound,
+        primary_bbox=tuple(primary["bbox"]),
+        click_xy=(510, 508),
+        reserved_labels=set(),
+    )
+    started = time.perf_counter()
+    result = _grow_locating_hints_for_prefilter_uniqueness(
+        primary=primary_bound,
+        peers=amb_peers,
+        detections=detections,
+        prefix_hints=[],
+        seed=[NearbyHint(label="「L0」文字", side=None)],
+        pool=pool,
+        max_trials=_MAX_UNIQUENESS_GROW_TRIALS,
+    )
+    elapsed = time.perf_counter() - started
+    assert isinstance(result, list)
+    assert elapsed < 2.0
+
+
 def test_collect_nearby_hints_grows_until_unique_among_duplicate_text() -> None:
     """Two identical 「確定」文字; directed landmarks isolate the clicked one."""
     from src.recorder.vision_context import collect_nearby_hints

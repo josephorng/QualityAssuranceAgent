@@ -368,8 +368,15 @@ def _move_mouse_call(
             hints = [NearbyHint(label="滾動條", side=None), *hints]
             target_xy = scroll_hover
             min_landmarks = 1
+        geometry_vision = vision
+        if isinstance(vision, dict):
+            from src.recorder.vision_context import trim_vision_candidates_near_click
+
+            trimmed = trim_vision_candidates_near_click(vision)
+            if isinstance(trimmed, dict):
+                geometry_vision = trimmed
         geometry = build_landmark_geometry(
-            vision,
+            geometry_vision,
             hints,
             target_xy=target_xy,
             target_label=resolved,

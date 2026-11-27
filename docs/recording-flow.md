@@ -11,14 +11,16 @@ Interactive overview (open in a browser; switch Replay / Recording): [`uia-repla
 ```mermaid
 flowchart TD
   A[Hub: start RecordingSession] --> B[Live capture]
-  B --> C[events/event_NNN.json<br/>screenshot + EFP parents]
+  B --> C[events/event_NNN.json<br/>screenshot + EFP + parents]
   C --> D[Vision prefetch<br/>yolo_ocr/event_NNN.json]
   A2[Hub: begin_stop / finalize_stop] --> E[session.json + final_after.jpeg]
   E --> F[analyze_recording_session]
-  F --> G{usable EFP leaf?}
+  F --> G{usable press EFP?}
   G -->|yes| H["instruction （UIA） hub_source=uia_efp"]
   G -->|no| I["instruction （YOLO+OCR） no hub_source"]
-  H --> J[analysis/event_NNN.json<br/>tool_calls + YOLO nearby + optional twin]
+  H --> W{weak EFP vs OCR?}
+  W -->|disagree| I
+  W -->|ok| J[analysis/event_NNN.json<br/>tool_calls + YOLO nearby + optional twin]
   I --> K[analysis/event_NNN.json<br/>tool_calls]
   J --> L[Ready for cache replay]
   K --> L
@@ -63,6 +65,8 @@ flowchart LR
 | Capture | `src/recorder/capture.py` → `RecordingSession` |
 | Analyze entry | `main.py` → `analyze_screen_recording` → `orchestrator.analyze_recording_session` |
 
+Press-time FindAll caches are removed (Phase 2); new recordings never attach a budgeted window FindAll snapshot.
+
 ---
 
 ## 2. Event capture
@@ -75,7 +79,7 @@ flowchart TD
   Persist --> Shot[JPEG screenshot]
   Persist --> Notify[Notify hub → vision prefetch]
   Persist --> WinStep[window-step-N thread]
-  WinStep --> Patch[Late-patch window_change / settle UIA / signals]
+  WinStep --> Patch[Late-patch window_change / focused_element / signals]
 ```
 
 A pointer event typically stores:
@@ -83,10 +87,12 @@ A pointer event typically stores:
 - `index`, `kind`, `cursor_xy`, button / modifiers / click count
 - `screenshot_path`, `monitor_index`, `monitor_offset`, `click_window`
 - `element_from_point` — Name / Value / bbox / control_type / **`parents`** (ControlView ancestor chain; worker probe, not the mouse hook)
-- no budgeted FindAll / useful `uia_snapshot` on new recordings (fields absent or empty)
+- **no** `uia_snapshot` / `end_uia_snapshot` on new recordings (fields absent; FindAll walks are gone)
 - later patches: `window_change`, `focused_element`, drag `end_*`
 
-Key APIs: `RecordingSession._persist_queued_event`, `models.write_event_json`.
+Idle vs live EFP: `_resolve_press_element_from_point` may prefer the pre-click idle latch when live Name/Value diverges after press (`idle_fallback` / `idle_only` / `live` in `record.log`).
+
+Key APIs: `RecordingSession._persist_queued_event`, `models.write_event_json`, `element_from_point_name_value`.
 
 ---
 
@@ -124,16 +130,20 @@ Core decision in `_detect_recording_mouse_targets` (`vision_context.py`):
 
 ```mermaid
 flowchart TD
-  YOLO[Always run YOLO+OCR on screenshot] --> EFP{usable press EFP leaf?}
+  YOLO[Always run YOLO+OCR on screenshot] --> EFP{efp_payload_opens_uia_hub?}
   EFP -->|yes| UIA["vision_path = uia<br/>primary source=uia_efp<br/>nearby = YOLO+OCR only<br/>optional yolo_ocr_fallback twin"]
-  EFP -->|no| YO["vision_path = yolo_ocr<br/>primary = YOLO/OCR<br/>omit hub_source"]
+  EFP -->|no| YO["vision_path = yolo_ocr<br/>primary = YOLO/OCR<br/>reason: 沒有可用的 EFP"]
+  UIA --> Weak{_maybe_demote_uia_path_for_weak_efp_ocr_disagree}
+  Weak -->|disagree| YO2["demote → yolo_ocr<br/>弱 EFP 且 OCR 與 UIA 目標不一致"]
+  Weak -->|ok| Keep[keep UIA primary]
 ```
 
-- **Sole UIA hub:** press-time EFP (`source=uia_efp`). No FindAll hub; no `hub_source=findall`.
-- **Nearby / `landmark_geometry`:** YOLO+OCR peers only.
+- **Sole UIA hub:** press-time EFP (`source` / `hub_source=uia_efp`). Opens when EFP is a usable labeled leaf, `data_item`, or WinForms scrollbar thumb (`Position` + bbox) — **no FindAll hub**; never `hub_source=findall`.
+- **Nearby / `landmark_geometry`:** YOLO+OCR peers only (`existing=[]` when injecting the EFP peer).
+- **Weak-EFP demotion:** after a UIA path is chosen, OCR that clearly disagrees with the EFP hub can demote to `vision_path=yolo_ocr`.
 - Compile stamps `hub_source=uia_efp` only for EFP primaries; emits EFP `name` / `value` / `parents` (never singular `parent` / `hub_parent`).
 
-Chrome icons such as `展開節點` are in `_CONTROL_CHROME_ICON_IDS` and can rank as the primary click target over overlapping OCR text.
+Chrome icons such as `展開節點` are in `_CONTROL_CHROME_ICON_IDS` and can rank as the primary click target over overlapping OCR text when EFP is unusable.
 
 Disk: `yolo_ocr/event_NNN.json` (candidates, `vision_path`, optional nested fallback, debug layers).
 
@@ -156,7 +166,7 @@ Disk: `yolo_ocr/event_NNN.json` (candidates, `vision_path`, optional nested fall
 
 Twin build: `build_yolo_ocr_fallback_from_vision` when `vision["yolo_ocr_fallback_vision"]` exists.
 
-> **Note:** live FindAll YOLO→UIA replay repair is **disabled** for new format (EFP already stamped at analysis). Twins remain for soft-miss select. See [`replay-flow.md`](replay-flow.md).
+> **Note:** Budgeted window FindAll walks are gone. Same-run **EFP-based** YOLO→UIA repair can still arm at cache replay for pure `vision_path=yolo_ocr` steps (OCR confirm + live ElementFromPoint). Twins remain for soft-miss select. See [`replay-flow.md`](replay-flow.md).
 
 ---
 
@@ -176,7 +186,7 @@ sequenceDiagram
   Note over Vision: Icon chinese_id=展開節點<br/>UIA often insufficient at glyph
   Vision->>Analyze: vision_path=yolo_ocr (no usable EFP leaf)
   Analyze->>Analysis: （YOLO+OCR）「展開節點」圖示 tool_calls
-  Note over Analysis: Stays YOLO at replay<br/>(no FindAll repair promotion)
+  Note over Analysis: Stays YOLO unless live EFP repair promotes at replay
 ```
 
 ---
@@ -189,9 +199,10 @@ sequenceDiagram
 | Hub | `app_main_hub.py` | `_start_recording`, `_stop_recording` |
 | Analyze | `src/recorder/orchestrator.py` | `analyze_recording_session`, `prepare_event_vision`, `_write_event_analysis` |
 | Instructions | `src/recorder/analyze.py` | `analyze_event_to_cache`, `instruction_for_click` |
-| UIA vs YOLO | `src/recorder/vision_context.py` | `_detect_recording_mouse_targets`, `recording_uia_skip_reason` |
-| Tool compile | `src/recorder/compile_tool_calls.py` | `compile_tool_calls`, `_move_mouse_call` |
-| Twin | `src/recorder/uia_replay_repair.py` | `build_yolo_ocr_fallback_from_vision` |
+| UIA vs YOLO | `src/recorder/vision_context.py` | `_detect_recording_mouse_targets`, `_press_efp_opens_uia_hub`, `_maybe_demote_uia_path_for_weak_efp_ocr_disagree` |
+| EFP probe | `src/recorder/uia_input_boxes.py` | `element_from_point_name_value`, `efp_payload_opens_uia_hub` |
+| Tool compile | `src/recorder/compile_tool_calls.py` | `compile_tool_calls`, `_move_mouse_call`, `_hub_source_from_vision` |
+| Twin / repair | `src/recorder/uia_replay_repair.py` | `build_yolo_ocr_fallback_from_vision`, `yolo_ocr_fallback_slots`, `replay_repair_slots` |
 | Geometry | `src/recorder/landmark_geometry.py` | `build_landmark_geometry` |
 
 ## Disk artifacts
